@@ -1,0 +1,21 @@
+# mirror-coordinator: the gasless epoch coordinator (off-chain relay).
+#
+# Accepts commitments, groups them into shared epochs, enforces the
+# k-anonymity floor, and settles closed epochs on-chain from a rotating
+# fee-payer set with a normalized transaction shape.
+[package]
+name = "mirror-coordinator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Gasless epoch coordinator for mirror-pool: shared-epoch batching, k-floor gating, rotating fee payers"
+
+[dependencies]
+mirror-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

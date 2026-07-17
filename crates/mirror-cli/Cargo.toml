@@ -1,0 +1,22 @@
+# mirror-cli: participant-side CLI (v1 deliverable 5 in docs/ROADMAP.md).
+#
+# Lets a reviewer drive the commit/settle flow by hand: derive a secret,
+# compute the epoch-bound commitment, and inspect pool/epoch status.
+[package]
+name = "mirror-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Participant CLI for mirror-pool: commit an action into the current shared epoch, inspect pool status, and (v2) produce ZK-deniable initiation proofs."
+
+[dependencies]
+mirror-core.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Same hash family mirror-core uses for commitments. Here it only stretches a
+# user-supplied seed into a 32-byte Secret (deterministic, so the flow is
+# testable end to end); v2 replaces seeds with OS randomness + encrypted notes.
+sha2.workspace = true

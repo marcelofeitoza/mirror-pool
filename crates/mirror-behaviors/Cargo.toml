@@ -1,0 +1,11 @@
+[package]
+name = "mirror-behaviors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pooled-action adapters for mirror-pool: the Behavior trait plus Jupiter-swap and jitoSOL-stake stubs that give every epoch participant an identical, fixed action shape."
+
+[dependencies]
+mirror-core.workspace = true
+anyhow.workspace = true

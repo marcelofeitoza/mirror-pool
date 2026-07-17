@@ -1,0 +1,3 @@
+# Required by older cargo-build-sbf toolchains; harmless on newer ones.
+[target.bpfel-unknown-unknown.dependencies.std]
+features = []

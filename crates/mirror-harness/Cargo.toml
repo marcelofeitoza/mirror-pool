@@ -1,0 +1,16 @@
+[package]
+name = "mirror-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Adversarial evaluation harness: measures attacker advantage over the 1/k random-guess baseline for Baseline vs MirrorPool populations"
+
+[dependencies]
+mirror-core.workspace = true
+anyhow.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[[bin]]
+name = "mirror-harness"
+path = "src/main.rs"

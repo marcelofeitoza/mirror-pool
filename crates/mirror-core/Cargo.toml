@@ -1,0 +1,15 @@
+[package]
+name = "mirror-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared types for mirror-pool: commitments, nullifiers, epochs, action classes, k-anonymity accounting, and the on-chain wire format."
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

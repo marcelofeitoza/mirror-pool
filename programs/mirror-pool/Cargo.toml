@@ -1,0 +1,46 @@
+# mirror-pool on-chain program (SBF target).
+#
+# This crate is deliberately a STANDALONE workspace: the empty [workspace]
+# table below stops Cargo from attaching it to the host workspace at the repo
+# root, so `cargo build` / `cargo test` there never try to compile a Solana
+# entrypoint for the host target. Build this crate with:
+#
+#   cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml
+#
+# Because it is outside the host workspace it cannot use the root
+# [workspace.dependencies] table; versions are pinned inline here.
+[package]
+name = "mirror-pool"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/solanabr/mirror-pool"
+description = "Shared-epoch behavioral anonymity pool: INIT_POOL / COMMIT / SETTLE_EPOCH program skeleton (Pinocchio)"
+
+# Keep this crate out of the parent workspace (see header comment).
+[workspace]
+
+[lib]
+# cdylib: the deployable .so produced by cargo build-sbf.
+# lib: lets host-side tests (mollusk, program-test) link the processor directly.
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+# Disable the entrypoint symbols when this crate is linked as a library
+# (unit tests, CPI clients) rather than deployed.
+no-entrypoint = []
+
+[dependencies]
+# Zero-dependency Solana program framework. 0.10.x API: Address + AccountView.
+pinocchio = "0.10"
+# Allocation-free, syscall-backed logging (log! macro).
+pinocchio-log = "0.5"
+
+[lints.rust]
+# pinocchio macros expand cfg(target_os = "solana") / cfg(target_arch = "bpf")
+# inside this crate; declare them valid for check-cfg.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(target_os, values(\"solana\"))",
+    "cfg(target_arch, values(\"bpf\"))",
+] }

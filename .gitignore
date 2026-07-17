@@ -1,0 +1,24 @@
+# Rust
+/target
+**/target
+Cargo.lock.bak
+
+# Solana program build artifacts
+*.so
+programs/*/target
+
+# Local keypairs / secrets — never commit
+*.json.key
+*-keypair.json
+wallets/
+.env
+.env.*
+
+# Local databases / notes
+*.db
+*.db-journal
+notes/
+
+# OS / editor
+.DS_Store
+*.swp
