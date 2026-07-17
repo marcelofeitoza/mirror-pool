@@ -229,6 +229,12 @@ pub mod wire {
         pub const SETTLE_EPOCH: u8 = 2;
     }
 
+    /// INIT_POOL layout: [tag(1)][epoch_slots(8)][k_floor(4)][entry_fee(8)] -
+    /// the operator fixes the epoch window, the k-anonymity floor, and the
+    /// per-commit anti-Sybil entry fee (lamports; 0 disables it). MUST stay
+    /// byte-identical to the program's `wire::INIT_POOL_LEN`.
+    pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8;
+
     /// COMMIT layout: [tag(1)][commitment(32)] - the participant posts only the
     /// commitment; the action + secret stay client-side until settlement.
     pub const COMMIT_LEN: usize = 1 + 32;
@@ -236,6 +242,12 @@ pub mod wire {
     /// SETTLE_EPOCH header: [tag(1)][epoch(8)][n_nullifiers(4)] followed by
     /// n_nullifiers * 32 bytes. The relayer submits the whole epoch atomically.
     pub const SETTLE_HEADER_LEN: usize = 1 + 8 + 4;
+
+    // Layout sanity: keep the documented sizes honest at compile time and in
+    // lockstep with the on-chain program's mirrored constants.
+    const _: () = assert!(INIT_POOL_LEN == 21);
+    const _: () = assert!(COMMIT_LEN == 33);
+    const _: () = assert!(SETTLE_HEADER_LEN == 13);
 }
 
 #[cfg(test)]

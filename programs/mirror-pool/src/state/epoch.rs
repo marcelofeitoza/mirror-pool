@@ -13,7 +13,7 @@
 //! on-chain. On-chain we enforce the necessary condition
 //! `nominal_k >= k_floor` (if even the nominal count is below the floor, the
 //! real set certainly is); the coordinator enforces the honest bound before
-//! ever submitting a settle.
+//! ever submitting a settle. `nominal_k` is exactly the epoch's commit count.
 //!
 //! Layout (all integers little-endian):
 //!
@@ -21,21 +21,24 @@
 //! offset  size  field
 //! 0       1     version    0 = uninitialized, 1 = v1
 //! 1       8     epoch_id   mirror_core::Epoch
-//! 9       4     nominal_k  commitments in this window
+//! 9       4     nominal_k  commitments in this window (the commit count)
 //! 13      1     settled    0 = open or rolled forward, 1 = settled
-//! 14      32    reserved   TODO(v1): action batch binding, root snapshot
+//! 14      1     bump       Epoch PDA bump (seeds [b"epoch", pool, epoch_id LE])
+//! 15      17    reserved   TODO(v2): action batch binding, root snapshot
 //! ```
 
 use pinocchio::error::ProgramError;
 
 use super::{read_u32, read_u64, read_u8, write_u32, write_u64, write_u8};
+use crate::MirrorPoolError;
 
 pub const VERSION_OFF: usize = 0;
 pub const EPOCH_ID_OFF: usize = 1;
 pub const NOMINAL_K_OFF: usize = 9;
 pub const SETTLED_OFF: usize = 13;
-pub const RESERVED_OFF: usize = 14;
-pub const RESERVED_LEN: usize = 32;
+pub const BUMP_OFF: usize = 14;
+pub const RESERVED_OFF: usize = 15;
+pub const RESERVED_LEN: usize = 17;
 
 pub const LEN: usize = RESERVED_OFF + RESERVED_LEN;
 
@@ -59,12 +62,21 @@ pub fn nominal_k(data: &[u8]) -> Result<u32, ProgramError> {
     read_u32(data, NOMINAL_K_OFF)
 }
 
+/// Alias for [`nominal_k`]: the number of commitments accepted this epoch.
+pub fn commit_count(data: &[u8]) -> Result<u32, ProgramError> {
+    nominal_k(data)
+}
+
 pub fn is_settled(data: &[u8]) -> Result<bool, ProgramError> {
     Ok(read_u8(data, SETTLED_OFF)? != 0)
 }
 
+pub fn bump(data: &[u8]) -> Result<u8, ProgramError> {
+    read_u8(data, BUMP_OFF)
+}
+
 /// One-time initialization for a freshly created epoch account.
-pub fn init(data: &mut [u8], epoch_id: u64) -> Result<(), ProgramError> {
+pub fn init(data: &mut [u8], epoch_id: u64, bump: u8) -> Result<(), ProgramError> {
     if data.len() != LEN {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -72,7 +84,17 @@ pub fn init(data: &mut [u8], epoch_id: u64) -> Result<(), ProgramError> {
     write_u64(data, EPOCH_ID_OFF, epoch_id)?;
     write_u32(data, NOMINAL_K_OFF, 0)?;
     write_u8(data, SETTLED_OFF, 0)?;
+    write_u8(data, BUMP_OFF, bump)?;
     Ok(())
+}
+
+/// Increment the commit count by one, failing closed on overflow.
+pub fn increment_commit_count(data: &mut [u8]) -> Result<u32, ProgramError> {
+    let next = nominal_k(data)?
+        .checked_add(1)
+        .ok_or(MirrorPoolError::ArithmeticOverflow)?;
+    write_u32(data, NOMINAL_K_OFF, next)?;
+    Ok(next)
 }
 
 pub fn set_nominal_k(data: &mut [u8], k: u32) -> Result<(), ProgramError> {

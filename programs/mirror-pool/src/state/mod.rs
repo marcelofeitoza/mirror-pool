@@ -8,6 +8,8 @@
 use pinocchio::error::ProgramError;
 
 pub mod epoch;
+pub mod merkle;
+pub mod nullifier;
 pub mod pool;
 
 /// Read a single byte at `offset`.

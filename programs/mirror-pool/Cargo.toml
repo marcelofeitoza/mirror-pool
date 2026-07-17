@@ -33,9 +33,31 @@ no-entrypoint = []
 
 [dependencies]
 # Zero-dependency Solana program framework. 0.10.x API: Address + AccountView.
-pinocchio = "0.10"
+# The `cpi` feature pulls in the invoke/invoke_signed helpers and the Signer /
+# Seed types needed to create the pool / epoch / nullifier PDAs.
+pinocchio = { version = "0.10", features = ["cpi"] }
 # Allocation-free, syscall-backed logging (log! macro).
 pinocchio-log = "0.5"
+# System-program CPI helpers (CreateAccount, Transfer) used to create the
+# program-owned PDAs and move the anti-Sybil entry fee.
+pinocchio-system = "0.5"
+
+[dev-dependencies]
+# In-process SVM test harness: loads the compiled .so and runs instructions
+# against a mocked runtime (no validator). Tests build real transactions and
+# assert account state + custom error codes.
+mollusk-svm = "0.14"
+# Split Solana crates pinned to the versions mollusk-svm 0.14 resolves, so the
+# Pubkey / Account / Instruction / ProgramError types the tests build with are
+# the same types mollusk's API expects (avoids duplicate-crate mismatches).
+# `curve25519` gives the host build `Pubkey::find_program_address` (a syscall
+# on-chain) so tests can derive the PDAs the program expects. These are
+# dev-dependencies only: `cargo build-sbf` never compiles them, so the deployed
+# .so stays lean.
+solana-pubkey = { version = "4", features = ["curve25519"] }
+solana-account = "4"
+solana-instruction = "3"
+solana-program-error = "3"
 
 [lints.rust]
 # pinocchio macros expand cfg(target_os = "solana") / cfg(target_arch = "bpf")
