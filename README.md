@@ -36,24 +36,29 @@ strongest empirical attack on mixers.
 
 ## Status
 
-v1 is a non-ZK commit-reveal design: k-anon slot epochs + a gasless rotating
-coordinator + pooled behavior modules + an adversarial evaluation harness. v2
-swaps in a Groth16 membership proof for ZK-deniable initiation. The shared type
-layer is the contract every other component builds against and is complete; the
-components that consume it are scaffolded and under active development.
+The complete system is the goal: k-anon slot epochs + a gasless rotating
+coordinator + ZK-deniable initiation (a Groth16 membership proof so even the
+relay cannot learn which committer acted) + real pooled behaviors + an
+adversarial evaluation harness + an automated Surfpool soak suite. The shared
+type layer and the on-chain settlement program are implemented and tested; the
+remaining components are under active development. The status table below is kept
+honest against the tree.
 
 | Component | Path | Status |
 | --- | --- | --- |
-| Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` with domain separation, `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. 5 unit tests passing. |
-| On-chain program | `programs/mirror-pool` | **Scaffolded** - module layout (`instructions/`, `state/`) in place. `InitPool` / `Commit` / `SettleEpoch`, the append-only intent accumulator (frontier Merkle tree), and nullifier PDAs are pending. |
-| Gasless coordinator | `crates/mirror-coordinator` | **Scaffolded** - watches commits, batches into slot-window epochs, enforces `k_floor` before settle, submits `SettleEpoch` as the sole rotating fee-payer with normalized CU/fee/ALT. |
-| Participant CLI | `crates/mirror-cli` | **Scaffolded** - `commit` / `status` (`prove` in v2). |
-| Adversarial harness | `crates/mirror-harness` | **Scaffolded** - the differentiator. Runs heuristic + learned attacks and measures attacker advantage over `1/k` for a Baseline vs mirror-pool. |
-| Behavior modules | `crates/mirror-behaviors` | **Scaffolded** - `Behavior` trait + pooled-action adapters (swap, stake). |
+| Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` with domain separation, `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
+| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool` / `Commit` / `SettleEpoch`, depth-20 frontier Merkle accumulator, Epoch and Nullifier PDAs, on-chain k-floor and double-settle prevention. 7 mollusk tests passing; `build-sbf` green. |
+| ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **In progress** - Poseidon membership circuit + Groth16 trusted setup, then on-chain verification (alt_bn128) so a settled action proves membership without revealing which committer acted. |
+| Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. |
+| Gasless coordinator | `crates/mirror-coordinator` | **In progress** - slot-window batching, `k_floor` gate, and rotating fee-payer are implemented and tested; real on-chain `SettleEpoch` submission (v0 tx + ALT) is landing. |
+| Participant CLI | `crates/mirror-cli` | **In progress** - `commit` / `status`; on-chain submission and proof generation are landing. |
+| Pooled behaviors | `crates/mirror-behaviors` | **In progress** - `Behavior` trait + pooled-action adapters (fixed-shape transfer baseline, Jupiter swap, jitoSOL stake). |
+| Surfpool soak suite | `tests/` | **Planned** - automated end-to-end multi-epoch and adversarial soak against a local mainnet mirror. |
 
-"Scaffolded" means the crate compiles as part of the workspace and its role is
-fixed by the `mirror-core` API, but the logic is a placeholder. The status table
-is kept honest against the tree; see the roadmap for the build order.
+"In progress" means the crate compiles as part of the workspace with its role
+fixed by the `mirror-core` API and partial logic in place; "Implemented" means
+the component's core logic is complete and tested. The status table is kept
+honest against the tree; see the roadmap for the build order.
 
 ---
 
@@ -65,7 +70,7 @@ Requires a stable Rust toolchain. The on-chain program additionally requires
 ```sh
 # Off-chain host workspace: core, coordinator, cli, harness, behaviors.
 # From the repo root:
-cargo test --workspace        # run the unit tests (mirror-core: 5 passing)
+cargo test --workspace        # run the host-crate unit tests
 cargo build --workspace       # build every host crate
 
 # On-chain program (standalone crate, targets SBF, its own workspace):
@@ -100,16 +105,17 @@ Solana entrypoint for the host.
 mirror-pool/
   crates/
     mirror-core          # shared types + wire format + tests   [implemented]
-    mirror-coordinator   # off-chain gasless batch coordinator   [scaffolded]
-    mirror-cli           # participant CLI (commit / status)      [scaffolded]
-    mirror-harness       # adversarial evaluation harness         [scaffolded]
-    mirror-behaviors     # Behavior trait + pooled-action adapters[scaffolded]
+    mirror-coordinator   # off-chain gasless batch coordinator   [in progress]
+    mirror-cli           # participant CLI (commit / status)      [in progress]
+    mirror-harness       # adversarial evaluation harness         [implemented]
+    mirror-behaviors     # Behavior trait + pooled-action adapters[in progress]
+  circuits/              # Poseidon membership circuit + Groth16 setup [in progress]
   programs/
-    mirror-pool          # on-chain Pinocchio program (SBF)       [scaffolded]
+    mirror-pool          # on-chain Pinocchio program (SBF)       [implemented]
   docs/
     THREAT_MODEL.md      # attacker model + which attacks are defeated
     ARCHITECTURE.md      # commit / batch / settle design in depth
-    ROADMAP.md           # v1 build order and the v2 ZK path
+    ROADMAP.md           # build order and the path to full ZK-deniable initiation
   Cargo.toml             # host workspace manifest
   Makefile               # fmt / clippy / test / build-sbf / harness / soak
   LICENSE                # MIT
@@ -157,9 +163,12 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   anonymity to anyone who clusters the operator; they are excluded from
   `real_k`. A pool with real `k=1` provides no anonymity regardless of nominal
   size.
-- **v1 is not ZK.** The commit-reveal design hides the initiator within the
-  epoch but is not a zero-knowledge proof of membership. ZK-deniable initiation
-  (Groth16 membership proof) is v2; see `docs/ROADMAP.md`.
+- **ZK-deniable initiation is landing, not yet complete.** Until the Groth16
+  membership proof is wired into settlement, the commit-reveal path hides the
+  initiator within the epoch but does not cryptographically prove membership, so
+  the settle authority is trusted not to fabricate participants. Closing that
+  with an on-chain membership proof is core scope, not optional; see
+  `docs/ROADMAP.md`.
 - **It is not a Sybil oracle.** Real k-anonymity assumes participants are
   economically distinct. Without a per-identity entry cost an attacker can fill a
   round and reduce the real set to one; Sybil resistance is a first-class
@@ -175,7 +184,7 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   chain-analysis heuristics each design choice defeats.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) - commit / shared-epoch batch /
   gasless atomic settlement in depth, and the on-chain account model.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) - the v1 build order and the v2 path to
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) - the build order and the path to full
   ZK-deniable initiation.
 
 ---
