@@ -1,186 +1,119 @@
-//! Pooled-action adapters for mirror-pool.
+//! Pooled-action adapters for mirror-pool (v1 deliverable 4 in
+//! `docs/ROADMAP.md`).
 //!
-//! This crate is v1 deliverable 4 in `docs/ROADMAP.md`: a [`Behavior`] trait
-//! plus adapters that make every participant in an epoch perform an
-//! *identical* action. Uniformity is the whole point:
+//! A [`Behavior`] is the single action every participant in an epoch performs
+//! *identically*. This crate builds the CLIENT-SIDE Solana [`Instruction`]s for
+//! that action, one participant at a time. The coordinator (v1 deliverable 3)
+//! then composes each participant's behavior instruction(s) together with the
+//! on-chain `SettleEpoch` instruction into one atomic transaction - off-chain
+//! composition, not on-chain CPI into Jupiter/stake-pool, which is impractical.
+//! An observer therefore sees N identical actions settle on one timestamp and
+//! cannot attribute one to an initiator.
+//!
+//! Uniformity is the whole point (see `docs/THREAT_MODEL.md`):
 //!
 //! - **Fixed action shape.** One anonymity set exists per
-//!   [`mirror_core::ActionClass`]. If two participants in the same pool
-//!   emitted observably different instructions (different mint pair, route
-//!   depth, account count, or amount), an observer could cluster by shape and
-//!   the set would fracture, exactly like mixed denominations in Tornado.
-//!   A `Behavior` therefore pins its `ActionClass` at construction and every
-//!   settlement instruction it builds must be byte-shape-identical across
-//!   participants (only the nullifier list varies).
-//! - **Shared-epoch batching.** Settlement bytes are built for a whole
-//!   [`mirror_core::Epoch`] at once, so all actions land on one timestamp and
-//!   FIFO temporal matching (the strongest empirical attack, up to 49%
-//!   linkage) collapses to the 1/k random baseline.
-//! - **k_floor.** Builders take the epoch's nullifier set as a slice so the
-//!   coordinator can refuse to build anything until
-//!   `KAnon::real_k >= EpochSchedule::k_floor`. A behavior never executes into
-//!   a set small enough to deanonymize by elimination.
-//! - **Gasless rotating relay.** The bytes produced here are instruction
-//!   *data* only. Fee-payer selection, CU limit, priority fee, tx version,
-//!   account ordering, and ALT normalization all belong to the coordinator
-//!   (v1 deliverable 3), so no acting wallet funds or signs its own execution
-//!   and the ~37% wallet-fingerprint attack finds one pool-wide shape.
+//!   [`mirror_core::ActionClass`]. Two participants emitting observably
+//!   different instructions (different mint pair, amount, or account shape) could
+//!   be clustered by shape, exactly like mixed denominations in Tornado, so a
+//!   behavior pins its class + size bucket and every participant's instruction
+//!   is the same shape at the same amount.
+//! - **Fixed size buckets.** Amount-matching alone recovers a large fraction of
+//!   a claimed anonymity set (Wang et al., arXiv:2201.09035); a bucket maps to
+//!   one fixed amount pool-wide via [`bucket_base_units`] / [`bucket_lamports`].
+//! - **Coordinator-owned tx shape.** These builders emit action instructions
+//!   only. Fee payer, CU limit, priority fee, tx version, account ordering, and
+//!   ALT normalization belong to the coordinator, so no acting wallet funds or
+//!   signs its own execution and there is one pool-wide tx fingerprint. The
+//!   Jupiter adapter deliberately drops the per-participant compute-budget
+//!   instructions the API returns for exactly this reason.
 //!
-//! v1 ships the trait and two stub adapters that emit the `SETTLE_EPOCH` wire
-//! shape from [`mirror_core::wire`]. The inner CPI payloads (Jupiter route,
-//! stake-pool deposit) land in the milestones noted on each adapter.
+//! ## Adapters
+//! - [`PlainTransfer`] - fixed SOL / SPL transfer to a per-pool sink. The
+//!   deterministic, no-network action the end-to-end soak actually executes.
+//! - [`JupiterSwap`] - pooled swap on the public Jupiter v6 API (fixed mint pair
+//!   + bucketed amount).
+//! - [`JitoSolStake`] - pooled SOL -> jitoSOL SPL stake-pool `DepositSol`.
 
-use anyhow::{bail, Result};
-use mirror_core::{wire, ActionClass, Epoch, Hash32, Nullifier, SizeBucket};
+mod jito_stake;
+mod jupiter;
+mod plain_transfer;
+pub mod programs;
+
+pub use jito_stake::{jitosol_mainnet, JitoSolStake};
+pub use jupiter::{JupiterSwap, SwapInstructionsResponse, DEFAULT_JUPITER_BASE_URL};
+pub use plain_transfer::{PlainTransfer, TransferAsset};
+pub use programs::StakePoolAccounts;
+
+use anyhow::Result;
+use async_trait::async_trait;
+use mirror_core::{ActionClass, SizeBucket};
+use solana_instruction::Instruction;
+use solana_pubkey::Pubkey;
 use std::collections::HashMap;
 
 /// A pooled action every participant in an epoch performs identically.
 ///
-/// Implementations must be `Send + Sync` so the coordinator can hold a
-/// registry of them across its scheduler threads.
+/// Implementations are `Send + Sync` so the coordinator can hold a registry of
+/// them across its scheduler threads. `build_instructions` is `async` because a
+/// behavior may need to reach an external quote/route API (Jupiter); adapters
+/// that need no network simply return immediately.
+#[async_trait]
 pub trait Behavior: Send + Sync {
-    /// The fixed action shape this behavior settles. All commitments in the
-    /// pool bind to this exact class via
-    /// [`mirror_core::commit`], so a relayer cannot substitute a different
-    /// action at settlement without invalidating every commitment.
+    /// The fixed action shape this behavior settles. Every commitment in the
+    /// pool binds to this exact class via [`mirror_core::commit`], so a relayer
+    /// cannot substitute a different action at settlement without invalidating
+    /// every commitment.
     fn action_class(&self) -> ActionClass;
 
-    /// Build the instruction data for settling `epoch` with the given
-    /// nullifier set.
+    /// Human-readable one-liner for the CLI `status` output and harness reports.
+    fn describe(&self) -> String;
+
+    /// Build the client-side instruction(s) for `participant`'s action at the
+    /// given size bucket. The coordinator composes these with `SettleEpoch` into
+    /// one atomic transaction; the returned instructions must be byte-shape
+    /// identical across participants (only participant-specific pubkeys differ)
+    /// so settlement stays uniform.
     ///
-    /// v1 stub: returns the `SETTLE_EPOCH` wire bytes
-    /// (`[tag(1)][epoch(8)][n_nullifiers(4)][n * 32]`) that the on-chain
-    /// program parses. The behavior-specific execution payload (swap route,
-    /// stake deposit) is appended in later milestones; its shape must stay
-    /// constant across participants so settlement stays uniform.
-    ///
-    /// Callers pass the *entire* epoch's nullifiers: the whole epoch settles
-    /// atomically in one instruction (N-party atomicity beyond Jito's 5-tx
-    /// bundle cap must live program-side).
-    fn build_settlement_ix(&self, epoch: Epoch, nullifiers: &[Nullifier]) -> Result<Vec<u8>>;
-
-    /// Human-readable description, used by the CLI `status` output and the
-    /// harness reports.
-    fn describe(&self) -> &str;
+    /// `size` is passed explicitly (rather than read from the behavior) so the
+    /// coordinator drives the pool's fixed bucket; for a coherent pool it equals
+    /// the bucket in [`Behavior::action_class`].
+    async fn build_instructions(
+        &self,
+        participant: &Pubkey,
+        size: SizeBucket,
+    ) -> Result<Vec<Instruction>>;
 }
 
-/// Encode the `SETTLE_EPOCH` wire bytes shared by every behavior.
+/// Per-bucket amount in hundredths of one whole unit: Nano = 0.01, Small = 0.1,
+/// Medium = 1, Large = 10. Bucketing is the behavioral analog of Tornado's fixed
+/// denominations; these four coarse steps keep amount-matching at the 1/k floor.
+const BUCKET_HUNDREDTHS: [u64; 4] = [1, 10, 100, 1000];
+
+/// Amount, in base units, for `size` on a token with `decimals` decimals.
 ///
-/// Kept as one helper so no adapter can drift from
-/// [`mirror_core::wire::SETTLE_HEADER_LEN`]; shape drift between two adapters
-/// would itself be a fingerprint.
-fn settle_epoch_wire_bytes(epoch: Epoch, nullifiers: &[Nullifier]) -> Result<Vec<u8>> {
-    if nullifiers.is_empty() {
-        // An empty settlement is always a coordinator bug: the k_floor check
-        // must have rolled the epoch forward long before byte-building.
-        bail!("refusing to build a settlement for an empty nullifier set");
-    }
-    let n: u32 = nullifiers
-        .len()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("nullifier count exceeds u32"))?;
-    let mut data = Vec::with_capacity(wire::SETTLE_HEADER_LEN + nullifiers.len() * 32);
-    data.push(wire::tag::SETTLE_EPOCH);
-    data.extend_from_slice(&epoch.0.to_le_bytes());
-    data.extend_from_slice(&n.to_le_bytes());
-    for nf in nullifiers {
-        data.extend_from_slice(&nf.0);
-    }
-    debug_assert_eq!(data.len(), wire::SETTLE_HEADER_LEN + nullifiers.len() * 32);
-    Ok(data)
+/// `amount = hundredths(size) * 10^decimals / 100`. Multiplication happens
+/// before the divide, so no precision is lost for `decimals >= 2` (all SPL mints
+/// of interest, and native SOL's 9). For `decimals < 2` the sub-unit buckets
+/// round toward zero; such mints are out of scope for v1 pools.
+pub fn bucket_base_units(size: SizeBucket, decimals: u8) -> u64 {
+    let hundredths = BUCKET_HUNDREDTHS[size as usize] as u128;
+    let scaled = hundredths * 10u128.pow(decimals as u32) / 100;
+    u64::try_from(scaled).expect("bucket amount fits in u64 for realistic decimals")
 }
 
-/// Pooled Jupiter swap: every participant swaps the same mint pair at the
-/// same [`SizeBucket`].
-///
-/// Built fresh in this crate against the public Jupiter v6 quote + swap API
-/// (quote fetch, route selection, and swap-instruction construction). The
-/// account list and route depth must be normalized pool-wide, because a
-/// per-participant route choice is an instant fingerprint.
-///
-/// Mints are stored as opaque 32-byte values supplied at pool init; this
-/// crate never hardcodes a mainnet mint or program id.
-#[derive(Clone, Copy, Debug)]
-pub struct JupiterSwap {
-    /// Input mint (32 raw bytes of the mint address, supplied by pool init).
-    pub mint_in: Hash32,
-    /// Output mint.
-    pub mint_out: Hash32,
-    /// The fixed size bucket; variable and round-number amounts leak a large
-    /// fraction of anonymity to amount-matching alone (Wang et al.,
-    /// arXiv:2201.09035; the Tornado study, arXiv:2510.09433), while
-    /// fixed/stratified denominations sharply reduce it, so the bucket is
-    /// mandatory.
-    pub size: SizeBucket,
-}
-
-impl Behavior for JupiterSwap {
-    fn action_class(&self) -> ActionClass {
-        ActionClass::Swap {
-            mint_in: self.mint_in,
-            mint_out: self.mint_out,
-            size: self.size,
-        }
-    }
-
-    fn build_settlement_ix(&self, epoch: Epoch, nullifiers: &[Nullifier]) -> Result<Vec<u8>> {
-        // TODO(v1 deliverable 4, docs/ROADMAP.md): append the uniform Jupiter
-        // swap payload after the settle header (technique: the public Jupiter
-        // v6 quote + swap API, quote fetch + route selection + swap-ix
-        // construction, built fresh), pinning one route shape per pool per
-        // epoch so every participant's execution is byte-shape-identical.
-        // Output lands in a public ATA; the ATA re-link vector must be
-        // documented alongside.
-        settle_epoch_wire_bytes(epoch, nullifiers)
-    }
-
-    fn describe(&self) -> &str {
-        "Pooled Jupiter swap (fixed mint pair + size bucket); execution payload built fresh on the public jupiter v6 swap API"
-    }
-}
-
-/// Pooled jitoSOL stake: every participant stakes the same size bucket to the
-/// same validator/stake-pool target.
-///
-/// Built fresh against the public Jito stake-pool program (an SPL stake-pool
-/// deposit): the SOL to jitoSOL stake-pool deposit whose account meta list is
-/// fixed, which makes it a naturally uniform pooled action.
-#[derive(Clone, Copy, Debug)]
-pub struct JitoSolStake {
-    /// Stake target identity (32 raw bytes, supplied by pool init; never a
-    /// hardcoded mainnet address).
-    pub validator: Hash32,
-    /// The fixed size bucket shared by the whole pool.
-    pub size: SizeBucket,
-}
-
-impl Behavior for JitoSolStake {
-    fn action_class(&self) -> ActionClass {
-        ActionClass::Stake {
-            validator: self.validator,
-            size: self.size,
-        }
-    }
-
-    fn build_settlement_ix(&self, epoch: Epoch, nullifiers: &[Nullifier]) -> Result<Vec<u8>> {
-        // TODO(v1 deliverable 4, docs/ROADMAP.md): append the uniform
-        // stake-pool deposit payload after the settle header (technique: the
-        // public Jito stake-pool program, an SPL stake-pool deposit, built
-        // fresh). One deposit shape per pool; only the nullifier list may vary.
-        settle_epoch_wire_bytes(epoch, nullifiers)
-    }
-
-    fn describe(&self) -> &str {
-        "Pooled jitoSOL stake (fixed validator + size bucket); execution payload built fresh on the public Jito stake-pool program"
-    }
+/// Native-SOL amount, in lamports, for `size` (SOL has 9 decimals): Nano =
+/// 0.01 SOL, Small = 0.1, Medium = 1, Large = 10.
+pub fn bucket_lamports(size: SizeBucket) -> u64 {
+    bucket_base_units(size, 9)
 }
 
 /// Name-keyed registry of pooled behaviors.
 ///
-/// The coordinator resolves a pool's configured behavior by name at startup;
-/// the CLI uses the same names in `commit --behavior <name>`. Keeping one
-/// registry keeps the set of deployable action shapes explicit and auditable,
-/// so nobody quietly adds a heterogeneous action to a live pool.
+/// The coordinator resolves a pool's configured behavior by name at startup; the
+/// CLI uses the same names in `commit --behavior <name>`. One registry keeps the
+/// set of deployable action shapes explicit and auditable, so nobody quietly
+/// adds a heterogeneous action to a live pool.
 #[derive(Default)]
 pub struct BehaviorRegistry {
     entries: HashMap<String, Box<dyn Behavior>>,
@@ -191,8 +124,7 @@ impl BehaviorRegistry {
         Self::default()
     }
 
-    /// Register `behavior` under `name`, replacing any previous entry with
-    /// the same name.
+    /// Register `behavior` under `name`, replacing any previous entry.
     pub fn register(&mut self, name: impl Into<String>, behavior: Box<dyn Behavior>) {
         self.entries.insert(name.into(), behavior);
     }
@@ -221,112 +153,78 @@ impl BehaviorRegistry {
 mod tests {
     use super::*;
 
-    /// Test-local inverse of `ActionClass::canonical_bytes`. mirror-core
-    /// deliberately exposes only the encoder (the chain never needs to decode
-    /// a class back out of a commitment pre-image), so the round-trip decoder
-    /// lives here to prove the encoding is unambiguous per class.
-    fn decode_action_class(bytes: &[u8]) -> ActionClass {
-        fn bucket(raw: u8) -> SizeBucket {
-            *SizeBucket::ALL
-                .iter()
-                .find(|b| **b as u8 == raw)
-                .expect("valid size bucket byte")
-        }
-        match bytes[0] {
-            0 => {
-                assert_eq!(bytes.len(), 1 + 32 + 32 + 1);
-                ActionClass::Swap {
-                    mint_in: bytes[1..33].try_into().unwrap(),
-                    mint_out: bytes[33..65].try_into().unwrap(),
-                    size: bucket(bytes[65]),
-                }
-            }
-            1 => {
-                assert_eq!(bytes.len(), 1 + 32 + 1);
-                ActionClass::Stake {
-                    validator: bytes[1..33].try_into().unwrap(),
-                    size: bucket(bytes[33]),
-                }
-            }
-            other => panic!("unknown action class tag {other}"),
-        }
-    }
-
-    fn swap() -> JupiterSwap {
-        JupiterSwap {
-            mint_in: [0xAA; 32],
-            mint_out: [0xBB; 32],
-            size: SizeBucket::Medium,
-        }
-    }
-
-    fn stake() -> JitoSolStake {
-        JitoSolStake {
-            validator: [0xCC; 32],
-            size: SizeBucket::Small,
-        }
+    #[test]
+    fn sol_buckets_are_the_expected_lamport_steps() {
+        assert_eq!(bucket_lamports(SizeBucket::Nano), 10_000_000); // 0.01 SOL
+        assert_eq!(bucket_lamports(SizeBucket::Small), 100_000_000); // 0.1 SOL
+        assert_eq!(bucket_lamports(SizeBucket::Medium), 1_000_000_000); // 1 SOL
+        assert_eq!(bucket_lamports(SizeBucket::Large), 10_000_000_000); // 10 SOL
     }
 
     #[test]
-    fn swap_action_class_round_trips_through_canonical_bytes() {
-        let class = swap().action_class();
-        let bytes = class.canonical_bytes();
-        assert_eq!(decode_action_class(&bytes), class);
-        // Deterministic: same class, same bytes, every time.
-        assert_eq!(bytes, class.canonical_bytes());
+    fn token_buckets_scale_with_decimals() {
+        // 6-decimal token (e.g. USDC-shaped): 0.01 == 10_000 base units.
+        assert_eq!(bucket_base_units(SizeBucket::Nano, 6), 10_000);
+        assert_eq!(bucket_base_units(SizeBucket::Medium, 6), 1_000_000);
+        // strictly increasing across the four buckets at any fixed decimals.
+        let steps: Vec<u64> = SizeBucket::ALL
+            .iter()
+            .map(|s| bucket_base_units(*s, 6))
+            .collect();
+        assert!(steps.windows(2).all(|w| w[0] < w[1]));
     }
 
-    #[test]
-    fn stake_action_class_round_trips_through_canonical_bytes() {
-        let class = stake().action_class();
-        let bytes = class.canonical_bytes();
-        assert_eq!(decode_action_class(&bytes), class);
-        assert_eq!(bytes, class.canonical_bytes());
-    }
-
-    #[test]
-    fn behaviors_encode_to_distinct_classes() {
-        // Two behaviors must never share canonical bytes; one anonymity set
-        // exists per class and cross-class collisions would merge pools.
-        assert_ne!(
-            swap().action_class().canonical_bytes(),
-            stake().action_class().canonical_bytes()
-        );
-    }
-
-    #[test]
-    fn settlement_ix_matches_wire_shape() {
-        let nfs = vec![Nullifier([1u8; 32]), Nullifier([2u8; 32])];
-        for behavior in [&swap() as &dyn Behavior, &stake() as &dyn Behavior] {
-            let data = behavior
-                .build_settlement_ix(Epoch(7), &nfs)
-                .expect("stub settlement bytes");
-            assert_eq!(data.len(), wire::SETTLE_HEADER_LEN + nfs.len() * 32);
-            assert_eq!(data[0], wire::tag::SETTLE_EPOCH);
-            assert_eq!(data[1..9], 7u64.to_le_bytes());
-            assert_eq!(data[9..13], 2u32.to_le_bytes());
-            assert_eq!(&data[13..45], &[1u8; 32]);
-            assert_eq!(&data[45..77], &[2u8; 32]);
-        }
-    }
-
-    #[test]
-    fn settlement_refuses_empty_epoch() {
-        assert!(swap().build_settlement_ix(Epoch(0), &[]).is_err());
-    }
-
-    #[test]
-    fn registry_resolves_by_name() {
+    #[tokio::test]
+    async fn registry_resolves_by_name_and_builds() {
+        let sink = Pubkey::new_from_array([1u8; 32]);
         let mut reg = BehaviorRegistry::new();
-        reg.register("jupiter-swap", Box::new(swap()));
-        reg.register("jitosol-stake", Box::new(stake()));
+        reg.register(
+            "plain-transfer",
+            Box::new(PlainTransfer::sol(sink, SizeBucket::Medium)),
+        );
+        reg.register(
+            "jitosol-stake",
+            Box::new(JitoSolStake::jitosol(SizeBucket::Medium)),
+        );
+        reg.register(
+            "jupiter-swap",
+            Box::new(JupiterSwap::new(
+                Pubkey::new_from_array([2u8; 32]),
+                Pubkey::new_from_array([3u8; 32]),
+                9,
+                SizeBucket::Medium,
+            )),
+        );
 
-        assert_eq!(reg.len(), 2);
-        assert_eq!(reg.names(), vec!["jitosol-stake", "jupiter-swap"]);
+        assert_eq!(reg.len(), 3);
+        assert_eq!(
+            reg.names(),
+            vec!["jitosol-stake", "jupiter-swap", "plain-transfer"]
+        );
         assert!(reg.get("missing").is_none());
 
-        let b = reg.get("jupiter-swap").expect("registered");
-        assert_eq!(b.action_class(), swap().action_class());
-        assert!(b.describe().contains("jupiter"));
+        // The soak baseline builds without any network.
+        let b = reg.get("plain-transfer").expect("registered");
+        assert!(b.describe().contains("PlainTransfer"));
+        let participant = Pubkey::new_from_array([9u8; 32]);
+        let ixs = b
+            .build_instructions(&participant, SizeBucket::Medium)
+            .await
+            .expect("plain transfer builds offline");
+        assert_eq!(ixs.len(), 1);
+    }
+
+    #[test]
+    fn distinct_behaviors_have_distinct_classes() {
+        let sink = Pubkey::new_from_array([1u8; 32]);
+        let transfer = PlainTransfer::sol(sink, SizeBucket::Medium).action_class();
+        let swap = JupiterSwap::new(
+            Pubkey::new_from_array([2u8; 32]),
+            Pubkey::new_from_array([3u8; 32]),
+            9,
+            SizeBucket::Medium,
+        )
+        .action_class();
+        assert_ne!(transfer.canonical_bytes(), swap.canonical_bytes());
     }
 }

@@ -1,11 +1,44 @@
+# mirror-behaviors: pooled-action adapters (v1 deliverable 4 in docs/ROADMAP.md).
+#
+# The Behavior trait plus adapters that build CLIENT-SIDE Solana instructions for
+# the single uniform action every epoch participant performs. The coordinator
+# composes each participant's behavior instruction(s) together with the on-chain
+# SettleEpoch instruction into one atomic transaction (off-chain composition, not
+# on-chain CPI), so an observer sees N identical actions and cannot attribute one
+# to an initiator.
+#
+# Deps are kept local to this crate (not promoted into the root
+# [workspace.dependencies]) so this module can evolve without touching a file
+# other agents also edit. Only serde / serde_json / tokio, which the workspace
+# already shares, are pulled via `.workspace = true`.
 [package]
 name = "mirror-behaviors"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Pooled-action adapters for mirror-pool: the Behavior trait plus Jupiter-swap and jitoSOL-stake stubs that give every epoch participant an identical, fixed action shape."
+description = "Pooled-action adapters for mirror-pool: the Behavior trait plus PlainTransfer / Jupiter-swap / jitoSOL-stake instruction builders that give every epoch participant an identical, fixed on-chain action shape."
 
 [dependencies]
 mirror-core.workspace = true
 anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+# Async trait methods behind a Box<dyn Behavior>: async-fn-in-trait is stable but
+# not dyn-compatible, so we box the returned futures.
+async-trait = "0.1"
+# Split Solana crates, pinned to the same majors the on-chain program links
+# (solana-pubkey v4, solana-instruction v3) so Pubkey / Instruction / AccountMeta
+# are one set of types across the repo. `curve25519` gives the host build
+# Pubkey::find_program_address for ATA / PDA derivation.
+solana-pubkey = { version = "4", features = ["curve25519"] }
+solana-instruction = { version = "3" }
+# Jupiter v6 quote + swap-instructions HTTP plumbing (rustls/ring, no OpenSSL).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Decode the base64 instruction data Jupiter returns in /swap-instructions.
+base64 = "0.22"
+
+[dev-dependencies]
+# `#[tokio::test]` for the async trait methods and the (ignored) live Jupiter
+# integration test.
+tokio = { workspace = true }
