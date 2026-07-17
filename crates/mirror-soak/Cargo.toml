@@ -1,0 +1,46 @@
+# mirror-soak: the automated end-to-end soak-test suite.
+#
+# Drives BOTH settlement paths (crowd PlainTransfer + ZK opt-in) and the
+# adversarial cases against a LIVE local Surfpool validator (treated as a
+# mainnet mirror), then verifies every effect on-chain and writes docs/PROOF.md.
+#
+# Run:  cargo run -p mirror-soak -- [--rpc-url ...] [--program-id ...]
+#
+# It uses the shipped participant CLI (`mirror-cli`) for the ZK deposit-commit
+# and Groth16 `prove`, and the gasless coordinator library
+# (`mirror-coordinator::RpcSettleSubmitter`) for the atomic crowd settlement, so
+# the soak exercises the real components rather than reimplementing them.
+[package]
+name = "mirror-soak"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "End-to-end Surfpool soak suite for mirror-pool: crowd + ZK settlement paths, adversarial cases, and on-chain verification"
+
+[dependencies]
+mirror-core.workspace = true
+mirror-behaviors.workspace = true
+mirror-coordinator = { path = "../mirror-coordinator" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+# Solana client + transaction crates, pinned to the SAME majors the coordinator
+# and the on-chain program link (solana-pubkey v4, solana-instruction v3, ...) so
+# Pubkey / Instruction / Keypair are ONE type set across the repo.
+solana-pubkey = { version = "4", features = ["curve25519"] }
+solana-instruction = "3"
+solana-keypair = "3"
+solana-signer = "3"
+solana-hash = "4"
+solana-message = "4"
+solana-transaction = "4"
+solana-commitment-config = "3"
+
+[[bin]]
+name = "mirror-soak"
+path = "src/main.rs"

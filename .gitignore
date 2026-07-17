@@ -19,6 +19,11 @@ wallets/
 *.db-journal
 notes/
 
+# Soak-suite runtime state: logs, generated keypairs, notes, proof emits — never
+# commit secrets. docs/PROOF.md (the committed run record) lives outside this.
+.soak/
+.surfpool/
+
 # OS / editor
 .DS_Store
 *.swp

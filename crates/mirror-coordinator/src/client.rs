@@ -119,10 +119,24 @@ impl RpcSolanaClient {
         let blockhash = self.get_latest_blockhash().await?;
         let message = v0::Message::try_compile(&payer.pubkey(), &[ix], &[], blockhash)
             .context("compile ALT setup message")?;
-        // authority and payer may be the same key; duplicate signers dedupe.
-        // Keep the `Send + Sync` bound so the future stays `Send` across await.
-        let signers: [&DynSigner; 2] = [authority, payer];
-        let tx = VersionedTransaction::try_new(VersionedMessage::V0(message), &signers)
+        // Sign with exactly the keys the message requires, deduped. This matters
+        // because the two ALT setup instructions have different signer sets:
+        // `create_lookup_table` needs only the payer to sign (the authority is
+        // NOT a signer on modern clusters), while `extend_lookup_table` needs the
+        // authority as well; and the authority and payer may be the same key.
+        // Passing a fixed `[authority, payer]` over-counts for create and fails
+        // with "too many signers", so instead select from the message's required
+        // signer prefix. `Send + Sync` is preserved so the future stays `Send`.
+        let num_required = message.header.num_required_signatures as usize;
+        let required = &message.account_keys[..num_required];
+        let mut signers: Vec<&DynSigner> = Vec::with_capacity(2);
+        for s in [authority, payer] {
+            let key = s.pubkey();
+            if required.contains(&key) && !signers.iter().any(|existing| existing.pubkey() == key) {
+                signers.push(s);
+            }
+        }
+        let tx = VersionedTransaction::try_new(VersionedMessage::V0(message), signers.as_slice())
             .context("sign ALT setup transaction")?;
         self.send_and_confirm_transaction(&tx).await
     }

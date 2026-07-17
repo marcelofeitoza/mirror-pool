@@ -13,6 +13,7 @@ members = [
     "crates/mirror-cli",
     "crates/mirror-harness",
     "crates/mirror-behaviors",
+    "crates/mirror-soak",
 ]
 exclude = ["programs/mirror-pool"]
 

@@ -1617,6 +1617,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirror-soak"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "mirror-behaviors",
+ "mirror-coordinator",
+ "mirror-core",
+ "serde",
+ "serde_json",
+ "solana-commitment-config",
+ "solana-hash",
+ "solana-instruction",
+ "solana-keypair",
+ "solana-message",
+ "solana-pubkey 4.2.0",
+ "solana-signer",
+ "solana-transaction",
+ "tokio",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
