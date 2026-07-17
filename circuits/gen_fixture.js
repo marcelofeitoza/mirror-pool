@@ -31,14 +31,37 @@ const MERKLE_DEPTH = 20;
 // --- fixed, human-picked field elements for a reproducible fixture ---
 // (arbitrary BN254 scalar-field elements; not secret in a real deployment)
 const secret     = 111122223333444455556666777788889999n;
-const actionHash = 42424242424242424242424242424242n;      // ActionClass || SizeBucket digest, opaque here
 const epoch      = 7n;                                       // small realistic epoch id
 const LEAF_INDEX = 21n;                                      // 0b10101 -> exercises both path-index bits
+
+// --- ZK opt-in settlement action binding (v1: transfer to a fresh address) ---
+// The action executed at SettleZk is "transfer AMOUNT lamports to RECIPIENT".
+// actionHash binds BOTH, so a relay cannot redirect the escrow: it is the
+// 3-input circom Poseidon over the recipient (split into two 128-bit big-endian
+// halves, each < 2^128 < r so no modular reduction is needed and no collision
+// resistance is lost) and the amount as a field element:
+//
+//   actionHash = Poseidon(recipientHi128, recipientLo128, amount)
+//
+// This is the exact value the on-chain program recomputes with `sol_poseidon`
+// and the exact value `mirror_core::transfer_action_hash` computes on the host,
+// so the value the prover commits to and the value the program enforces match.
+// RECIPIENT is the 32 bytes 0x01,0x02,..,0x20 and AMOUNT is 0.25 SOL; the
+// integration test uses the identical recipient/amount.
+const RECIPIENT = Buffer.from(
+  Array.from({ length: 32 }, (_, i) => i + 1)
+); // bytes 0x01..0x20
+const AMOUNT_LAMPORTS = 250000000n; // 0.25 SOL, escrowed at CommitDeposit
+const recipientHi = BigInt("0x" + RECIPIENT.subarray(0, 16).toString("hex"));
+const recipientLo = BigInt("0x" + RECIPIENT.subarray(16, 32).toString("hex"));
 
 async function main() {
   const poseidon = await buildPoseidon();
   const F = poseidon.F;
   const H = (arr) => F.toObject(poseidon(arr)); // hash BigInt[] -> BigInt
+
+  // actionHash = Poseidon(recipientHi128, recipientLo128, amount) (see above).
+  const actionHash = H([recipientHi, recipientLo, AMOUNT_LAMPORTS]);
 
   // commitment = Poseidon(secret, actionHash, epoch)   (the Merkle leaf)
   const commitment = H([secret, actionHash, epoch]);

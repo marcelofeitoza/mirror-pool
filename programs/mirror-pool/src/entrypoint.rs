@@ -39,6 +39,10 @@ pub fn process_instruction(
         wire::tag::INIT_POOL => instructions::init_pool::process(program_id, accounts, data),
         wire::tag::COMMIT => instructions::commit::process(program_id, accounts, data),
         wire::tag::SETTLE_EPOCH => instructions::settle_epoch::process(program_id, accounts, data),
+        wire::tag::COMMIT_DEPOSIT => {
+            instructions::commit_deposit::process(program_id, accounts, data)
+        }
+        wire::tag::SETTLE_ZK => instructions::settle_zk::process(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

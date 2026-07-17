@@ -39,8 +39,12 @@ pinocchio = { version = "0.10", features = ["cpi"] }
 # Allocation-free, syscall-backed logging (log! macro).
 pinocchio-log = "0.5"
 # System-program CPI helpers (CreateAccount, Transfer) used to create the
-# program-owned PDAs and move the anti-Sybil entry fee.
+# program-owned PDAs and move the anti-Sybil entry fee / ZK escrow.
 pinocchio-system = "0.5"
+# On-chain Groth16 verifier for the ZK opt-in membership proof (SETTLE_ZK).
+# Uses the Solana alt_bn128 syscalls (via solana-bn254); builds for SBF and
+# verifies in < ~200k CU. Consumes the vendored VERIFYINGKEY in src/vk.rs.
+groth16-solana = "0.2.0"
 
 [dev-dependencies]
 # In-process SVM test harness: loads the compiled .so and runs instructions

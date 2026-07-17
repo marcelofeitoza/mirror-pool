@@ -113,6 +113,9 @@ pub fn append(pool_data: &mut [u8], leaf: &[u8; 32]) -> Result<[u8; 32], Program
     }
 
     pool::set_current_root(pool_data, &current_hash)?;
+    // Record the new root in the recent-root ring so SETTLE_ZK can verify a proof
+    // made against this snapshot even after later commits move the frontier.
+    pool::record_root_history(pool_data, &current_hash)?;
     let next = index
         .checked_add(1)
         .ok_or(MirrorPoolError::ArithmeticOverflow)?;

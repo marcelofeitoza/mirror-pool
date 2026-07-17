@@ -149,6 +149,39 @@ pub fn action_hash(action: &ActionClass) -> Hash32 {
     field::to_be(&field::from_be(&digest))
 }
 
+/// The canonical `actionHash` for the ZK opt-in settlement action.
+///
+/// The v1 opt-in action is "transfer `amount` lamports to `recipient`" (a
+/// fresh address). `actionHash` binds BOTH so the settling relay cannot
+/// redirect the escrow:
+///
+/// ```text
+/// actionHash = Poseidon(recipientHi128, recipientLo128, amount)
+/// ```
+///
+/// The 32-byte `recipient` is split into two big-endian 128-bit halves (each
+/// < 2^128 < r, so both are canonical BN254 scalars with no modular reduction
+/// and no loss of collision resistance) and `amount` is the `u64` as a field
+/// element. `actionHash` is a PUBLIC input of the membership circuit, so a proof
+/// exists only for a member whose committed leaf bound this exact
+/// `(recipient, amount)`. The on-chain program recomputes this identical hash
+/// with the `sol_poseidon` syscall (circomlib Poseidon, big-endian) and requires
+/// it to equal the proof's `actionHash`; the CLI prover feeds the same value to
+/// the circuit. All three sides therefore agree byte-for-byte.
+pub fn transfer_action_hash(recipient: &Hash32, amount: u64) -> Hash32 {
+    let mut hi = [0u8; 32];
+    hi[16..].copy_from_slice(&recipient[0..16]);
+    let mut lo = [0u8; 32];
+    lo[16..].copy_from_slice(&recipient[16..32]);
+    let mut amt = [0u8; 32];
+    amt[24..].copy_from_slice(&amount.to_be_bytes());
+    field::poseidon(&[
+        field::from_be(&hi),
+        field::from_be(&lo),
+        field::from_be(&amt),
+    ])
+}
+
 /// Compute the commitment leaf for `(secret, action, epoch)`.
 ///
 /// `commitment = Poseidon(secret, actionHash, epoch)`, exactly the leaf the
@@ -327,6 +360,10 @@ pub mod wire {
         pub const INIT_POOL: u8 = 0;
         pub const COMMIT: u8 = 1;
         pub const SETTLE_EPOCH: u8 = 2;
+        /// ZK opt-in path: escrow + commit (see [`super::COMMIT_DEPOSIT_LEN`]).
+        pub const COMMIT_DEPOSIT: u8 = 3;
+        /// ZK opt-in path: settle one membership (see [`super::SETTLE_ZK_LEN`]).
+        pub const SETTLE_ZK: u8 = 4;
     }
 
     /// INIT_POOL layout: [tag(1)][epoch_slots(8)][k_floor(4)][entry_fee(8)] -
@@ -343,11 +380,36 @@ pub mod wire {
     /// n_nullifiers * 32 bytes. The relayer submits the whole epoch atomically.
     pub const SETTLE_HEADER_LEN: usize = 1 + 8 + 4;
 
+    /// COMMIT_DEPOSIT layout: [tag(1)][commitment(32)][amount(8 LE)] - the ZK
+    /// opt-in escrow. Escrows `amount` lamports and posts the commitment whose
+    /// `actionHash` binds `(recipient, amount)` (see
+    /// [`super::transfer_action_hash`]). MUST stay byte-identical to the
+    /// program's `wire::COMMIT_DEPOSIT_LEN`.
+    pub const COMMIT_DEPOSIT_LEN: usize = 1 + 32 + 8;
+
+    /// SETTLE_ZK layout (ONE membership per call; the coordinator batches calls):
+    ///
+    /// ```text
+    /// [tag(1)][epoch(8 LE)][amount(8 LE)]
+    ///   [proof_a(64)][proof_b(128)][proof_c(64)]
+    ///   [root(32)][nullifierHash(32)][actionHash(32)][epoch(32 BE)]
+    /// ```
+    ///
+    /// The four trailing 32-byte values are the Groth16 public inputs in the
+    /// FIXED order [root, nullifierHash, actionHash, epoch]. `epoch` appears
+    /// twice: the `u64` header drives the window-closed gate and the nullifier
+    /// PDA seed, and the 32-byte big-endian public input is what the proof
+    /// commits to; the program requires the two encodings to agree. MUST stay
+    /// byte-identical to the program's `wire::SETTLE_ZK_LEN`.
+    pub const SETTLE_ZK_LEN: usize = 1 + 8 + 8 + 64 + 128 + 64 + 32 + 32 + 32 + 32;
+
     // Layout sanity: keep the documented sizes honest at compile time and in
     // lockstep with the on-chain program's mirrored constants.
     const _: () = assert!(INIT_POOL_LEN == 21);
     const _: () = assert!(COMMIT_LEN == 33);
     const _: () = assert!(SETTLE_HEADER_LEN == 13);
+    const _: () = assert!(COMMIT_DEPOSIT_LEN == 41);
+    const _: () = assert!(SETTLE_ZK_LEN == 401);
 }
 
 #[cfg(test)]
@@ -473,6 +535,50 @@ mod tests {
             };
         }
         assert_eq!(cur, root, "recomputed Merkle root must match the circuit");
+    }
+
+    #[test]
+    fn transfer_action_hash_matches_fixture() {
+        // The committed proof fixture's actionHash (public signal [2]) is built
+        // by gen_fixture.js as Poseidon(recipientHi, recipientLo, amount) for the
+        // recipient bytes 0x01..0x20 and 0.25 SOL. transfer_action_hash must
+        // reproduce it exactly, proving the host binding equals the circuit's.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/artifacts/proof_fixture.json"
+        )))
+        .unwrap();
+        let ps = fixture["publicSignals"].as_array().unwrap();
+        let fixture_action_hash = field::from_dec(ps[2].as_str().unwrap());
+
+        let mut recipient = [0u8; 32];
+        for (i, b) in recipient.iter_mut().enumerate() {
+            *b = (i + 1) as u8;
+        }
+        let amount: u64 = 250_000_000;
+
+        assert_eq!(
+            transfer_action_hash(&recipient, amount),
+            fixture_action_hash,
+            "transfer_action_hash must equal the circuit's actionHash"
+        );
+    }
+
+    #[test]
+    fn transfer_action_hash_binds_recipient_and_amount() {
+        let r0 = [1u8; 32];
+        let mut r1 = [1u8; 32];
+        r1[31] = 2;
+        assert_ne!(
+            transfer_action_hash(&r0, 100),
+            transfer_action_hash(&r1, 100),
+            "recipient must change actionHash"
+        );
+        assert_ne!(
+            transfer_action_hash(&r0, 100),
+            transfer_action_hash(&r0, 101),
+            "amount must change actionHash"
+        );
     }
 
     #[test]

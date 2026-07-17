@@ -18,7 +18,7 @@
 //!   (`k_floor`) means an epoch below the floor rolls forward instead of
 //!   executing into a set small enough to deanonymize by elimination.
 //!
-//! v1 status: all three instructions are implemented. `INIT_POOL` creates the
+//! v1 status: all five instructions are implemented. `INIT_POOL` creates the
 //! program-owned Pool PDA (system-program CPI) and fixes its config; `COMMIT`
 //! appends a leaf to a frontier Merkle accumulator, lazily creates the Epoch
 //! PDA, bumps its commit count, and collects the anti-Sybil entry fee;
@@ -26,13 +26,25 @@
 //! on-chain k-floor, and per-nullifier anti-replay via PDA existence, then
 //! marks the epoch settled.
 //!
-//! Honesty note: v1 does NOT cryptographically bind each settled nullifier to a
-//! distinct prior commitment - that soundness is the v2 Groth16 membership
-//! proof (see `docs/ROADMAP.md`). What v1 enforces on-chain is shared-epoch
-//! batching, the k-anonymity floor (via the Epoch account's commit count),
-//! nullifier anti-replay, relay-authority, and fail-closed parsing. The pooled
-//! behavior execution (a CPI to the swap/stake) is a documented v2 hook; the
-//! settlement handler marks the point where it plugs in.
+//! There are two settlement paths:
+//!
+//! - The CROWD path (`COMMIT` / `SETTLE_EPOCH`): participants sign their own
+//!   identical actions and the coordinator composes them. It does NOT
+//!   cryptographically bind each settled nullifier to a distinct prior
+//!   commitment; what it enforces on-chain is shared-epoch batching, the
+//!   k-anonymity floor (via the Epoch account's commit count), nullifier
+//!   anti-replay, relay-authority, and fail-closed parsing.
+//! - The ZK OPT-IN path (`COMMIT_DEPOSIT` / `SETTLE_ZK`): a participant escrows
+//!   the action input into the pool at commit; at settle a relay proves in zero
+//!   knowledge (Groth16 over the SAME Poseidon accumulator) that an output
+//!   corresponds to SOME committed member without revealing which, and the action
+//!   executes to a FRESH address. This cryptographically hides which participant
+//!   initiated. `SETTLE_ZK` verifies the membership proof against a recent root
+//!   (a small root-history ring buffer on the Pool), enforces per-nullifier
+//!   anti-replay, binds the recipient+amount into the proof's `actionHash` so the
+//!   relay cannot redirect, and executes the v1 action (transfer the escrow to
+//!   the fresh recipient). Swap/stake-from-pool are documented extensions of the
+//!   same pattern (execute a different action from the pool authority via CPI).
 //!
 //! Build:
 //!
@@ -42,9 +54,14 @@
 
 use pinocchio::error::ProgramError;
 
+pub mod action;
 pub mod instructions;
 pub mod pda;
 pub mod state;
+
+/// Vendored Groth16 verifying key (`src/vk.rs`, copied from
+/// `circuits/artifacts/vk.rs`). Consumed only by the SETTLE_ZK handler.
+pub mod vk;
 
 #[cfg(not(feature = "no-entrypoint"))]
 mod entrypoint;
@@ -67,6 +84,10 @@ pub mod wire {
         pub const INIT_POOL: u8 = 0;
         pub const COMMIT: u8 = 1;
         pub const SETTLE_EPOCH: u8 = 2;
+        /// ZK opt-in path: escrow + commit (see [`super::COMMIT_DEPOSIT_LEN`]).
+        pub const COMMIT_DEPOSIT: u8 = 3;
+        /// ZK opt-in path: settle one membership (see [`super::SETTLE_ZK_LEN`]).
+        pub const SETTLE_ZK: u8 = 4;
     }
 
     /// COMMIT layout: `[tag(1)][commitment(32)]`.
@@ -85,6 +106,36 @@ pub mod wire {
     /// into the pool at COMMIT time; `0` disables it.
     pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8;
 
+    /// COMMIT_DEPOSIT layout: `[tag(1)][commitment(32)][amount(8 LE)]`.
+    /// MUST match `mirror_core::wire::COMMIT_DEPOSIT_LEN`.
+    ///
+    /// The ZK opt-in escrow: escrow `amount` lamports into the pool and append
+    /// the commitment (whose `actionHash` binds `(recipient, amount)`) to the
+    /// SAME frontier accumulator the crowd `COMMIT` path uses.
+    pub const COMMIT_DEPOSIT_LEN: usize = 1 + 32 + 8;
+
+    /// SETTLE_ZK layout (ONE membership per call; batch at the coordinator).
+    /// MUST match `mirror_core::wire::SETTLE_ZK_LEN`.
+    ///
+    /// ```text
+    /// [tag(1)][epoch(8 LE)][amount(8 LE)]
+    ///   [proof_a(64)][proof_b(128)][proof_c(64)]
+    ///   [root(32)][nullifierHash(32)][actionHash(32)][epoch(32 BE)]
+    /// ```
+    ///
+    /// The four trailing 32-byte values are the Groth16 public inputs in the
+    /// FIXED order [root, nullifierHash, actionHash, epoch].
+    pub const SETTLE_ZK_LEN: usize = 1 + 8 + 8 + 64 + 128 + 64 + 32 + 32 + 32 + 32;
+
+    /// Groth16 proof component sizes (groth16-solana v0.2.0 byte layout).
+    pub const PROOF_A_LEN: usize = 64;
+    pub const PROOF_B_LEN: usize = 128;
+    pub const PROOF_C_LEN: usize = 64;
+    /// One Groth16 public input (a canonical big-endian BN254 scalar).
+    pub const PUBLIC_INPUT_LEN: usize = 32;
+    /// Number of public inputs: [root, nullifierHash, actionHash, epoch].
+    pub const N_PUBLIC_INPUTS: usize = 4;
+
     /// Size of one commitment / nullifier on the wire.
     pub const HASH_LEN: usize = 32;
 
@@ -98,6 +149,11 @@ pub mod wire {
     const _: () = assert!(COMMIT_LEN == 33);
     const _: () = assert!(SETTLE_HEADER_LEN == 13);
     const _: () = assert!(INIT_POOL_LEN == 21);
+    const _: () = assert!(COMMIT_DEPOSIT_LEN == 41);
+    const _: () = assert!(SETTLE_ZK_LEN == 401);
+    const _: () = assert!(
+        SETTLE_ZK_LEN == 1 + 8 + 8 + PROOF_A_LEN + PROOF_B_LEN + PROOF_C_LEN + 4 * PUBLIC_INPUT_LEN
+    );
 }
 
 /// Program-local error codes, surfaced on-chain as `ProgramError::Custom`.
@@ -137,8 +193,24 @@ pub enum MirrorPoolError {
     /// The epoch account's stored id does not match the id derived/requested
     /// for this instruction.
     EpochMismatch = 11,
+    /// SETTLE_ZK: the Groth16 membership proof did not verify against the
+    /// supplied public inputs (or a public input was not a canonical BN254
+    /// scalar). Fail closed: no nullifier is created and no escrow is moved.
+    ProofVerificationFailed = 12,
+    /// SETTLE_ZK: the proof's `root` is not in the pool's recent-root ring
+    /// buffer. A proof is made against a root snapshot, so settle accepts any
+    /// recent root; a root that never existed (or has aged out) is rejected.
+    RootNotKnown = 13,
+    /// SETTLE_ZK: the recomputed `actionHash` (from the settle recipient and
+    /// amount) does not equal the proof's `actionHash` public input, i.e. the
+    /// relay tried to redirect the escrow to a different recipient/amount than
+    /// the one the committed member bound.
+    ActionHashMismatch = 14,
+    /// SETTLE_ZK: the pool does not hold enough lamports to pay the bound
+    /// `amount` while staying rent-exempt (escrow accounting error).
+    InsufficientEscrow = 15,
     /// Skeleton guard: reserved for handlers whose logic has not landed yet.
-    /// Unused in v1 (all three instructions are implemented) but kept so the
+    /// Unused in v1 (all five instructions are implemented) but kept so the
     /// off-chain error mapping stays stable.
     NotImplemented = 100,
 }

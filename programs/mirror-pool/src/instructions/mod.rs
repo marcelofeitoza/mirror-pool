@@ -14,5 +14,7 @@
 //!   signer is rejected before any state changes.
 
 pub mod commit;
+pub mod commit_deposit;
 pub mod init_pool;
 pub mod settle_epoch;
+pub mod settle_zk;
