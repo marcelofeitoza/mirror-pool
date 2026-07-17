@@ -22,3 +22,12 @@ notes/
 # OS / editor
 .DS_Store
 *.swp
+
+# Circuits: build outputs and large binaries (never commit ptau/zkey/wasm)
+circuits/node_modules/
+circuits/*.ptau
+circuits/*.zkey
+circuits/*.wasm
+circuits/*_js/
+circuits/*.r1cs
+circuits/*.sym

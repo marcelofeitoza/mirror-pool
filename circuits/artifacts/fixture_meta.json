@@ -1,0 +1,9 @@
+{
+  "publicInputOrder": [
+    "root",
+    "nullifierHash",
+    "actionHash",
+    "epoch"
+  ],
+  "nPublic": 4
+}
