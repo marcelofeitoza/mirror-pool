@@ -1,14 +1,16 @@
 # mirror-cli: participant-side CLI (v1 deliverable 5 in docs/ROADMAP.md).
 #
-# Lets a reviewer drive the commit/settle flow by hand: derive a secret,
-# compute the epoch-bound commitment, and inspect pool/epoch status.
+# Lets a reviewer drive the full commit/settle flow by hand against a live
+# cluster (Surfpool/devnet): initialize a pool, commit into the current shared
+# epoch (crowd path), escrow + commit for the ZK opt-in path, generate the
+# Groth16 membership proof, and inspect pool/epoch status.
 [package]
 name = "mirror-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Participant CLI for mirror-pool: commit an action into the current shared epoch, inspect pool status, and (v2) produce ZK-deniable initiation proofs."
+description = "Participant CLI for mirror-pool: init a pool, commit an action into the current shared epoch, escrow + commit for the ZK opt-in path, produce Groth16 membership proofs, and inspect pool status."
 
 [dependencies]
 mirror-core.workspace = true
@@ -20,3 +22,26 @@ serde_json.workspace = true
 # user-supplied seed into a 32-byte Secret (deterministic, so the flow is
 # testable end to end); v2 replaces seeds with OS randomness + encrypted notes.
 sha2.workspace = true
+# Big-integer arithmetic for the Groth16 proof serialization: decimal <-> 32-byte
+# big-endian field elements and the BN254 base-field G1 negation `prove` emits in
+# the SettleZk `proof_a`. Public crate; no cryptography of its own.
+num-bigint = "0.4"
+
+# Split Solana client + transaction crates, pinned to the SAME majors the on-chain
+# program and the sibling host crates link (solana-pubkey v4, solana-instruction
+# v3, solana-keypair/signer v3, solana-rpc-client v4) so Pubkey / Instruction /
+# AccountMeta / Keypair are ONE type set across the repo. `curve25519` gives the
+# host build `Pubkey::find_program_address` for pool/epoch/nullifier PDA
+# derivation. Kept local to this crate (not promoted into the workspace deps) so
+# wiring the participant submitter never perturbs the other host crates.
+solana-pubkey = { version = "4", features = ["curve25519"] }
+solana-instruction = "3"
+solana-keypair = "3"
+solana-signer = "3"
+solana-hash = "4"
+solana-message = "4"
+solana-transaction = "4"
+solana-commitment-config = "3"
+# Blocking JSON-RPC client (no async runtime in the CLI); talks to the local
+# Surfpool mainnet mirror at http://127.0.0.1:8899 by default.
+solana-rpc-client = "4"

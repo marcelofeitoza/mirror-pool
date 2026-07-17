@@ -13,25 +13,42 @@
 //!    Below the floor the epoch rolls forward. This CLI therefore treats a
 //!    commit as "queued until the floor is met", never "will execute at T".
 //! 3. **Gasless rotating relay.** The participant's wallet posts only the
-//!    commitment. Settlement is submitted and paid for by the rotating
-//!    coordinator, so no acting wallet funds or signs its own execution and
-//!    the fee-payer cannot be used as a consolidation node.
+//!    commitment (crowd path) or the escrow + commitment (ZK opt-in path).
+//!    Settlement is submitted and paid for by the rotating coordinator, so no
+//!    acting wallet funds or signs its own execution and the fee-payer cannot be
+//!    used as a consolidation node. That is why `prove` EMITS the `SettleZk`
+//!    instruction for the coordinator instead of submitting it.
 //! 4. **Fixed action shape.** Every action in a pool has an identical
 //!    observable shape (same `ActionClass`, same `SizeBucket`). Amounts are
 //!    bucketed, never free-form: public studies show variable amounts leak a
 //!    large fraction of anonymity to amount-matching alone.
 //!
-//! v1 flow: `commit` derives a deterministic secret from a seed, computes the
-//! epoch-bound commitment via `mirror_core::commit`, and prints the note the
-//! participant must keep. `status` reports pool/epoch info (stubbed until the
-//! on-chain reads land). `prove` is a v2 placeholder for ZK-deniable
-//! initiation (Poseidon + Groth16 membership proof, see docs/ROADMAP.md).
+//! Subcommands: `init-pool` (admin: create + fix a pool's config), `commit`
+//! (crowd path: post a commitment binding secret+action+epoch), `deposit-commit`
+//! (ZK opt-in: escrow lamports + post a commitment binding secret+recipient+amount),
+//! `prove` (ZK opt-in: rebuild the Merkle path, generate + verify a Groth16
+//! membership proof, and emit the `SettleZk` instruction), and `status` (inspect
+//! the pool + current epoch on-chain).
 
-use anyhow::{Context, Result};
+mod chain;
+mod groth16;
+mod note;
+mod prove;
+mod tree;
+mod util;
+
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use mirror_core::{wire, ActionClass, EpochSchedule, Hash32, KAnon, Secret, SizeBucket};
-use serde::Serialize;
+use mirror_core::{ActionClass, Epoch, Hash32, Secret, SizeBucket};
 use sha2::{Digest, Sha256};
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
+use std::path::PathBuf;
+use std::str::FromStr;
+
+use crate::chain::Chain;
+use crate::note::{ActionRecord, Note, NOTE_VERSION};
+use crate::util::to_hex;
 
 /// Domain-separation tags local to the CLI, so a hash computed here can never
 /// collide with mirror-core's commitment/nullifier domains.
@@ -42,27 +59,16 @@ mod domain {
     pub const LABEL: &[u8] = b"mirror-cli:v1:label";
 }
 
-/// Stub epoch schedule until `status`/`commit` read the pool's on-chain
-/// `InitPool` config. 150 slots is roughly one minute on mainnet; k_floor 10
-/// mirrors the ROADMAP examples: never settle into a set an observer could
-/// deanonymize by elimination.
-/// TODO(milestone: v1 deliverable 2/3, docs/ROADMAP.md): fetch the real
-/// `EpochSchedule` from the pool account instead of this constant.
-const STUB_SCHEDULE: EpochSchedule = EpochSchedule {
-    epoch_slots: 150,
-    k_floor: 10,
-};
-
-/// Stub "current slot" so the CLI is runnable and deterministic offline.
-/// TODO(milestone: v1 deliverable 7, docs/ROADMAP.md): replace with an RPC
-/// `getSlot` against Surfpool/devnet.
-const STUB_CURRENT_SLOT: u64 = 1_500_000;
+/// Default local RPC: the Surfpool mainnet mirror.
+const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8899";
+/// Default directory for saved notes (gitignored).
+const DEFAULT_NOTE_DIR: &str = "notes";
 
 #[derive(Parser)]
 #[command(
     name = "mirror-cli",
     version,
-    about = "Participant CLI for mirror-pool: commit an action into the current shared epoch, inspect pool status.",
+    about = "Participant CLI for mirror-pool: init a pool, commit into the current shared epoch, escrow + commit for the ZK opt-in path, produce Groth16 membership proofs, and inspect pool status.",
     long_about = None
 )]
 struct Cli {
@@ -72,59 +78,164 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Commit an action into the current epoch and print the note to keep.
-    ///
-    /// The commitment binds (secret, action, epoch), so the coordinator that
-    /// later settles the epoch cannot substitute a different action for the
-    /// one committed. Only the 32-byte commitment would go on-chain; the
-    /// action and secret stay client-side until settlement.
+    /// (admin) Create a pool and fix its config forever, then print the Pool PDA.
+    InitPool(InitPoolArgs),
+    /// (crowd path) Commit an action into the current epoch and save the note.
     Commit(CommitArgs),
-    /// Show pool and epoch status (window, settle slot, k-anonymity floor).
+    /// (ZK opt-in) Escrow lamports + commit a transfer to a fresh recipient.
+    DepositCommit(DepositCommitArgs),
+    /// (ZK opt-in) Rebuild the Merkle path, prove membership, and emit SettleZk.
+    Prove(ProveArgs),
+    /// Show pool config + current epoch on-chain.
     Status(StatusArgs),
-    /// (v2 placeholder) Produce a ZK-deniable initiation proof.
-    Prove,
+}
+
+#[derive(Args)]
+struct InitPoolArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// Keypair file that becomes `pool.authority` (the settle relay). It must
+    /// sign InitPool, so its keypair is required here.
+    #[arg(long)]
+    authority: PathBuf,
+    /// Keypair file that funds the Pool PDA rent (defaults to the authority).
+    #[arg(long)]
+    payer: Option<PathBuf>,
+    /// Slots per epoch window.
+    #[arg(long)]
+    epoch_slots: u64,
+    /// Minimum commits before an epoch may settle (must be >= 2).
+    #[arg(long)]
+    k_floor: u32,
+    /// Per-commit anti-Sybil entry fee in lamports (0 disables it).
+    #[arg(long, default_value_t = 0)]
+    entry_fee: u64,
+    /// Basis-point share of each entry fee that accrues to the on-chain reward
+    /// pool (0..=10000; fixed forever at init). See docs/INCENTIVES.md.
+    #[arg(long, default_value_t = 0)]
+    reward_bps: u16,
 }
 
 #[derive(Args)]
 struct CommitArgs {
-    /// Pool identifier (a label for now; the pool account address once
-    /// on-chain reads land).
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// The Pool PDA (base58) to commit into.
     #[arg(long)]
     pool: String,
-
-    /// Seed for the participant secret. The secret is derived
-    /// deterministically from (pool, seed) so test flows are reproducible.
-    /// v2 replaces this with OS randomness plus an encrypted note file.
+    /// Participant keypair: signs the Commit and pays the fee + rent.
+    #[arg(long)]
+    keypair: PathBuf,
+    /// Seed for the participant secret; derived deterministically from
+    /// (pool, seed) so test flows are reproducible. v2 replaces this with OS
+    /// randomness plus an encrypted note file.
     #[arg(long)]
     seed: String,
-
-    /// Slot to derive the current epoch from. Defaults to an offline stub;
-    /// pass the real slot when driving Surfpool/devnet by hand.
+    /// Slot to derive the current epoch from (defaults to a fresh `getSlot`).
     #[arg(long)]
     slot: Option<u64>,
-
+    /// Directory to save the note into (gitignored).
+    #[arg(long, default_value = DEFAULT_NOTE_DIR)]
+    note_dir: PathBuf,
     /// The pooled action to commit to. Its shape must match the pool's fixed
-    /// ActionClass exactly; heterogeneous actions leak like mixed
-    /// denominations.
+    /// ActionClass exactly; heterogeneous actions leak like mixed denominations.
     #[command(subcommand)]
     action: ActionArg,
 }
 
 #[derive(Args)]
-struct StatusArgs {
-    /// Pool identifier.
+struct DepositCommitArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// The Pool PDA (base58) to commit into.
     #[arg(long)]
     pool: String,
+    /// Depositor keypair: signs CommitDeposit and pays the escrow + rent.
+    #[arg(long)]
+    keypair: PathBuf,
+    /// Seed for the participant secret (deterministic from (pool, seed)).
+    #[arg(long)]
+    seed: String,
+    /// Fresh recipient (base58) that receives the escrow at SettleZk. Its address
+    /// and `amount` are bound into the commitment's actionHash so the relay
+    /// cannot redirect the escrow.
+    #[arg(long)]
+    recipient: String,
+    /// Lamports to escrow (and the amount bound into actionHash). Must be > 0.
+    #[arg(long)]
+    amount: u64,
+    /// Slot to derive the current epoch from (defaults to a fresh `getSlot`).
+    #[arg(long)]
+    slot: Option<u64>,
+    /// Directory to save the note into (gitignored).
+    #[arg(long, default_value = DEFAULT_NOTE_DIR)]
+    note_dir: PathBuf,
+}
 
-    /// Slot to evaluate the epoch at. Defaults to the offline stub.
+#[derive(Args)]
+struct ProveArgs {
+    /// The saved ZK opt-in note (from `deposit-commit`).
+    #[arg(long)]
+    note: PathBuf,
+    /// RPC endpoint (used to confirm the proof root is a known recent root).
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// Circuit witness generator (gitignored; produced by `bash circuits/build.sh`).
+    #[arg(long, default_value = "circuits/membership_js/membership.wasm")]
+    wasm: PathBuf,
+    /// Groth16 proving key (gitignored; produced by `bash circuits/build.sh`).
+    #[arg(long, default_value = "circuits/membership_final.zkey")]
+    zkey: PathBuf,
+    /// Groth16 verification key (committed under circuits/artifacts/).
+    #[arg(long, default_value = "circuits/artifacts/verification_key.json")]
+    vk: PathBuf,
+    /// snarkjs invocation (default `snarkjs`; `node <dir>/cli.cjs` also works).
+    #[arg(long, default_value = "snarkjs")]
+    snarkjs: String,
+    /// Optional full leaf set (hex, one per line) to rebuild the whole tree and
+    /// prove against the CURRENT root instead of the note's frontier snapshot.
+    #[arg(long)]
+    leaves: Option<PathBuf>,
+    /// Directory for input.json/proof.json/public.json (default: a temp dir).
+    #[arg(long)]
+    work_dir: Option<PathBuf>,
+    /// Also write the emitted SettleZk bundle (JSON) to this path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct StatusArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58). Optional; only used to echo it back.
+    #[arg(long)]
+    program_id: Option<String>,
+    /// The Pool PDA (base58) to inspect.
+    #[arg(long)]
+    pool: String,
+    /// Slot to evaluate the epoch at (defaults to a fresh `getSlot`).
     #[arg(long)]
     slot: Option<u64>,
 }
 
-/// CLI-facing action parameters. Mints/validators accept either a 64-char hex
-/// id or a free-form label (hashed to a stand-in id for local testing).
-/// Amounts are intentionally absent: only a `SizeBucket` is accepted, because
-/// free-form amounts are an amount-matching oracle.
+/// CLI-facing action parameters for the crowd path. Mints/validators accept
+/// either a 64-char hex id or a free-form label (hashed to a stand-in id for
+/// local testing). Amounts are intentionally absent: only a `SizeBucket` is
+/// accepted, because free-form amounts are an amount-matching oracle.
 #[derive(Subcommand)]
 enum ActionArg {
     /// Pooled Jupiter swap: every participant swaps the same mint pair in the
@@ -172,8 +283,8 @@ impl ActionArg {
     }
 }
 
-/// clap-parsable mirror of `mirror_core::SizeBucket`. Kept as a separate enum
-/// so mirror-core stays free of CLI dependencies.
+/// clap-parsable mirror of `mirror_core::SizeBucket`. Kept as a separate enum so
+/// mirror-core stays free of CLI dependencies.
 #[derive(Clone, Copy, ValueEnum)]
 enum SizeArg {
     Nano,
@@ -193,124 +304,294 @@ impl From<SizeArg> for SizeBucket {
     }
 }
 
-/// The client-side record a participant must keep to be counted at
-/// settlement: the secret is the pre-image proving the commitment is theirs,
-/// and the nullifier is what settlement reveals to prevent double-acting
-/// within the epoch.
-///
-/// TODO(milestone: v1 deliverable 5 hardening, docs/ROADMAP.md): persist this
-/// to disk (mode 0600) instead of printing; v2 encrypts it.
-#[derive(Serialize)]
-struct Note {
-    version: u32,
-    pool: String,
-    slot: u64,
-    epoch: u64,
-    action: ActionClass,
-    secret_hex: String,
-    commitment_hex: String,
-    nullifier_hex: String,
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::InitPool(args) => run_init_pool(args),
         Command::Commit(args) => run_commit(args),
+        Command::DepositCommit(args) => run_deposit_commit(args),
+        Command::Prove(args) => run_prove(args),
         Command::Status(args) => run_status(args),
-        Command::Prove => {
-            println!("not yet: ZK-deniable initiation is v2");
-            Ok(())
-        }
     }
 }
 
+fn run_init_pool(args: InitPoolArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    if args.reward_bps > 10_000 {
+        return Err(anyhow!("--reward-bps must be <= 10000 (basis points)"));
+    }
+    let authority_kp = chain::read_keypair(&args.authority)?;
+    let payer_kp = match &args.payer {
+        Some(p) => chain::read_keypair(p)?,
+        None => chain::read_keypair(&args.authority)?,
+    };
+    let authority = authority_kp.pubkey();
+    let payer = payer_kp.pubkey();
+    let pool = chain::pool_pda(&program_id, &authority);
+
+    let ix = chain::init_pool_ix(
+        &program_id,
+        &pool,
+        &authority,
+        &payer,
+        args.epoch_slots,
+        args.k_floor,
+        args.entry_fee,
+        args.reward_bps,
+    );
+
+    // Fee payer first; add the authority only if it is a distinct signer.
+    let mut signers: Vec<&solana_keypair::Keypair> = vec![&payer_kp];
+    if authority != payer {
+        signers.push(&authority_kp);
+    }
+
+    let chain = Chain::new(args.rpc_url);
+    let sig = chain
+        .submit(&[ix], &signers)
+        .context("submitting InitPool")?;
+
+    println!("pool authority: {authority}");
+    println!("pool PDA:       {pool}");
+    println!("epoch_slots:    {}", args.epoch_slots);
+    println!("k_floor:        {}", args.k_floor);
+    println!("entry_fee:      {} lamports", args.entry_fee);
+    println!("reward_bps:     {}", args.reward_bps);
+    println!("signature:      {sig}");
+    Ok(())
+}
+
 fn run_commit(args: CommitArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let pool = parse_pubkey(&args.pool, "pool")?;
+    let participant_kp = chain::read_keypair(&args.keypair)?;
+    let participant = participant_kp.pubkey();
+
+    let chain = Chain::new(args.rpc_url);
+    let pool_state = chain.pool_state(&pool)?;
+    let slot = match args.slot {
+        Some(s) => s,
+        None => chain.slot()?,
+    };
+    if pool_state.epoch_slots == 0 {
+        return Err(anyhow!("pool epoch_slots is 0"));
+    }
+    let epoch = slot / pool_state.epoch_slots;
+
     let secret = derive_secret(&args.pool, &args.seed);
     let action = args.action.to_action_class();
-    let slot = args.slot.unwrap_or(STUB_CURRENT_SLOT);
-    let epoch = STUB_SCHEDULE.epoch_of_slot(slot);
+    let commitment = mirror_core::commit(&secret, &action, Epoch(epoch));
+    let nf = mirror_core::nullifier(&secret, Epoch(epoch));
 
-    let commitment = mirror_core::commit(&secret, &action, epoch);
-    // Pre-derive the nullifier for this epoch so the note is self-contained.
-    // It is epoch-scoped: the same secret in a later epoch (e.g. after a
-    // below-floor roll-forward) yields a different nullifier.
-    let nf = mirror_core::nullifier(&secret, epoch);
-
-    println!("pool:         {}", args.pool);
-    println!("slot:         {slot}");
-    println!(
-        "epoch:        {} (window {} slots, settles at slot {})",
-        epoch.0,
-        STUB_SCHEDULE.epoch_slots,
-        STUB_SCHEDULE.settle_slot(epoch)
-    );
-    println!("commitment:   {}", to_hex(&commitment.0));
-    println!(
-        "would submit: COMMIT instruction, {} bytes: [tag={}][commitment(32)]",
-        wire::COMMIT_LEN,
-        wire::tag::COMMIT
-    );
-    // TODO(milestone: v1 deliverables 2+7, docs/ROADMAP.md): actually build
-    // and send the COMMIT transaction to the on-chain program on
-    // Surfpool/devnet. Settlement itself is never submitted from here: the
-    // rotating gasless coordinator (v1 deliverable 3) is the sole
-    // fee-payer/signer for SETTLE_EPOCH, so this wallet never funds or signs
-    // its own execution.
-    println!();
-    println!(
-        "note is only counted if epoch {} reaches real k >= {} (below the floor it rolls forward)",
-        epoch.0, STUB_SCHEDULE.k_floor
-    );
-    println!();
+    let epoch_pda = chain::epoch_pda(&program_id, &pool, epoch);
+    let ix = chain::commit_ix(&program_id, &pool, &epoch_pda, &participant, &commitment.0);
+    let sig = chain
+        .submit(&[ix], &[&participant_kp])
+        .context("submitting Commit")?;
 
     let note = Note {
-        version: 1,
-        pool: args.pool,
+        version: NOTE_VERSION,
+        program_id: program_id.to_string(),
+        pool: pool.to_string(),
         slot,
-        epoch: epoch.0,
-        action,
+        epoch,
         secret_hex: to_hex(&secret.0),
         commitment_hex: to_hex(&commitment.0),
         nullifier_hex: to_hex(&nf.0),
+        action: ActionRecord::Crowd { action },
+        leaf_index: None,
+        frontier_pre: None,
     };
-    println!("note (KEEP PRIVATE; anyone holding it can act as you at settlement):");
+    let path = note.save(&args.note_dir)?;
+
+    println!("pool:         {pool}");
+    println!("participant:  {participant}");
+    println!(
+        "epoch:        {epoch} (window {} slots, settles at slot {})",
+        pool_state.epoch_slots,
+        (epoch + 1) * pool_state.epoch_slots
+    );
+    println!("commitment:   {}", note.commitment_hex);
+    println!("nullifier:    {}", note.nullifier_hex);
+    println!("signature:    {sig}");
+    println!("note saved:   {}", path.display());
+    println!();
+    println!(
+        "queued: counted only once epoch {epoch} reaches real k >= {} (below the floor it rolls forward).",
+        pool_state.k_floor
+    );
+    println!("settlement is submitted by the rotating gasless coordinator, never this wallet.");
+    Ok(())
+}
+
+fn run_deposit_commit(args: DepositCommitArgs) -> Result<()> {
+    if args.amount == 0 {
+        return Err(anyhow!(
+            "--amount must be > 0 (a zero escrow has no action to settle)"
+        ));
+    }
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let pool = parse_pubkey(&args.pool, "pool")?;
+    let recipient = parse_pubkey(&args.recipient, "recipient")?;
+    let depositor_kp = chain::read_keypair(&args.keypair)?;
+    let depositor = depositor_kp.pubkey();
+
+    let chain = Chain::new(args.rpc_url);
+    // Read the pool BEFORE the append: commitment_count is our leaf index, and
+    // filled_subtrees is the pre-insert frontier snapshot `prove` walks.
+    let pool_state = chain.pool_state(&pool)?;
+    if pool_state.epoch_slots == 0 {
+        return Err(anyhow!("pool epoch_slots is 0"));
+    }
+    let slot = match args.slot {
+        Some(s) => s,
+        None => chain.slot()?,
+    };
+    let epoch = slot / pool_state.epoch_slots;
+    let leaf_index = pool_state.commitment_count;
+    let frontier_pre: Vec<String> = pool_state.frontier.iter().map(|h| to_hex(h)).collect();
+
+    let secret = derive_secret(&args.pool, &args.seed);
+    let action_hash = mirror_core::transfer_action_hash(&recipient.to_bytes(), args.amount);
+    let commitment = mirror_core::commit_with_action_hash(&secret, &action_hash, Epoch(epoch));
+    let nf = mirror_core::nullifier(&secret, Epoch(epoch));
+
+    let epoch_pda = chain::epoch_pda(&program_id, &pool, epoch);
+    let ix = chain::commit_deposit_ix(
+        &program_id,
+        &pool,
+        &epoch_pda,
+        &depositor,
+        &commitment.0,
+        args.amount,
+    );
+    let sig = chain
+        .submit(&[ix], &[&depositor_kp])
+        .context("submitting CommitDeposit")?;
+
+    let note = Note {
+        version: NOTE_VERSION,
+        program_id: program_id.to_string(),
+        pool: pool.to_string(),
+        slot,
+        epoch,
+        secret_hex: to_hex(&secret.0),
+        commitment_hex: to_hex(&commitment.0),
+        nullifier_hex: to_hex(&nf.0),
+        action: ActionRecord::Transfer {
+            recipient: recipient.to_string(),
+            amount: args.amount,
+        },
+        leaf_index: Some(leaf_index),
+        frontier_pre: Some(frontier_pre),
+    };
+    let path = note.save(&args.note_dir)?;
+
+    println!("pool:         {pool}");
+    println!("depositor:    {depositor}");
+    println!("recipient:    {recipient}");
+    println!("amount:       {} lamports (escrowed)", args.amount);
+    println!(
+        "epoch:        {epoch} (window {} slots, settles at slot {})",
+        pool_state.epoch_slots,
+        (epoch + 1) * pool_state.epoch_slots
+    );
+    println!("leaf index:   {leaf_index}");
+    println!("commitment:   {}", note.commitment_hex);
+    println!("action hash:  {}", to_hex(&action_hash));
+    println!("nullifier:    {}", note.nullifier_hex);
+    println!("signature:    {sig}");
+    println!("note saved:   {}", path.display());
+    println!();
+    println!(
+        "next: `mirror-cli prove --note {}` to produce the SettleZk the coordinator submits.",
+        path.display()
+    );
+    Ok(())
+}
+
+fn run_prove(args: ProveArgs) -> Result<()> {
+    let emit = prove::run(prove::ProveOpts {
+        note_path: args.note,
+        rpc_url: args.rpc_url,
+        wasm: args.wasm,
+        zkey: args.zkey,
+        vk: args.vk,
+        snarkjs: args.snarkjs,
+        leaves: args.leaves,
+        work_dir: args.work_dir,
+        out: args.out,
+    })?;
+
+    println!("proof generated and VERIFIED by snarkjs.");
+    println!();
+    println!("SettleZk instruction (submit from the pool authority / rotating coordinator):");
+    println!("  program_id:     {}", emit.program_id);
+    println!("  epoch:          {}", emit.epoch);
+    println!("  amount:         {} lamports", emit.amount);
+    println!("  root:           {}", emit.root_hex);
+    println!("  nullifierHash:  {}", emit.nullifier_hash_hex);
+    println!("  actionHash:     {}", emit.action_hash_hex);
+    println!();
+    println!("  accounts (in order):");
+    println!("    0. pool           {}  (writable)", emit.pool);
+    println!(
+        "    1. authority      {}  (signer, writable)",
+        emit.authority
+    );
+    println!("    2. nullifier PDA  {}  (writable)", emit.nullifier_pda);
+    println!("    3. recipient      {}  (writable)", emit.recipient);
+    println!("    4. system_program {}", emit.system_program);
+    println!("    5. clock sysvar   {}", emit.clock_sysvar);
+    println!();
+    println!("  data ({} bytes, hex):", emit.settle_zk_data_hex.len() / 2);
+    println!("    {}", emit.settle_zk_data_hex);
+    println!();
     println!(
         "{}",
-        serde_json::to_string_pretty(&note).context("serializing note")?
+        serde_json::to_string_pretty(&emit).context("serializing emit")?
     );
     Ok(())
 }
 
 fn run_status(args: StatusArgs) -> Result<()> {
-    let slot = args.slot.unwrap_or(STUB_CURRENT_SLOT);
-    let epoch = STUB_SCHEDULE.epoch_of_slot(slot);
-    // TODO(milestone: v1 deliverable 2/3, docs/ROADMAP.md): read the pool
-    // account + commitment accumulator on-chain and report the coordinator's
-    // honest KAnon (nominal minus operator-owned/Sybil exclusions), never the
-    // raw commit count.
-    let k = KAnon::default();
-
-    println!("pool:          {}", args.pool);
-    println!("current slot:  {slot} (stub; pass --slot for a real chain slot)");
-    println!("current epoch: {}", epoch.0);
-    println!(
-        "epoch window:  {} slots, settles at slot {}",
-        STUB_SCHEDULE.epoch_slots,
-        STUB_SCHEDULE.settle_slot(epoch)
-    );
-    println!("k_floor:       {}", STUB_SCHEDULE.k_floor);
-    println!(
-        "anonymity set: nominal={} excluded={} real_k={} (stub)",
-        k.nominal,
-        k.excluded,
-        k.real_k()
-    );
-    if k.meets_floor(&STUB_SCHEDULE) {
-        println!("verdict:       floor met; epoch may settle when its window closes");
+    let pool = parse_pubkey(&args.pool, "pool")?;
+    let chain = Chain::new(args.rpc_url);
+    let pool_state = chain.pool_state(&pool)?;
+    let slot = match args.slot {
+        Some(s) => s,
+        None => chain.slot()?,
+    };
+    let epoch = if pool_state.epoch_slots == 0 {
+        0
     } else {
-        println!("verdict:       below floor; epoch rolls forward instead of executing");
+        slot / pool_state.epoch_slots
+    };
+
+    if let Some(pid) = &args.program_id {
+        println!("program id:        {pid}");
+    }
+    println!("pool:              {pool}");
+    println!("authority:         {}", pool_state.authority);
+    println!("epoch_slots:       {}", pool_state.epoch_slots);
+    println!("k_floor:           {}", pool_state.k_floor);
+    println!("entry_fee:         {} lamports", pool_state.entry_fee);
+    println!("commitment_count:  {}", pool_state.commitment_count);
+    println!("current_root:      {}", to_hex(&pool_state.current_root));
+    println!("current slot:      {slot}");
+    println!("current epoch:     {epoch}");
+    if pool_state.epoch_slots > 0 {
+        println!(
+            "settles at slot:   {}",
+            (epoch + 1) * pool_state.epoch_slots
+        );
     }
     Ok(())
+}
+
+/// Parse a base58 pubkey argument with a helpful error label.
+fn parse_pubkey(s: &str, what: &str) -> Result<Pubkey> {
+    Pubkey::from_str(s).map_err(|e| anyhow!("--{what} is not a valid base58 pubkey: {e}"))
 }
 
 /// Derive the participant `Secret` deterministically from (pool, seed).
@@ -329,9 +610,9 @@ fn derive_secret(pool: &str, seed: &str) -> Secret {
     Secret::from_bytes(h.finalize().into())
 }
 
-/// Parse a 32-byte identifier. Exactly 64 hex chars decode literally;
-/// anything else is treated as a human label and hashed (domain-tagged) into
-/// a stand-in id, which keeps local test flows free of real addresses.
+/// Parse a 32-byte identifier. Exactly 64 hex chars decode literally; anything
+/// else is treated as a human label and hashed (domain-tagged) into a stand-in
+/// id, which keeps local test flows free of real addresses.
 fn parse_hash32(s: &str) -> Hash32 {
     let bytes = s.as_bytes();
     if bytes.len() == 64 && bytes.iter().all(u8::is_ascii_hexdigit) {
@@ -356,19 +637,9 @@ fn hex_nibble(b: u8) -> u8 {
     }
 }
 
-fn to_hex(bytes: &[u8]) -> String {
-    use core::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        write!(s, "{b:02x}").expect("writing to a String cannot fail");
-    }
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mirror_core::Epoch;
 
     fn test_action() -> ActionClass {
         ActionClass::Swap {
