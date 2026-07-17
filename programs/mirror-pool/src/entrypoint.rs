@@ -43,6 +43,7 @@ pub fn process_instruction(
             instructions::commit_deposit::process(program_id, accounts, data)
         }
         wire::tag::SETTLE_ZK => instructions::settle_zk::process(program_id, accounts, data),
+        wire::tag::CLAIM_REWARD => instructions::claim_reward::process(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

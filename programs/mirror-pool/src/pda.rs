@@ -11,6 +11,7 @@
 //! Pool PDA       seeds = [b"pool",  authority(32)]
 //! Epoch PDA      seeds = [b"epoch", pool(32), epoch_id(8 LE)]
 //! Nullifier PDA  seeds = [b"nf",    pool(32), epoch_id(8 LE), nullifier(32)]
+//! Dwell PDA      seeds = [b"dwell", pool(32), participant(32)]
 //! ```
 
 use pinocchio::{
@@ -27,6 +28,8 @@ pub const POOL_SEED: &[u8] = b"pool";
 pub const EPOCH_SEED: &[u8] = b"epoch";
 /// Seed prefix for the Nullifier PDA.
 pub const NULLIFIER_SEED: &[u8] = b"nf";
+/// Seed prefix for the per-participant Dwell PDA (crowd-path incentive).
+pub const DWELL_SEED: &[u8] = b"dwell";
 
 /// Find a program-derived address and its bump.
 ///

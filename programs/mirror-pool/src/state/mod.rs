@@ -10,6 +10,7 @@ use pinocchio::error::ProgramError;
 pub mod epoch;
 pub mod merkle;
 pub mod nullifier;
+pub mod participant;
 pub mod pool;
 
 /// Read a single byte at `offset`.
@@ -17,6 +18,17 @@ pub(crate) fn read_u8(data: &[u8], offset: usize) -> Result<u8, ProgramError> {
     data.get(offset)
         .copied()
         .ok_or(ProgramError::AccountDataTooSmall)
+}
+
+/// Read a little-endian `u16` at `offset`.
+pub(crate) fn read_u16(data: &[u8], offset: usize) -> Result<u16, ProgramError> {
+    let bytes = data
+        .get(offset..offset + 2)
+        .ok_or(ProgramError::AccountDataTooSmall)?;
+    let bytes: [u8; 2] = bytes
+        .try_into()
+        .map_err(|_| ProgramError::InvalidAccountData)?;
+    Ok(u16::from_le_bytes(bytes))
 }
 
 /// Read a little-endian `u32` at `offset`.
@@ -57,6 +69,15 @@ pub(crate) fn write_u8(data: &mut [u8], offset: usize, value: u8) -> Result<(), 
         .get_mut(offset)
         .ok_or(ProgramError::AccountDataTooSmall)?;
     *dst = value;
+    Ok(())
+}
+
+/// Write a little-endian `u16` at `offset`.
+pub(crate) fn write_u16(data: &mut [u8], offset: usize, value: u16) -> Result<(), ProgramError> {
+    let dst = data
+        .get_mut(offset..offset + 2)
+        .ok_or(ProgramError::AccountDataTooSmall)?;
+    dst.copy_from_slice(&value.to_le_bytes());
     Ok(())
 }
 

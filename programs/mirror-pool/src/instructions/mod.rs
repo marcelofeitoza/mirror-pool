@@ -13,6 +13,7 @@
 //!   account that is not the expected PDA, not program-owned, or not a required
 //!   signer is rejected before any state changes.
 
+pub mod claim_reward;
 pub mod commit;
 pub mod commit_deposit;
 pub mod init_pool;

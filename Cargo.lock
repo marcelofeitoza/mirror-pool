@@ -1552,9 +1552,19 @@ dependencies = [
  "anyhow",
  "clap",
  "mirror-core",
+ "num-bigint",
  "serde",
  "serde_json",
  "sha2",
+ "solana-commitment-config",
+ "solana-hash",
+ "solana-instruction",
+ "solana-keypair",
+ "solana-message",
+ "solana-pubkey 4.2.0",
+ "solana-rpc-client",
+ "solana-signer",
+ "solana-transaction",
 ]
 
 [[package]]

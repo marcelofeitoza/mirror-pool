@@ -29,8 +29,8 @@ use solana_program_error::ProgramError;
 use solana_pubkey::Pubkey;
 
 use mirror_pool::{
-    pda::{EPOCH_SEED, NULLIFIER_SEED, POOL_SEED},
-    state::{epoch, nullifier, pool},
+    pda::{DWELL_SEED, EPOCH_SEED, NULLIFIER_SEED, POOL_SEED},
+    state::{epoch, nullifier, participant, pool},
     wire::tag,
     MirrorPoolError,
 };
@@ -167,6 +167,15 @@ impl Env {
         .0
     }
 
+    fn dwell_pda(&self, pool: &Pubkey, participant: &Pubkey) -> Pubkey {
+        Pubkey::find_program_address(
+            &[DWELL_SEED, pool.as_ref(), participant.as_ref()],
+            &self.program_id,
+        )
+        .0
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn init_ix(
         &self,
         pool: &Pubkey,
@@ -175,12 +184,14 @@ impl Env {
         epoch_slots: u64,
         k_floor: u32,
         entry_fee: u64,
+        reward_bps: u16,
     ) -> Instruction {
         let mut data = Vec::with_capacity(mirror_pool::wire::INIT_POOL_LEN);
         data.push(tag::INIT_POOL);
         data.extend_from_slice(&epoch_slots.to_le_bytes());
         data.extend_from_slice(&k_floor.to_le_bytes());
         data.extend_from_slice(&entry_fee.to_le_bytes());
+        data.extend_from_slice(&reward_bps.to_le_bytes());
         Instruction {
             program_id: self.program_id,
             accounts: vec![
@@ -238,6 +249,44 @@ impl Env {
                 AccountMeta::new_readonly(self.clock_id, false),
             ],
             data,
+        }
+    }
+
+    /// COMMIT with the optional Dwell PDA appended (crowd-path incentive).
+    fn commit_with_dwell_ix(
+        &self,
+        pool: &Pubkey,
+        epoch_acct: &Pubkey,
+        participant: &Pubkey,
+        dwell: &Pubkey,
+        commitment: &[u8; 32],
+    ) -> Instruction {
+        let mut data = Vec::with_capacity(mirror_pool::wire::COMMIT_LEN);
+        data.push(tag::COMMIT);
+        data.extend_from_slice(commitment);
+        Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(*pool, false),
+                AccountMeta::new(*epoch_acct, false),
+                AccountMeta::new(*participant, true),
+                AccountMeta::new_readonly(self.system_id, false),
+                AccountMeta::new_readonly(self.clock_id, false),
+                AccountMeta::new(*dwell, false),
+            ],
+            data,
+        }
+    }
+
+    fn claim_reward_ix(&self, pool: &Pubkey, participant: &Pubkey, dwell: &Pubkey) -> Instruction {
+        Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new(*pool, false),
+                AccountMeta::new(*participant, true),
+                AccountMeta::new(*dwell, false),
+            ],
+            data: vec![tag::CLAIM_REWARD],
         }
     }
 
@@ -315,11 +364,24 @@ impl Env {
 }
 
 /// Init a pool and return (authority, payer, pool_pda). `payer` is well funded.
+/// Defaults `reward_bps` to 0 (reward pool disabled) so the pre-incentive tests
+/// are unchanged.
 fn init_pool(
     env: &mut Env,
     epoch_slots: u64,
     k_floor: u32,
     entry_fee: u64,
+) -> (Pubkey, Pubkey, Pubkey) {
+    init_pool_with_reward(env, epoch_slots, k_floor, entry_fee, 0)
+}
+
+/// Init a pool with an explicit `reward_bps` entry-fee split.
+fn init_pool_with_reward(
+    env: &mut Env,
+    epoch_slots: u64,
+    k_floor: u32,
+    entry_fee: u64,
+    reward_bps: u16,
 ) -> (Pubkey, Pubkey, Pubkey) {
     let authority = Pubkey::new_unique();
     let payer = Pubkey::new_unique();
@@ -328,7 +390,15 @@ fn init_pool(
     env.fund(authority, SOL);
     let pool = env.pool_pda(&authority);
 
-    let ix = env.init_ix(&pool, &authority, &payer, epoch_slots, k_floor, entry_fee);
+    let ix = env.init_ix(
+        &pool,
+        &authority,
+        &payer,
+        epoch_slots,
+        k_floor,
+        entry_fee,
+        reward_bps,
+    );
     env.process(&ix, &[Check::success()]);
     (authority, payer, pool)
 }
@@ -345,6 +415,9 @@ fn init_pool_creates_v1_and_reinit_fails() {
     assert_eq!(pool::epoch_slots(&acct.data).unwrap(), 10);
     assert_eq!(pool::k_floor(&acct.data).unwrap(), 3);
     assert_eq!(pool::entry_fee(&acct.data).unwrap(), 5_000);
+    assert_eq!(pool::reward_bps(&acct.data).unwrap(), 0);
+    assert_eq!(pool::reward_pool_lamports(&acct.data).unwrap(), 0);
+    assert_eq!(pool::total_unclaimed_dwell(&acct.data).unwrap(), 0);
     assert_eq!(pool::commitment_count(&acct.data).unwrap(), 0);
     assert_eq!(&pool::authority(&acct.data).unwrap(), authority.as_ref());
     assert_ne!(
@@ -354,7 +427,7 @@ fn init_pool_creates_v1_and_reinit_fails() {
     );
 
     // Re-initializing the same pool must fail closed.
-    let ix = env.init_ix(&pool, &authority, &payer, 10, 3, 5_000);
+    let ix = env.init_ix(&pool, &authority, &payer, 10, 3, 5_000, 0);
     env.process(
         &ix,
         &[Check::err(custom(MirrorPoolError::PoolAlreadyInitialized))],
@@ -613,6 +686,7 @@ fn build_zk_pool(
         &mut data,
         epoch_slots,
         k_floor,
+        0,
         0,
         &authority.to_bytes(),
         bump,
@@ -893,6 +967,7 @@ fn settle_zk_unknown_root_fails() {
             10,
             2,
             0,
+            0,
             &authority.to_bytes(),
             bump,
             &empty_root,
@@ -949,4 +1024,242 @@ fn settle_duplicate_nullifier_fails() {
         epoch_id,
     );
     env.process(&ix, &[Check::err(custom(MirrorPoolError::NullifierSpent))]);
+}
+
+// --- Participation-incentive tests (anti-Sybil reward split + dwell reward). ---
+
+#[test]
+fn entry_fee_splits_into_reward_pool() {
+    let mut env = Env::new();
+    let entry_fee = 10_000u64;
+    let reward_bps = 3_000u16; // 30% to rewards, 70% settlement reserve.
+    let (_authority, payer, pool) = init_pool_with_reward(&mut env, 10, 2, entry_fee, reward_bps);
+    let pool_after_init = env.get(&pool).lamports;
+
+    env.warp(3);
+    let e0 = env.epoch_pda(&pool, 0);
+    let ix = env.commit_ix(&pool, &e0, &payer, &[1u8; 32]);
+    env.process(&ix, &[Check::success()]);
+
+    let pool_acct = env.get(&pool);
+    // 30% of 10_000 = 3_000 lamports earmarked for participation rewards.
+    assert_eq!(
+        pool::reward_pool_lamports(&pool_acct.data).unwrap(),
+        3_000,
+        "reward pool must hold the reward_bps share of the fee"
+    );
+    // The full fee still lands in the pool balance; the remaining 7_000 is the
+    // (un-earmarked) settlement reserve.
+    assert_eq!(
+        pool_acct.lamports,
+        pool_after_init + entry_fee,
+        "the whole entry fee lands in the pool balance"
+    );
+}
+
+#[test]
+fn zero_entry_fee_disables_reward_pool() {
+    let mut env = Env::new();
+    // reward_bps is non-zero, but a zero entry fee leaves nothing to split.
+    let (_authority, payer, pool) = init_pool_with_reward(&mut env, 10, 2, 0, 5_000);
+    env.warp(3);
+    let e0 = env.epoch_pda(&pool, 0);
+    let ix = env.commit_ix(&pool, &e0, &payer, &[1u8; 32]);
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        pool::reward_pool_lamports(&env.get(&pool).data).unwrap(),
+        0,
+        "a zero entry fee must leave the reward pool empty"
+    );
+}
+
+#[test]
+fn commit_deposit_splits_into_reward_pool() {
+    let mut env = Env::new();
+    let entry_fee = 20_000u64;
+    let reward_bps = 2_500u16; // 25%
+    let (_authority, payer, pool) = init_pool_with_reward(&mut env, 10, 2, entry_fee, reward_bps);
+    let pool_after_init = env.get(&pool).lamports;
+
+    env.warp(3);
+    let e0 = env.epoch_pda(&pool, 0);
+    let amount = 400_000_000u64;
+    let ix = env.commit_deposit_ix(&pool, &e0, &payer, &[7u8; 32], amount);
+    env.process(&ix, &[Check::success()]);
+
+    let pool_acct = env.get(&pool);
+    // Both the escrow and the fee land in the pool balance.
+    assert_eq!(
+        pool_acct.lamports,
+        pool_after_init + amount + entry_fee,
+        "escrow + entry fee both land in the pool"
+    );
+    // 25% of 20_000 = 5_000 earmarked for rewards; the escrow is untouched.
+    assert_eq!(
+        pool::reward_pool_lamports(&pool_acct.data).unwrap(),
+        5_000,
+        "the ZK path also funds the reward pool from its entry fee"
+    );
+}
+
+#[test]
+fn dwell_increments_once_per_epoch() {
+    let mut env = Env::new();
+    let (_authority, _payer, pool) = init_pool_with_reward(&mut env, 10, 2, 1_000, 5_000);
+    let p = Pubkey::new_unique();
+    env.fund(p, 10 * SOL);
+    let dwell = env.dwell_pda(&pool, &p);
+
+    // Two commits in the SAME epoch window count dwell exactly once.
+    env.warp(3);
+    let e0 = env.epoch_pda(&pool, 0);
+    let ix = env.commit_with_dwell_ix(&pool, &e0, &p, &dwell, &[1u8; 32]);
+    env.process(&ix, &[Check::success()]);
+    let ix = env.commit_with_dwell_ix(&pool, &e0, &p, &dwell, &[2u8; 32]);
+    env.process(&ix, &[Check::success()]);
+
+    let dwell_acct = env.get(&dwell);
+    assert_eq!(
+        dwell_acct.owner, env.program_id,
+        "dwell PDA must be created"
+    );
+    assert_eq!(participant::dwell(&dwell_acct.data).unwrap(), 1);
+    assert_eq!(participant::last_epoch(&dwell_acct.data).unwrap(), 0);
+    assert_eq!(
+        pool::total_unclaimed_dwell(&env.get(&pool).data).unwrap(),
+        1,
+        "the pool denominator advances once per counted epoch"
+    );
+
+    // A commit in a new epoch window advances dwell to 2.
+    env.warp(13);
+    let e1 = env.epoch_pda(&pool, 1);
+    let ix = env.commit_with_dwell_ix(&pool, &e1, &p, &dwell, &[3u8; 32]);
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(participant::dwell(&env.get(&dwell).data).unwrap(), 2);
+    assert_eq!(
+        pool::total_unclaimed_dwell(&env.get(&pool).data).unwrap(),
+        2
+    );
+}
+
+#[test]
+fn claim_reward_pays_proportional_to_dwell() {
+    let mut env = Env::new();
+    let entry_fee = 1_000_000u64;
+    // 100% split so each fee-paying commit adds exactly `entry_fee` to rewards.
+    let (_authority, _payer, pool) = init_pool_with_reward(&mut env, 10, 2, entry_fee, 10_000);
+
+    let a = Pubkey::new_unique();
+    let b = Pubkey::new_unique();
+    env.fund(a, 10 * SOL);
+    env.fund(b, 10 * SOL);
+    let dwell_a = env.dwell_pda(&pool, &a);
+    let dwell_b = env.dwell_pda(&pool, &b);
+
+    // Epoch 0: A and B both commit with dwell.
+    env.warp(3);
+    let e0 = env.epoch_pda(&pool, 0);
+    let ix = env.commit_with_dwell_ix(&pool, &e0, &a, &dwell_a, &[1u8; 32]);
+    env.process(&ix, &[Check::success()]);
+    let ix = env.commit_with_dwell_ix(&pool, &e0, &b, &dwell_b, &[2u8; 32]);
+    env.process(&ix, &[Check::success()]);
+
+    // Epoch 1: only A commits again -> dwell_A = 2, dwell_B = 1.
+    env.warp(13);
+    let e1 = env.epoch_pda(&pool, 1);
+    let ix = env.commit_with_dwell_ix(&pool, &e1, &a, &dwell_a, &[3u8; 32]);
+    env.process(&ix, &[Check::success()]);
+
+    // Reward pool = 3 * entry_fee (100% split), total unclaimed dwell = 3.
+    let pool_acct = env.get(&pool);
+    assert_eq!(
+        pool::reward_pool_lamports(&pool_acct.data).unwrap(),
+        3 * entry_fee
+    );
+    assert_eq!(pool::total_unclaimed_dwell(&pool_acct.data).unwrap(), 3);
+    assert_eq!(participant::dwell(&env.get(&dwell_a).data).unwrap(), 2);
+    assert_eq!(participant::dwell(&env.get(&dwell_b).data).unwrap(), 1);
+
+    // A claims its 2/3 share of the current pool.
+    let a_before = env.get(&a).lamports;
+    let ix = env.claim_reward_ix(&pool, &a, &dwell_a);
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        env.get(&a).lamports,
+        a_before + 2 * entry_fee,
+        "A's payout is proportional to its dwell (2 of 3)"
+    );
+    let pool_acct = env.get(&pool);
+    assert_eq!(
+        pool::reward_pool_lamports(&pool_acct.data).unwrap(),
+        entry_fee
+    );
+    assert_eq!(pool::total_unclaimed_dwell(&pool_acct.data).unwrap(), 1);
+    // A's dwell is now fully claimed.
+    assert_eq!(
+        participant::unclaimed_dwell(&env.get(&dwell_a).data).unwrap(),
+        0
+    );
+
+    // B claims the remaining 1/1 share, draining the reward pool exactly.
+    let b_before = env.get(&b).lamports;
+    let ix = env.claim_reward_ix(&pool, &b, &dwell_b);
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(env.get(&b).lamports, b_before + entry_fee);
+    let pool_acct = env.get(&pool);
+    assert_eq!(
+        pool::reward_pool_lamports(&pool_acct.data).unwrap(),
+        0,
+        "the reward pool drains to exactly zero, never negative"
+    );
+    assert_eq!(pool::total_unclaimed_dwell(&pool_acct.data).unwrap(), 0);
+}
+
+#[test]
+fn claim_reward_double_claim_rejected_and_drain_safe() {
+    let mut env = Env::new();
+    let entry_fee = 1_000_000u64;
+    let (_authority, _payer, pool) = init_pool_with_reward(&mut env, 10, 2, entry_fee, 10_000);
+    let p = Pubkey::new_unique();
+    env.fund(p, 10 * SOL);
+    let dwell = env.dwell_pda(&pool, &p);
+
+    env.warp(3);
+    let e0 = env.epoch_pda(&pool, 0);
+    let ix = env.commit_with_dwell_ix(&pool, &e0, &p, &dwell, &[1u8; 32]);
+    env.process(&ix, &[Check::success()]);
+
+    // Sole claimant drains exactly the reward pool (never more).
+    let p_before = env.get(&p).lamports;
+    let ix = env.claim_reward_ix(&pool, &p, &dwell);
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        env.get(&p).lamports,
+        p_before + entry_fee,
+        "the sole claimant gets the whole pool, exactly"
+    );
+    assert_eq!(pool::reward_pool_lamports(&env.get(&pool).data).unwrap(), 0);
+
+    // A second claim has no unclaimed dwell left: fail closed, no lamports move.
+    let p_before = env.get(&p).lamports;
+    let ix = env.claim_reward_ix(&pool, &p, &dwell);
+    env.process(&ix, &[Check::err(custom(MirrorPoolError::NothingToClaim))]);
+    assert_eq!(
+        env.get(&p).lamports,
+        p_before,
+        "a rejected double-claim moves no lamports"
+    );
+}
+
+#[test]
+fn claim_reward_without_dwell_fails() {
+    let mut env = Env::new();
+    let (_authority, _payer, pool) = init_pool_with_reward(&mut env, 10, 2, 1_000_000, 10_000);
+    let p = Pubkey::new_unique();
+    env.fund(p, SOL);
+    let dwell = env.dwell_pda(&pool, &p);
+    // `p` never committed, so it has no Dwell PDA and nothing to claim.
+    let ix = env.claim_reward_ix(&pool, &p, &dwell);
+    env.process(&ix, &[Check::err(custom(MirrorPoolError::NothingToClaim))]);
 }

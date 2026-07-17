@@ -18,13 +18,25 @@
 //!   (`k_floor`) means an epoch below the floor rolls forward instead of
 //!   executing into a set small enough to deanonymize by elimination.
 //!
-//! v1 status: all five instructions are implemented. `INIT_POOL` creates the
+//! v1 status: all six instructions are implemented. `INIT_POOL` creates the
 //! program-owned Pool PDA (system-program CPI) and fixes its config; `COMMIT`
 //! appends a leaf to a frontier Merkle accumulator, lazily creates the Epoch
 //! PDA, bumps its commit count, and collects the anti-Sybil entry fee;
 //! `SETTLE_EPOCH` enforces the relay authority, the closed-window gate, the
 //! on-chain k-floor, and per-nullifier anti-replay via PDA existence, then
 //! marks the epoch settled.
+//!
+//! Incentive layer (additive; see `docs/INCENTIVES.md`). Each entry fee is split
+//! at `INIT_POOL` by `reward_bps`: that basis-point share accrues to an on-chain
+//! reward pool (`reward_pool_lamports` on the Pool), the remainder is the
+//! settlement reserve. On the CROWD path (identified signers) `COMMIT` may also
+//! bump a per-participant Dwell PDA (seeds `["dwell", pool, participant]`) once
+//! per epoch, and `CLAIM_REWARD` pays a claimant a dwell-proportional, drain-safe
+//! share of the reward pool. The ZK path stays anonymous: `COMMIT_DEPOSIT` funds
+//! the reward pool via its entry fee but is never tied to a dwell identity; an
+//! anonymity-preserving ZK dwell claim is documented (not implemented) in
+//! `docs/INCENTIVES.md`. All of this is appended AFTER the Pool root-history ring
+//! so no existing account offset shifts.
 //!
 //! There are two settlement paths:
 //!
@@ -88,6 +100,9 @@ pub mod wire {
         pub const COMMIT_DEPOSIT: u8 = 3;
         /// ZK opt-in path: settle one membership (see [`super::SETTLE_ZK_LEN`]).
         pub const SETTLE_ZK: u8 = 4;
+        /// Crowd-path participation incentive: claim a dwell-proportional share
+        /// of the on-chain reward pool (see [`super::CLAIM_REWARD_LEN`]).
+        pub const CLAIM_REWARD: u8 = 5;
     }
 
     /// COMMIT layout: `[tag(1)][commitment(32)]`.
@@ -99,12 +114,25 @@ pub mod wire {
     /// MUST match `mirror_core::wire::SETTLE_HEADER_LEN`.
     pub const SETTLE_HEADER_LEN: usize = 1 + 8 + 4;
 
-    /// INIT_POOL layout: `[tag(1)][epoch_slots(8 LE)][k_floor(4 LE)][entry_fee(8 LE)]`.
+    /// INIT_POOL layout:
+    /// `[tag(1)][epoch_slots(8 LE)][k_floor(4 LE)][entry_fee(8 LE)][reward_bps(2 LE)]`.
     /// MUST match `mirror_core::wire::INIT_POOL_LEN`.
     ///
     /// `entry_fee` is a per-commit anti-Sybil deposit (lamports) transferred
-    /// into the pool at COMMIT time; `0` disables it.
-    pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8;
+    /// into the pool at COMMIT / COMMIT_DEPOSIT time; `0` disables it.
+    /// `reward_bps` is the basis-point share of each entry fee that accrues to
+    /// the on-chain reward pool (`reward_pool_lamports`); the remainder stays in
+    /// the pool as the settlement reserve. `reward_bps` must be `<= 10_000`; a
+    /// zero `entry_fee` (or zero `reward_bps`) leaves the reward pool empty.
+    pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8 + 2;
+
+    /// CLAIM_REWARD layout: `[tag(1)]` (no body). The claimant signs; their dwell
+    /// PDA carries the accumulated dwell used to size the payout.
+    /// MUST match `mirror_core::wire::CLAIM_REWARD_LEN`.
+    pub const CLAIM_REWARD_LEN: usize = 1;
+
+    /// Basis-point denominator for the entry-fee reward split. 100% = 10_000 bps.
+    pub const BPS_DENOMINATOR: u16 = 10_000;
 
     /// COMMIT_DEPOSIT layout: `[tag(1)][commitment(32)][amount(8 LE)]`.
     /// MUST match `mirror_core::wire::COMMIT_DEPOSIT_LEN`.
@@ -148,9 +176,10 @@ pub mod wire {
     // Layout sanity: keep the documented sizes honest at compile time.
     const _: () = assert!(COMMIT_LEN == 33);
     const _: () = assert!(SETTLE_HEADER_LEN == 13);
-    const _: () = assert!(INIT_POOL_LEN == 21);
+    const _: () = assert!(INIT_POOL_LEN == 23);
     const _: () = assert!(COMMIT_DEPOSIT_LEN == 41);
     const _: () = assert!(SETTLE_ZK_LEN == 401);
+    const _: () = assert!(CLAIM_REWARD_LEN == 1);
     const _: () = assert!(
         SETTLE_ZK_LEN == 1 + 8 + 8 + PROOF_A_LEN + PROOF_B_LEN + PROOF_C_LEN + 4 * PUBLIC_INPUT_LEN
     );
@@ -209,6 +238,14 @@ pub enum MirrorPoolError {
     /// SETTLE_ZK: the pool does not hold enough lamports to pay the bound
     /// `amount` while staying rent-exempt (escrow accounting error).
     InsufficientEscrow = 15,
+    /// CLAIM_REWARD: the caller has no reward to claim - no accrued dwell, all
+    /// accrued dwell already claimed (double-claim), or the reward pool is empty
+    /// so the proportional share rounds to zero. Fail closed: no lamports move
+    /// and no dwell is consumed.
+    NothingToClaim = 16,
+    /// CLAIM_REWARD: paying the computed reward would drop the pool below rent
+    /// exemption. Never drain the account below rent; fail closed instead.
+    RewardPoolInsufficient = 17,
     /// Skeleton guard: reserved for handlers whose logic has not landed yet.
     /// Unused in v1 (all five instructions are implemented) but kept so the
     /// off-chain error mapping stays stable.

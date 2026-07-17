@@ -9,8 +9,13 @@
 //! Body layout after the tag byte (see `wire::INIT_POOL_LEN`):
 //!
 //! ```text
-//! [epoch_slots: u64 LE][k_floor: u32 LE][entry_fee: u64 LE]
+//! [epoch_slots: u64 LE][k_floor: u32 LE][entry_fee: u64 LE][reward_bps: u16 LE]
 //! ```
+//!
+//! `reward_bps` is the basis-point share of each entry fee that accrues to the
+//! on-chain reward pool (`pool::reward_pool_lamports`); the remainder is the
+//! settlement reserve. Like every other pool parameter it is fixed forever at
+//! init and must be `<= 10_000`. See `docs/INCENTIVES.md`.
 //!
 //! Accounts:
 //!
@@ -56,10 +61,21 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
             .try_into()
             .map_err(|_| MirrorPoolError::MalformedInstruction)?,
     );
+    let reward_bps = u16::from_le_bytes(
+        data.get(20..22)
+            .ok_or(MirrorPoolError::MalformedInstruction)?
+            .try_into()
+            .map_err(|_| MirrorPoolError::MalformedInstruction)?,
+    );
 
     // A zero-length window cannot batch, and a pool that may settle with
-    // k < 2 is a deanonymization machine, not an anonymity set.
+    // k < 2 is a deanonymization machine, not an anonymity set. A reward split
+    // above 100% is nonsensical; reject it (a zero split is fine and just
+    // disables the reward pool).
     if epoch_slots == 0 || k_floor < 2 {
+        return Err(ProgramError::InvalidArgument);
+    }
+    if reward_bps > wire::BPS_DENOMINATOR {
         return Err(ProgramError::InvalidArgument);
     }
 
@@ -106,16 +122,18 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         epoch_slots,
         k_floor,
         entry_fee,
+        reward_bps,
         authority_key.as_array(),
         bump,
         &empty_root,
     )?;
 
     log!(
-        "mirror-pool: init_pool epoch_slots={} k_floor={} entry_fee={}",
+        "mirror-pool: init_pool epoch_slots={} k_floor={} entry_fee={} reward_bps={}",
         epoch_slots,
         k_floor,
-        entry_fee
+        entry_fee,
+        reward_bps as u64
     );
     Ok(())
 }

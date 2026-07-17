@@ -91,6 +91,9 @@ fn seed_commit<S: SettleSubmitter>(
             commitment: commit(&secret, action, epoch),
             nullifier: nullifier(&secret, epoch),
             operator_owned,
+            // Demo participants are all treated as independent; real Sybil
+            // detection is an off-chain heuristic (see docs/THREAT_MODEL.md).
+            sybil_suspected: false,
         },
     );
 }

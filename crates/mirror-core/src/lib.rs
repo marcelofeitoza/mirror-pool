@@ -364,13 +364,30 @@ pub mod wire {
         pub const COMMIT_DEPOSIT: u8 = 3;
         /// ZK opt-in path: settle one membership (see [`super::SETTLE_ZK_LEN`]).
         pub const SETTLE_ZK: u8 = 4;
+        /// Crowd-path participation incentive: claim a dwell-proportional share
+        /// of the on-chain reward pool (see [`super::CLAIM_REWARD_LEN`]).
+        pub const CLAIM_REWARD: u8 = 5;
     }
 
-    /// INIT_POOL layout: [tag(1)][epoch_slots(8)][k_floor(4)][entry_fee(8)] -
-    /// the operator fixes the epoch window, the k-anonymity floor, and the
-    /// per-commit anti-Sybil entry fee (lamports; 0 disables it). MUST stay
-    /// byte-identical to the program's `wire::INIT_POOL_LEN`.
-    pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8;
+    /// INIT_POOL layout:
+    /// `[tag(1)][epoch_slots(8)][k_floor(4)][entry_fee(8)][reward_bps(2 LE)]` -
+    /// the operator fixes the epoch window, the k-anonymity floor, the per-commit
+    /// anti-Sybil entry fee (lamports; 0 disables it), and `reward_bps`, the
+    /// basis-point share of each entry fee that accrues to the on-chain reward
+    /// pool (the remainder covers relay/settlement cost; `reward_bps` must be
+    /// `<= 10_000`). MUST stay byte-identical to the program's
+    /// `wire::INIT_POOL_LEN`.
+    pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8 + 2;
+
+    /// CLAIM_REWARD layout: `[tag(1)]`. The claimant is the signer; their dwell
+    /// PDA (seeds `["dwell", pool, participant]`) carries the accumulated dwell,
+    /// so no body fields are needed. MUST stay byte-identical to the program's
+    /// `wire::CLAIM_REWARD_LEN`.
+    pub const CLAIM_REWARD_LEN: usize = 1;
+
+    /// Basis-point denominator for the entry-fee reward split (`reward_bps` is
+    /// out of this). 100% = 10_000 bps.
+    pub const BPS_DENOMINATOR: u16 = 10_000;
 
     /// COMMIT layout: [tag(1)][commitment(32)] - the participant posts only the
     /// commitment; the action + secret stay client-side until settlement.
@@ -405,11 +422,12 @@ pub mod wire {
 
     // Layout sanity: keep the documented sizes honest at compile time and in
     // lockstep with the on-chain program's mirrored constants.
-    const _: () = assert!(INIT_POOL_LEN == 21);
+    const _: () = assert!(INIT_POOL_LEN == 23);
     const _: () = assert!(COMMIT_LEN == 33);
     const _: () = assert!(SETTLE_HEADER_LEN == 13);
     const _: () = assert!(COMMIT_DEPOSIT_LEN == 41);
     const _: () = assert!(SETTLE_ZK_LEN == 401);
+    const _: () = assert!(CLAIM_REWARD_LEN == 1);
 }
 
 #[cfg(test)]

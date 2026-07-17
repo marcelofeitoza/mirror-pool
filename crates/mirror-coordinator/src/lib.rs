@@ -151,6 +151,26 @@ pub mod pool {
         /// anonymity (the operator already knows which ones they are), so
         /// honest k reporting excludes them.
         pub operator_owned: bool,
+        /// Sybil-suspected commit: flagged by off-chain heuristics as
+        /// attacker-controlled (e.g. many commits from one funding source in one
+        /// window). Detected Sybils add zero real anonymity to an attacker who
+        /// already controls them, so honest k reporting excludes them too.
+        ///
+        /// This is BEST-EFFORT and its scope is bounded: the strongest Sybil
+        /// signal, a common on-chain funding source, is NOT computable from the
+        /// commit stream this coordinator sees (a commit carries only a 32-byte
+        /// commitment; see `docs/THREAT_MODEL.md` section 3.5 and section 7).
+        /// Undetected Sybils inflate `real_k`, so this flag can only ever lower
+        /// the reported number toward the truth, never prove its absence.
+        pub sybil_suspected: bool,
+    }
+
+    impl PoolEntry {
+        /// An entry that adds real anonymity: neither an operator decoy nor a
+        /// detected Sybil. `KAnon::excluded` counts the complement of this.
+        pub fn counts_toward_real_k(&self) -> bool {
+            !self.operator_owned && !self.sybil_suspected
+        }
     }
 
     /// Commitments grouped by the epoch they were committed into.
@@ -186,18 +206,24 @@ pub mod pool {
             self.epochs.is_empty()
         }
 
-        /// Honest anonymity accounting for an epoch: nominal commit count with
-        /// operator decoys excluded. This is the number gated on `k_floor` and
-        /// the only number ever reported to users as their anonymity set.
+        /// Honest anonymity accounting for an epoch: the nominal commit count
+        /// with operator decoys AND detected Sybils excluded. This is the number
+        /// gated on `k_floor` and the only number ever reported to users as their
+        /// anonymity set (`KAnon::real_k`), never the nominal count.
         ///
-        /// TODO(milestone-3): also exclude economically linked commits (same
-        /// funding source) as Sybils; nominal-minus-decoys still overstates k
-        /// against a Sybil-capable attacker.
+        /// Bounded scope: `excluded` reflects only what off-chain heuristics
+        /// DETECT (operator ownership + flagged Sybils). The strongest Sybil
+        /// anchor, a common on-chain funding source, is out of scope here (a
+        /// commit exposes only a 32-byte commitment), so undetected Sybils still
+        /// inflate `real_k`. See `docs/THREAT_MODEL.md` sections 3.5 and 7: this
+        /// accounting can only lower the number toward the truth, and the honest
+        /// worst case is "at most `real_k`".
         pub fn kanon(&self, epoch: Epoch) -> KAnon {
             let entries = self.epochs.get(&epoch).map_or(&[][..], Vec::as_slice);
+            let excluded = entries.iter().filter(|e| !e.counts_toward_real_k()).count();
             KAnon {
                 nominal: entries.len() as u32,
-                excluded: entries.iter().filter(|e| e.operator_owned).count() as u32,
+                excluded: excluded as u32,
             }
         }
 
@@ -320,6 +346,11 @@ pub mod scheduler {
     use std::time::Duration;
 
     /// What happened to one closable epoch during a scheduler pass.
+    ///
+    /// Every variant surfaces `real_k` (the HONEST anonymity set: nominal minus
+    /// operator decoys and detected Sybils), never the nominal count. Callers,
+    /// dashboards, and users are shown `real_k`; the nominal count is an upper
+    /// bound only. See `mirror_core::KAnon` and `docs/THREAT_MODEL.md` section 5.
     #[derive(Clone, Debug)]
     pub enum EpochOutcome {
         /// The epoch met the floor and was submitted for settlement.
@@ -428,12 +459,17 @@ pub mod scheduler {
                     tx_profile: self.config.tx_profile,
                 };
                 let receipt = self.submitter.submit_settle(&batch)?;
+                // Surface real_k (the honest set), alongside nominal + excluded so
+                // the gap is auditable. real_k is the number users are shown; the
+                // nominal count is logged only as the upper bound it is.
                 tracing::info!(
                     epoch = epoch.0,
                     real_k = k.real_k(),
+                    nominal = k.nominal,
+                    excluded = k.excluded,
                     nullifiers = batch.nullifiers.len(),
                     signature = %receipt.signature,
-                    "epoch settled"
+                    "epoch settled (users are shown real_k, never nominal)"
                 );
                 outcomes.push(EpochOutcome::Settled {
                     epoch,
@@ -489,6 +525,14 @@ mod tests {
             commitment: commit(&secret, &action(), epoch),
             nullifier: nullifier(&secret, epoch),
             operator_owned,
+            sybil_suspected: false,
+        }
+    }
+
+    fn sybil_entry(seed: u8, epoch: Epoch) -> PoolEntry {
+        PoolEntry {
+            sybil_suspected: true,
+            ..entry(seed, epoch, false)
         }
     }
 
@@ -577,6 +621,60 @@ mod tests {
             c.submitter().submitted.is_empty(),
             "decoy-padded epoch must not settle"
         );
+    }
+
+    #[test]
+    fn detected_sybils_are_excluded_from_real_k() {
+        let mut c = Coordinator::new(test_config(3), InMemorySubmitter::default()).unwrap();
+        // Nominal 5: 2 honest, 1 operator decoy, 2 detected Sybils -> real_k = 2.
+        for seed in 1..=2u8 {
+            c.pool_mut().insert(Epoch(0), entry(seed, Epoch(0), false));
+        }
+        c.pool_mut().insert(Epoch(0), entry(3, Epoch(0), true));
+        for seed in 4..=5u8 {
+            c.pool_mut().insert(Epoch(0), sybil_entry(seed, Epoch(0)));
+        }
+
+        let k = c.pool_mut().kanon(Epoch(0));
+        assert_eq!(k.nominal, 5);
+        assert_eq!(k.excluded, 3, "1 operator decoy + 2 detected Sybils");
+        assert_eq!(k.real_k(), 2);
+
+        c.on_slot(10).unwrap();
+        assert!(
+            c.submitter().submitted.is_empty(),
+            "real_k 2 < k_floor 3 must not settle even with nominal 5"
+        );
+    }
+
+    #[test]
+    fn settle_outcome_reports_real_k_not_nominal() {
+        // k_floor = 3. Nominal 5 but 2 are detected Sybils, so real_k = 3: the
+        // epoch settles and the outcome surfaces real_k (3), never nominal (5).
+        let mut c = Coordinator::new(test_config(3), InMemorySubmitter::default()).unwrap();
+        for seed in 1..=3u8 {
+            c.pool_mut().insert(Epoch(0), entry(seed, Epoch(0), false));
+        }
+        for seed in 4..=5u8 {
+            c.pool_mut().insert(Epoch(0), sybil_entry(seed, Epoch(0)));
+        }
+
+        let k = c.pool_mut().kanon(Epoch(0));
+        assert_eq!(k.nominal, 5);
+        assert_eq!(k.real_k(), 3);
+
+        let outcomes = c.on_slot(10).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        match &outcomes[0] {
+            EpochOutcome::Settled { real_k, .. } => {
+                assert_eq!(*real_k, 3, "the outcome reports real_k, not the nominal 5");
+            }
+            other => panic!("expected Settled, got {other:?}"),
+        }
+        // The Sybil commits still settle on-chain (they are real nullifiers);
+        // only the REPORTED anonymity excludes them. That gap is the honest
+        // number: 5 actions settle, but the advertised anonymity set is 3.
+        assert_eq!(c.submitter().submitted[0].nullifiers.len(), 5);
     }
 
     #[test]

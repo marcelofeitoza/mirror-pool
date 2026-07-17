@@ -11,6 +11,14 @@
 //! on-chain it is an opaque leaf appended to the SAME accumulator the crowd path
 //! uses, so both paths share one anonymity set and one recent-root history.
 //!
+//! Like the crowd `COMMIT`, this path also collects the pool's anti-Sybil entry
+//! fee (on top of the escrow) and splits its `reward_bps` share into the reward
+//! pool, so ZK opt-in commits pay the same per-identity cost and help fund the
+//! participation incentive. It never touches a Dwell PDA: the ZK path is
+//! anonymous, so tying a reward claim to an on-chain identity here would defeat
+//! the point. The anonymity-preserving ZK dwell claim is documented (not
+//! implemented) in `docs/INCENTIVES.md`.
+//!
 //! Body layout after the tag byte (see `wire::COMMIT_DEPOSIT_LEN`):
 //!
 //! ```text
@@ -80,12 +88,12 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     if !pool_account.owned_by(program_id) {
         return Err(MirrorPoolError::PoolNotInitialized.into());
     }
-    let epoch_slots = {
+    let (epoch_slots, entry_fee) = {
         let pool_data = pool_account.try_borrow()?;
         if pool_data.len() != pool::LEN || !pool::is_initialized(&pool_data)? {
             return Err(MirrorPoolError::PoolNotInitialized.into());
         }
-        pool::epoch_slots(&pool_data)?
+        (pool::epoch_slots(&pool_data)?, pool::entry_fee(&pool_data)?)
     };
     if epoch_slots == 0 {
         return Err(ProgramError::InvalidAccountData);
@@ -150,11 +158,31 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     }
     .invoke()?;
 
+    // Collect the anti-Sybil entry fee on top of the escrow (payer -> pool).
+    // Skipped when disabled. The escrow and the fee are separate lamports: the
+    // escrow is preserved in full for SETTLE_ZK; only the fee funds the reward
+    // pool below.
+    if entry_fee > 0 {
+        Transfer {
+            from: depositor,
+            to: pool_account,
+            lamports: entry_fee,
+        }
+        .invoke()?;
+    }
+
     // Append the commitment leaf to the frontier accumulator (also records the
     // new root in the recent-root ring for SETTLE_ZK).
     let new_root = {
         let mut pool_data = pool_account.try_borrow_mut()?;
         merkle::append(&mut pool_data, &commitment)?
+    };
+
+    // Split the entry fee: the pool's `reward_bps` share accrues to the reward
+    // pool (the escrow `amount` is untouched by this accounting).
+    let reward_share = {
+        let mut pool_data = pool_account.try_borrow_mut()?;
+        pool::accrue_reward_from_fee(&mut pool_data, entry_fee)?
     };
 
     // Bump the epoch's commit count.
@@ -164,10 +192,11 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     };
 
     log!(
-        "mirror-pool: commit_deposit epoch={} amount={} commit_count={} root0={}",
+        "mirror-pool: commit_deposit epoch={} amount={} commit_count={} reward_share={} root0={}",
         current_epoch,
         amount,
         commit_count,
+        reward_share,
         new_root[0]
     );
     Ok(())

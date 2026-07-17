@@ -336,13 +336,19 @@ Stated bluntly, because a privacy tool that is vague about its non-goals is a tr
 The k-anonymity claim in Section 5 is only as good as these assumptions, so they are listed
 as assumptions, not buried as implementation details. If one of these fails, the metric
 still reports honestly (it will simply report a smaller real k), but the design's economic
-security fails.
+security fails. The economic layer that backs these assumptions (the entry-fee split, the
+dwell reward, and the honest real-k reporting) is specified in full in `docs/INCENTIVES.md`,
+which is explicit about what is implemented on-chain versus designed for the anonymous path.
 
 - **Per-identity cost is real.** Each commit carries a fixed, non-refundable entry fee
-  (Whirlpool Tx0 / fidelity-bond style). Filling an epoch with k-1 Sybil wallets must cost
-  the attacker (k-1) x fee per epoch, forever, because the honest floor rolls forward until it
-  is met. Without a real per-identity cost, A4 wins for free and real k = 1 regardless of what
-  the pool reports.
+  (fidelity-bond style), collected on BOTH the crowd `COMMIT` and the ZK opt-in
+  `COMMIT_DEPOSIT`. Filling an epoch with k-1 Sybil wallets must cost the attacker (k-1) x fee
+  per epoch, forever, because the honest floor rolls forward until it is met. Without a real
+  per-identity cost, A4 wins for free and real k = 1 regardless of what the pool reports. A
+  configurable `reward_bps` share of each fee accrues to an on-chain reward pool
+  (`pool::reward_pool_lamports`); the remainder covers settlement cost. The reward pool funds
+  the participation incentive below without weakening the cost, since the fee is still
+  non-refundable to the payer at commit time.
 - **No-shows forfeit and stall nothing.** Settlement is atomic per epoch: a participant who
   commits and disappears forfeits their slot and fee; the epoch settles with the remaining set
   (if still above `k_floor`) or rolls forward. One-transaction-per-party settlement designs
@@ -350,20 +356,30 @@ security fails.
   5 transactions, so N-party atomicity beyond ~5 must be program-side, which is why
   `SettleEpoch` settles all intents in a single instruction.)
 - **Operator traffic is excluded by policy and by accounting.** Any coordinator-owned wallet
-  in an epoch is counted in `KAnon::excluded`. Cover traffic may smooth epoch cadence, but it
-  never counts toward the advertised k. This is the direct lesson from Tornado's overstated
+  in an epoch is counted in `KAnon::excluded`, as is any commit the coordinator flags
+  Sybil-suspected (`PoolEntry::sybil_suspected`). Cover traffic may smooth epoch cadence, but
+  it never counts toward the advertised k. This is the direct lesson from Tornado's overstated
   sets: operator-generated cover inflates nominal and adds zero real anonymity to anyone who
-  clusters the operator.
-- **Incentives attract the wrong crowd if mis-designed.** Anonymity-mining style rewards
+  clusters the operator. Every settlement outcome and log line surfaces `real_k` (with
+  `nominal` and `excluded` beside it so the gap is auditable); users are shown `real_k`, never
+  the nominal count.
+- **Incentives reward measured anonymity, not pool size.** Anonymity-mining style rewards
   demonstrably attract privacy-indifferent users whose behavior (instant in-out, address
-  reuse) degrades the set for everyone [2], which is why pool size is not anonymity. Any future
-  incentive design must reward behaviors that increase *measured* anonymity (dwell, bucket
-  conformity, funding hygiene), and the harness metric, not pool size, is the success
-  criterion.
-- **Sybil detection is best-effort.** `excluded` reflects *detected* Sybils. Undetected
-  Sybils inflate `real_k`. The honest worst-case statement a participant should rely on is:
-  my anonymity is at least the number of participants I personally believe are independent, and
-  at most `real_k`.
+  reuse) degrades the set for everyone [2], which is why pool size is not anonymity. The
+  shipped incentive is therefore a **dwell** reward: on the crowd path, `CLAIM_REWARD` pays a
+  participant a drain-safe share of the reward pool proportional to how many distinct epochs
+  they have committed into, so staying (which thickens future epochs) is what pays, and
+  committing once and leaving is not. Dwell can only advance through a real, fee-paying commit,
+  so it cannot be minted for free. The anonymous ZK path deliberately ships no identity-linked
+  claim; its anonymity-preserving equivalent (a dwell/age ZK proof, so claiming does not
+  deanonymize) is DESIGNED but not implemented, and `docs/INCENTIVES.md` says so plainly. The
+  harness metric, not pool size, remains the success criterion.
+- **Sybil detection is best-effort.** `excluded` reflects *detected* Sybils only: operator
+  ownership and off-chain heuristic flags. The strongest anchor, a common on-chain funding
+  source (Section 3.5), is NOT computable from the commit stream (a commit carries only a
+  32-byte commitment), so same-funding-source Sybils are out of on-chain scope and inflate
+  `real_k`. The honest worst-case statement a participant should rely on is: my anonymity is at
+  least the number of participants I personally believe are independent, and at most `real_k`.
 
 ---
 

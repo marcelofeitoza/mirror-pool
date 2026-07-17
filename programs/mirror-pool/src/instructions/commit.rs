@@ -23,7 +23,18 @@
 //! 2. participant    signer     writable; posts the commit and pays the fee + rent
 //! 3. system_program            for the create-account / transfer CPIs
 //! 4. clock          sysvar     current slot -> current epoch = slot / epoch_slots
+//! 5. dwell          writable   OPTIONAL Dwell PDA (created lazily); seeds
+//!                              [b"dwell", pool, participant]. When present, this
+//!                              commit counts once toward the participant's dwell
+//!                              (crowd-path participation incentive). Omitting it
+//!                              leaves the commit exactly as before, so the
+//!                              account layout is additive/backward-compatible.
 //! ```
+//!
+//! Two additive incentive steps run after the commit itself (see
+//! `docs/INCENTIVES.md`): the collected entry fee is split by the pool's
+//! `reward_bps` into the on-chain reward pool, and, when the optional Dwell PDA
+//! is passed, this epoch is counted once toward the participant's dwell.
 
 use pinocchio::{
     cpi::Seed, error::ProgramError, sysvars::clock::Clock, AccountView, Address, ProgramResult,
@@ -33,7 +44,7 @@ use pinocchio_system::instructions::Transfer;
 
 use crate::{
     pda,
-    state::{epoch, merkle, pool},
+    state::{epoch, merkle, participant, pool},
     wire, MirrorPoolError,
 };
 
@@ -143,16 +154,76 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         merkle::append(&mut pool_data, &commitment)?
     };
 
+    // Split the collected entry fee: the pool's `reward_bps` share accrues to the
+    // on-chain reward pool, the remainder stays as the settlement reserve. A zero
+    // fee (or zero split) is a clean no-op.
+    let reward_share = {
+        let mut pool_data = pool_account.try_borrow_mut()?;
+        pool::accrue_reward_from_fee(&mut pool_data, entry_fee)?
+    };
+
     // Bump the epoch's commit count (the on-chain k-floor input).
     let commit_count = {
         let mut epoch_data = epoch_account.try_borrow_mut()?;
         epoch::increment_commit_count(&mut epoch_data)?
     };
 
+    // Optional crowd-path dwell tracking: when a Dwell PDA is passed, count this
+    // epoch once toward the participant's dwell. Dwell can only advance through a
+    // real, fee-paying commit, so it cannot be minted for free to drain rewards.
+    let mut dwell_advanced = false;
+    if let Some(dwell_account) = accounts.get(5) {
+        if !dwell_account.is_writable() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let participant_key = participant.address();
+        let dwell_bump = pda::verify_pda(
+            dwell_account,
+            &[pda::DWELL_SEED, pool_key.as_ref(), participant_key.as_ref()],
+            program_id,
+        )?;
+        if dwell_account.data_len() == 0 {
+            let bump_seed = [dwell_bump];
+            let signer_seeds = [
+                Seed::from(pda::DWELL_SEED),
+                Seed::from(pool_key.as_ref()),
+                Seed::from(participant_key.as_ref()),
+                Seed::from(&bump_seed[..]),
+            ];
+            pda::create_pda_account(
+                participant,
+                dwell_account,
+                program_id,
+                participant::LEN,
+                &signer_seeds,
+            )?;
+            let mut dwell_data = dwell_account.try_borrow_mut()?;
+            participant::init(&mut dwell_data, dwell_bump)?;
+        } else {
+            if !dwell_account.owned_by(program_id) {
+                return Err(MirrorPoolError::InvalidPda.into());
+            }
+            let dwell_data = dwell_account.try_borrow()?;
+            if dwell_data.len() != participant::LEN || !participant::is_initialized(&dwell_data)? {
+                return Err(MirrorPoolError::InvalidPda.into());
+            }
+        }
+        dwell_advanced = {
+            let mut dwell_data = dwell_account.try_borrow_mut()?;
+            participant::record_epoch(&mut dwell_data, current_epoch)?
+        };
+        if dwell_advanced {
+            let mut pool_data = pool_account.try_borrow_mut()?;
+            pool::add_unclaimed_dwell(&mut pool_data)?;
+        }
+    }
+
     log!(
-        "mirror-pool: commit epoch={} commit_count={} root0={}",
+        "mirror-pool: commit epoch={} commit_count={} reward_share={} dwell_advanced={} root0={}",
         current_epoch,
         commit_count,
+        reward_share,
+        dwell_advanced as u64,
         new_root[0]
     );
     Ok(())
