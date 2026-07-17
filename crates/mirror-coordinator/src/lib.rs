@@ -27,16 +27,35 @@
 //!   budgets fingerprint transactions exactly like variable amounts do, so the
 //!   shape is a pool constant, never per-settlement.
 //!
-//! This crate is a compiling skeleton: module structure, types, and the
-//! scheduler loop are real; on-chain submission is stubbed behind
-//! [`submit::SettleSubmitter`]. TODO(milestone) markers reference the build
-//! plan where full logic lands. Modules live inline in this file for now and
-//! split into files when they grow.
+//! The scheduler loop and the k-floor gate are backend-agnostic: they run
+//! against [`submit::InMemorySubmitter`] in unit tests and against the real
+//! crowd-path submitter ([`crowd::RpcSettleSubmitter`]) in production, both
+//! through the same [`submit::SettleSubmitter`] seam. The crowd path
+//! ([`crowd`]) composes one atomic v0 transaction (normalized ComputeBudget +
+//! `SettleEpoch` + every participant's own action, over an Address Lookup
+//! Table) and submits it through the [`client::SolanaClient`] boundary, which is
+//! mockable so none of this needs a validator to test. The remaining TODO
+//! markers reference the build plan where the rest lands.
 
 pub use config::{Config, FeePayer, TxProfile};
 pub use pool::{CommitPool, PoolEntry};
 pub use scheduler::{Coordinator, EpochOutcome};
-pub use submit::{InMemorySubmitter, SettleBatch, SettleReceipt, SettleSubmitter};
+pub use submit::{
+    settle_epoch_data, InMemorySubmitter, SettleBatch, SettleReceipt, SettleSubmitter,
+};
+
+pub use client::{AccountSnapshot, RpcSolanaClient, SolanaClient};
+pub use crowd::{
+    build_crowd_message, compute_budget_instructions, plain_transfer_shared_accounts,
+    plan_settlements, settle_epoch_instruction, setup_pool_alt, sign_settlement,
+    CrowdSettleRequest, RpcSettleSubmitter, SettleContext, SettleParticipant,
+    PLAIN_TRANSFER_MAX_PER_TX,
+};
+
+/// The RPC boundary (real + mockable) the crowd-path submitter builds on.
+pub mod client;
+/// The crowd path: composing and submitting one atomic settlement transaction.
+pub mod crowd;
 
 /// Coordinator configuration: epoch schedule, fee-payer rotation, tx shape.
 pub mod config {
@@ -224,19 +243,28 @@ pub mod submit {
         pub tx_profile: TxProfile,
     }
 
+    /// Serialize the SETTLE_EPOCH instruction data exactly as the on-chain
+    /// program parses it. Layout lives in [`mirror_core::wire`] so the two sides
+    /// cannot drift. Shared by [`SettleBatch::instruction_data`] and the
+    /// crowd-path builder ([`crate::crowd::settle_epoch_instruction`]) so both
+    /// emit byte-identical instruction data.
+    pub fn settle_epoch_data(epoch: Epoch, nullifiers: &[Nullifier]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(wire::SETTLE_HEADER_LEN + nullifiers.len() * 32);
+        data.push(wire::tag::SETTLE_EPOCH);
+        data.extend_from_slice(&epoch.0.to_le_bytes());
+        data.extend_from_slice(&(nullifiers.len() as u32).to_le_bytes());
+        for n in nullifiers {
+            data.extend_from_slice(&n.0);
+        }
+        data
+    }
+
     impl SettleBatch {
         /// Serialize the SETTLE_EPOCH instruction data exactly as the on-chain
         /// program parses it. Layout lives in [`mirror_core::wire`] so the two
         /// sides cannot drift.
         pub fn instruction_data(&self) -> Vec<u8> {
-            let mut data = Vec::with_capacity(wire::SETTLE_HEADER_LEN + self.nullifiers.len() * 32);
-            data.push(wire::tag::SETTLE_EPOCH);
-            data.extend_from_slice(&self.epoch.0.to_le_bytes());
-            data.extend_from_slice(&(self.nullifiers.len() as u32).to_le_bytes());
-            for n in &self.nullifiers {
-                data.extend_from_slice(&n.0);
-            }
-            data
+            settle_epoch_data(self.epoch, &self.nullifiers)
         }
     }
 
@@ -273,23 +301,14 @@ pub mod submit {
         }
     }
 
-    /// Real JSON-RPC submitter.
-    ///
-    /// TODO(milestone-4): build the versioned transaction (compute-budget
-    /// instructions from [`TxProfile`], then the SettleEpoch instruction from
-    /// [`SettleBatch::instruction_data`]), sign with the rotating fee payer,
-    /// send over RPC, and confirm. No program id is hardcoded here: it arrives
-    /// via deploy-time configuration.
-    #[derive(Debug)]
-    pub struct RpcSubmitter {
-        pub rpc_url: String,
-    }
-
-    impl SettleSubmitter for RpcSubmitter {
-        fn submit_settle(&mut self, _batch: &SettleBatch) -> anyhow::Result<SettleReceipt> {
-            unimplemented!("TODO(milestone-4): on-chain SettleEpoch submission over JSON-RPC")
-        }
-    }
+    // The real on-chain submitter is [`crate::crowd::RpcSettleSubmitter`]: it
+    // implements this same `SettleSubmitter` seam, but composes the crowd-path
+    // transaction (normalized ComputeBudget + SettleEpoch + every participant's
+    // own action, over an Address Lookup Table) and submits it through the
+    // async [`crate::client::SolanaClient`] boundary. It lives in the `crowd`
+    // module because it needs the transaction-building machinery there; the
+    // scheduler stays generic over `SettleSubmitter` and never knows which
+    // backend is wired in.
 }
 
 /// The epoch scheduler loop: close windows, gate on the k floor, settle.

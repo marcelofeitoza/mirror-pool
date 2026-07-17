@@ -14,8 +14,34 @@ description = "Gasless epoch coordinator for mirror-pool: shared-epoch batching,
 
 [dependencies]
 mirror-core.workspace = true
+# The pooled-action adapters (Behavior trait + build_instructions). The crowd
+# path composes each participant's behavior instruction(s) into the settlement
+# tx, so the coordinator depends on this crate directly.
+mirror-behaviors.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Async, dyn-compatible SolanaClient trait (mockable in unit tests): async-fn in
+# traits is stable but not dyn-safe, so the returned futures are boxed.
+async-trait = "0.1"
+
+# Solana client + transaction-building crates, pinned to the SAME majors
+# mirror-behaviors links (solana-pubkey v4, solana-instruction v3) so Pubkey /
+# Instruction / AccountMeta are ONE type set across the repo. Kept local to this
+# crate (not promoted into [workspace.dependencies]) so wiring an on-chain
+# submitter never perturbs the other host crates' dependency graphs.
+solana-pubkey = { version = "4", features = ["curve25519"] }
+solana-instruction = "3"
+solana-hash = "4"
+solana-keypair = "3"
+solana-signer = "3"
+solana-signature = "3"
+solana-message = "4"
+solana-transaction = "4"
+solana-address-lookup-table-interface = "3"
+solana-compute-budget-interface = "3"
+solana-commitment-config = "3"
+# Nonblocking (async) JSON-RPC client backing the real SolanaClient impl.
+solana-rpc-client = "4"
