@@ -10,6 +10,15 @@ description = "Shared types for mirror-pool: commitments, nullifiers, epochs, ac
 thiserror.workspace = true
 serde.workspace = true
 sha2.workspace = true
+# Poseidon over BN254, circomlib-compatible. light-poseidon is the same
+# implementation the Solana `sol_poseidon` syscall is built on, so the host
+# (this crate) and the on-chain accumulator produce byte-identical hashes and
+# both match the committed Groth16 circuit. Pinned inline (NOT via the root
+# [workspace.dependencies]) per the crate's own dependency needs; light-poseidon
+# 0.4 resolves ark-bn254 / ark-ff 0.5, matched here so the `Fr` types agree.
+light-poseidon = "0.4"
+ark-bn254 = "0.5"
+ark-ff = "0.5"
 
 [dev-dependencies]
 serde_json.workspace = true

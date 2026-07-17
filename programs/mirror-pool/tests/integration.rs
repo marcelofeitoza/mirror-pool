@@ -263,7 +263,7 @@ fn init_pool_creates_v1_and_reinit_fails() {
     assert_ne!(
         pool::current_root(&acct.data).unwrap(),
         [0u8; 32],
-        "empty-tree root is a non-zero keccak chain"
+        "empty-tree root is a non-zero Poseidon zero-ladder"
     );
 
     // Re-initializing the same pool must fail closed.
@@ -271,6 +271,43 @@ fn init_pool_creates_v1_and_reinit_fails() {
     env.process(
         &ix,
         &[Check::err(custom(MirrorPoolError::PoolAlreadyInitialized))],
+    );
+}
+
+/// The circuit's canonical empty-tree root: `zeros[DEPTH]` where `zeros[0] = 0`
+/// and `zeros[i] = Poseidon(zeros[i-1], zeros[i-1])`, computed on the host with
+/// `light-poseidon` (the same Poseidon implementation the on-chain
+/// `sol_poseidon` syscall is built on) in canonical big-endian bytes.
+fn circuit_empty_root() -> [u8; 32] {
+    use ark_bn254::Fr;
+    use ark_ff::{BigInteger, PrimeField};
+    use light_poseidon::{Poseidon, PoseidonHasher};
+
+    let mut z = Fr::from(0u64);
+    for _ in 0..mirror_pool::state::merkle::DEPTH {
+        let mut h = Poseidon::<Fr>::new_circom(2).unwrap();
+        z = h.hash(&[z, z]).unwrap();
+    }
+    let be = z.into_bigint().to_bytes_be();
+    let mut out = [0u8; 32];
+    out[32 - be.len()..].copy_from_slice(&be);
+    out
+}
+
+/// DECISIVE on-chain <-> circuit check: the empty-tree root the program writes
+/// at init (via the `sol_poseidon` accumulator) must equal the circuit's
+/// `zeros[DEPTH]` reference computed independently with `light-poseidon`. If
+/// this passes, the on-chain Merkle hashing is byte-identical to the circuit.
+#[test]
+fn empty_root_matches_circuit_zero_ladder() {
+    let mut env = Env::new();
+    let (_authority, _payer, pool) = init_pool(&mut env, 10, 3, 5_000);
+
+    let on_chain = pool::current_root(&env.get(&pool).data).unwrap();
+    assert_eq!(
+        on_chain,
+        circuit_empty_root(),
+        "on-chain empty root must equal the circuit's Poseidon zero ladder"
     );
 }
 

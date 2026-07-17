@@ -1277,6 +1277,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "mirror-pool"
 version = "0.1.0"
 dependencies = [
+ "ark-bn254 0.5.0",
+ "ark-ff 0.5.0",
+ "light-poseidon 0.4.0",
  "mollusk-svm",
  "pinocchio",
  "pinocchio-log",

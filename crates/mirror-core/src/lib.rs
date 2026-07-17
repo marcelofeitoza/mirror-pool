@@ -18,25 +18,92 @@
 //! - [`wire`] - the byte layout the coordinator/cli use to build instructions
 //!   that the on-chain program parses. Kept here so both sides cannot drift.
 //!
-//! v1 uses SHA-256 for commitments/nullifiers (fast, no proving system). v2
-//! swaps in Poseidon + a Groth16 membership proof for ZK-deniable initiation;
-//! see `docs/ROADMAP.md`. The public API is designed so that swap is additive.
+//! Commitments and nullifiers use circomlib Poseidon over the BN254 scalar
+//! field, the exact scheme the Groth16 membership circuit
+//! (`circuits/membership.circom`) enforces and the on-chain accumulator hashes
+//! with, so a proof made for the circuit verifies against a root produced by
+//! this code:
+//!
+//! ```text
+//! commitment    = Poseidon(secret, actionHash, epoch)   // the Merkle leaf
+//! nullifierHash = Poseidon(secret, epoch)               // epoch-scoped tag
+//! Merkle node   = Poseidon(left, right)
+//! ```
+//!
+//! All values are canonical 32-byte BIG-ENDIAN encodings of BN254 scalars,
+//! which is the byte order circom/snarkjs and `groth16-solana` use for public
+//! inputs and the order `light_poseidon` and the `sol_poseidon` syscall use
+//! with `Endianness::BigEndian`. Correctness is pinned by the fixture
+//! cross-check test, which reproduces the committed circuit's nullifierHash,
+//! commitment leaf, and Merkle root exactly.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Domain-separation tags so a hash computed for one purpose can never be
-/// reinterpreted as another (commitment vs nullifier vs epoch binding).
-mod domain {
-    pub const COMMITMENT: &[u8] = b"mirror-pool:v1:commitment";
-    pub const NULLIFIER: &[u8] = b"mirror-pool:v1:nullifier";
+/// BN254 scalar-field arithmetic and circomlib-compatible Poseidon.
+///
+/// Every hash input and output is a canonical 32-byte BIG-ENDIAN encoding of a
+/// BN254 scalar (`Fr`). This is the byte order the circuit, snarkjs, and
+/// `groth16-solana` public inputs use; the order `light_poseidon`'s
+/// `hash_bytes_be` uses; and the order the on-chain `sol_poseidon` syscall uses
+/// with `Endianness::BigEndian` (== 0). Host (`light-poseidon`) and on-chain
+/// (syscall) are the same Poseidon implementation with the same byte order, so
+/// they produce byte-identical results and both match the circuit.
+mod field {
+    use ark_bn254::Fr;
+    use ark_ff::{BigInteger, PrimeField};
+    use light_poseidon::{Poseidon, PoseidonHasher};
+
+    /// Interpret 32 big-endian bytes as an `Fr`, reducing modulo the field
+    /// order r. Reduction (rather than rejection) makes any 32-byte secret a
+    /// valid field element; for canonical inputs already < r (as
+    /// `gen_fixture.js` picks them) it is the identity, so the fixture
+    /// reproduces exactly. All values this module emits are canonical (< r).
+    pub fn from_be(bytes: &[u8; 32]) -> Fr {
+        Fr::from_be_bytes_mod_order(bytes)
+    }
+
+    /// Canonical 32-byte big-endian encoding of `f` (always < r, left-padded).
+    pub fn to_be(f: &Fr) -> [u8; 32] {
+        let be = f.into_bigint().to_bytes_be();
+        let mut out = [0u8; 32];
+        out[32 - be.len()..].copy_from_slice(&be);
+        out
+    }
+
+    /// A field element from a `u64` (used for the epoch id).
+    pub fn from_u64(x: u64) -> Fr {
+        Fr::from(x)
+    }
+
+    /// circomlib Poseidon over `inputs` (width = `inputs.len()`), returned as a
+    /// canonical big-endian 32-byte field element. `new_circom` supports widths
+    /// 1..=12; the scheme only uses 2 (nullifier / Merkle node) and 3
+    /// (commitment) and every input is a valid `Fr`, so neither call can fail.
+    pub fn poseidon(inputs: &[Fr]) -> [u8; 32] {
+        let mut hasher = Poseidon::<Fr>::new_circom(inputs.len()).expect("Poseidon width 1..=12");
+        let out = hasher
+            .hash(inputs)
+            .expect("Poseidon over valid field elements cannot fail");
+        to_be(&out)
+    }
+
+    /// Parse a decimal field-element string (test fixtures use decimal). Only
+    /// the cross-check test needs this.
+    #[cfg(test)]
+    pub fn from_dec(s: &str) -> [u8; 32] {
+        use core::str::FromStr;
+        to_be(&Fr::from_str(s).expect("valid decimal field element"))
+    }
 }
 
 /// A 32-byte hash output (commitment or nullifier).
 pub type Hash32 = [u8; 32];
 
 /// The secret a participant keeps to later prove membership and derive a
-/// nullifier. In v1 this is the pre-image; in v2 it becomes a ZK witness.
+/// nullifier. It is the circuit's private `secret` witness: 32 bytes
+/// interpreted as a big-endian BN254 scalar (reduced modulo the field order, so
+/// any 32 bytes are valid).
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Secret(pub [u8; 32]);
 
@@ -65,27 +132,60 @@ pub struct Commitment(pub Hash32);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct Nullifier(pub Hash32);
 
-/// Compute the commitment for `(secret, action, epoch)`.
+/// The canonical `actionHash` the circuit consumes as a public input.
 ///
-/// Binding the action and epoch into the commitment is what makes the design
-/// fail-closed: a relayer settling the epoch cannot substitute a different
-/// action for a committed one without invalidating the commitment.
-pub fn commit(secret: &Secret, action: &ActionClass, epoch: Epoch) -> Commitment {
-    let mut h = Sha256::new();
-    h.update(domain::COMMITMENT);
-    h.update(secret.0);
-    h.update(action.canonical_bytes());
-    h.update(epoch.0.to_le_bytes());
-    Commitment(h.finalize().into())
+/// Defined as SHA-256 of the deterministic [`ActionClass`] encoding, reduced
+/// into the BN254 scalar field and encoded big-endian. The circuit treats
+/// `actionHash` as an opaque field element (it does not re-derive it inside the
+/// constraints), so any deterministic, collision-resistant map into `Fr` is
+/// sound; this one is defined once here so the value the CLI feeds the prover
+/// and the value the on-chain program binds as a public input are identical.
+/// Binding it as a public input is what stops a relay from re-targeting the
+/// action after commitment.
+pub fn action_hash(action: &ActionClass) -> Hash32 {
+    let digest: Hash32 = Sha256::digest(action.canonical_bytes()).into();
+    // Reduce the 256-bit digest into the field and re-encode canonically so the
+    // result is always a valid, canonical big-endian field element (< r).
+    field::to_be(&field::from_be(&digest))
 }
 
-/// Derive the nullifier for `(secret, epoch)`.
+/// Compute the commitment leaf for `(secret, action, epoch)`.
+///
+/// `commitment = Poseidon(secret, actionHash, epoch)`, exactly the leaf the
+/// circuit recomputes. Binding the action and epoch into the leaf is what makes
+/// the design fail-closed: a relayer settling the epoch cannot substitute a
+/// different action for a committed one without invalidating the commitment.
+pub fn commit(secret: &Secret, action: &ActionClass, epoch: Epoch) -> Commitment {
+    commit_with_action_hash(secret, &action_hash(action), epoch)
+}
+
+/// Compute the commitment leaf from an explicit `actionHash` field element.
+///
+/// `commit(secret, action, epoch)` is exactly
+/// `commit_with_action_hash(secret, &action_hash(action), epoch)`. This lower
+/// level entry point is what the prover uses when it already holds the
+/// `actionHash` public input (and is what the fixture cross-check exercises
+/// against the circuit's own `actionHash`).
+pub fn commit_with_action_hash(secret: &Secret, action_hash: &Hash32, epoch: Epoch) -> Commitment {
+    let s = field::from_be(&secret.0);
+    let a = field::from_be(action_hash);
+    let e = field::from_u64(epoch.0);
+    Commitment(field::poseidon(&[s, a, e]))
+}
+
+/// Derive the nullifier for `(secret, epoch)`: `Poseidon(secret, epoch)`.
 pub fn nullifier(secret: &Secret, epoch: Epoch) -> Nullifier {
-    let mut h = Sha256::new();
-    h.update(domain::NULLIFIER);
-    h.update(secret.0);
-    h.update(epoch.0.to_le_bytes());
-    Nullifier(h.finalize().into())
+    let s = field::from_be(&secret.0);
+    let e = field::from_u64(epoch.0);
+    Nullifier(field::poseidon(&[s, e]))
+}
+
+/// One internal Merkle node: `Poseidon(left, right)`, matching the circuit's
+/// `HashLeftRight` and the on-chain accumulator's `hash_pair`. Inputs and the
+/// output are canonical big-endian field elements. Exposed so off-chain code
+/// (and the cross-check test) can recompute roots and inclusion paths.
+pub fn merkle_node(left: &Hash32, right: &Hash32) -> Hash32 {
+    field::poseidon(&[field::from_be(left), field::from_be(right)])
 }
 
 /// A coarse size bucket. Fixed buckets are the behavioral analog of Tornado's
@@ -284,12 +384,95 @@ mod tests {
     }
 
     #[test]
-    fn commitment_and_nullifier_are_domain_separated() {
-        // Same secret/epoch must not collide across the two hash domains.
+    fn commitment_and_nullifier_differ() {
+        // The 3-input commitment Poseidon(secret, actionHash, epoch) and the
+        // 2-input nullifier Poseidon(secret, epoch) differ by width and inputs,
+        // so they cannot collide for the same secret/epoch.
         let s = Secret([4u8; 32]);
         let c = commit(&s, &action(), Epoch(2)).0;
         let n = nullifier(&s, Epoch(2)).0;
         assert_ne!(c, n);
+    }
+
+    #[test]
+    fn action_hash_is_deterministic_and_binds_shape() {
+        // action_hash is a canonical field element and distinguishes classes.
+        let a = action_hash(&action());
+        assert_eq!(a, action_hash(&action()), "must be deterministic");
+        let other = ActionClass::Stake {
+            validator: [3u8; 32],
+            size: SizeBucket::Small,
+        };
+        assert_ne!(a, action_hash(&other), "class must change actionHash");
+    }
+
+    /// DECISIVE circomlib-compatibility check: reproduce the committed circuit's
+    /// public signals with mirror-core's Poseidon scheme. If this passes, a
+    /// proof generated for `circuits/membership.circom` verifies against a root
+    /// this code (and the on-chain accumulator, which uses the same Poseidon
+    /// with the same big-endian byte order) produces.
+    #[test]
+    fn fixture_cross_check_reproduces_circuit() {
+        const DEPTH: usize = 20;
+
+        // Public-input order is part of the scheme; assert the committed meta.
+        let meta: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/artifacts/fixture_meta.json"
+        )))
+        .unwrap();
+        assert_eq!(
+            meta["publicInputOrder"],
+            serde_json::json!(["root", "nullifierHash", "actionHash", "epoch"]),
+            "public-input order must match the canonical scheme"
+        );
+
+        // Public signals [root, nullifierHash, actionHash, epoch] from the
+        // committed proof fixture (the circuit's own output).
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/artifacts/proof_fixture.json"
+        )))
+        .unwrap();
+        let ps = fixture["publicSignals"].as_array().unwrap();
+        let root = field::from_dec(ps[0].as_str().unwrap());
+        let fixture_nullifier = field::from_dec(ps[1].as_str().unwrap());
+        let action_hash = field::from_dec(ps[2].as_str().unwrap());
+        let epoch = Epoch(ps[3].as_str().unwrap().parse::<u64>().unwrap());
+
+        // Known private inputs from circuits/gen_fixture.js (committed generator):
+        // secret and the leaf index of the single inserted commitment.
+        let secret = Secret(field::from_dec("111122223333444455556666777788889999"));
+        let leaf_index: u64 = 21;
+
+        // 1. nullifier() reproduces the circuit's nullifierHash exactly.
+        assert_eq!(
+            nullifier(&secret, epoch).0,
+            fixture_nullifier,
+            "nullifierHash must match the circuit"
+        );
+
+        // 2. The real commitment leaf path reproduces the leaf; recomputing the
+        //    Merkle path over the canonical zero ladder reproduces the root.
+        let leaf = commit_with_action_hash(&secret, &action_hash, epoch).0;
+
+        // zeros[level]: zeros[0] = 0, zeros[i] = Poseidon(zeros[i-1], zeros[i-1]).
+        let mut zeros = [[0u8; 32]; DEPTH];
+        let mut z = [0u8; 32];
+        for level in zeros.iter_mut() {
+            *level = z;
+            z = merkle_node(&z, &z);
+        }
+
+        let mut cur = leaf;
+        for (level, sibling) in zeros.iter().enumerate() {
+            cur = if (leaf_index >> level) & 1 == 0 {
+                merkle_node(&cur, sibling) // current is left child
+            } else {
+                merkle_node(sibling, &cur) // current is right child
+            };
+        }
+        assert_eq!(cur, root, "recomputed Merkle root must match the circuit");
     }
 
     #[test]

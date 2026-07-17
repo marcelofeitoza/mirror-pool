@@ -6,10 +6,12 @@
 //! both compute and account bytes and the full tree is never materialized
 //! on-chain. Leaves are the opaque 32-byte commitments posted by COMMIT.
 //!
-//! Hashing uses keccak-256 via the Solana syscall (`hash_pair(l, r) =
-//! keccak256(l ‖ r)`), which is cheap on-chain. v2 swaps this for Poseidon so
-//! the tree hashing matches the Groth16 membership circuit; the frontier shape
-//! is unchanged by that swap.
+//! Hashing uses circomlib Poseidon over BN254 via the Solana `sol_poseidon`
+//! syscall (`hash_pair(l, r) = Poseidon(l, r)`), the exact node hash the
+//! Groth16 membership circuit (`circuits/membership.circom`) and the off-chain
+//! `mirror_core::merkle_node` use, so a proof made for the circuit verifies
+//! against a root this accumulator produces. Nodes are 32-byte canonical
+//! big-endian field elements; the frontier shape is independent of the hash.
 //!
 //! The frontier bytes live inline in the Pool account (see `state::pool`); this
 //! module operates on that byte slice through the offsets pool exposes.
@@ -26,16 +28,31 @@ pub const DEPTH: usize = 20;
 /// `empty_root()`.
 pub const ZERO_LEAF: [u8; 32] = [0u8; 32];
 
-/// keccak-256 of the concatenation of the two 32-byte children.
+/// circomlib Poseidon of the two 32-byte children: `Poseidon(left, right)`.
+///
+/// `left` and `right` must be canonical big-endian BN254 field elements (each
+/// < r). Every value this module hashes satisfies that: `ZERO_LEAF` is 0, every
+/// node is a canonical Poseidon output, and commitment leaves are produced by
+/// `mirror_core::commit` (also canonical). Using the same syscall parameters
+/// the `solana-poseidon` crate uses keeps this byte-identical to the circuit
+/// and to `mirror_core::merkle_node` on the host.
 #[cfg(any(target_os = "solana", target_arch = "bpf"))]
 #[inline(always)]
 fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    // `sol_keccak256(vals, val_len, out)` reads `val_len` byte-slices starting
-    // at `vals` (each an { addr, len } pair) and writes 32 bytes to `out`.
+    // `sol_poseidon(parameters, endianness, vals, val_len, out)` reads
+    // `val_len` byte-slices starting at `vals` (each an { addr, len } pair) and
+    // writes the 32-byte hash to `out`.
+    //   parameters = 0 -> Parameters::Bn254X5 (circomlib BN254, width t=3)
+    //   endianness = 0 -> Endianness::BigEndian (matches circom / groth16-solana
+    //                     public-input byte order and mirror_core's encoding)
+    const BN254X5: u64 = 0;
+    const BIG_ENDIAN: u64 = 0;
     let chunks: [&[u8]; 2] = [left, right];
     let mut out = [0u8; 32];
     unsafe {
-        pinocchio::syscalls::sol_keccak256(
+        pinocchio::syscalls::sol_poseidon(
+            BN254X5,
+            BIG_ENDIAN,
             chunks.as_ptr() as *const u8,
             chunks.len() as u64,
             out.as_mut_ptr(),
@@ -47,7 +64,7 @@ fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
 #[inline(always)]
 fn hash_pair(_left: &[u8; 32], _right: &[u8; 32]) -> [u8; 32] {
-    unreachable!("keccak hashing uses an on-chain syscall and never runs on the host")
+    unreachable!("Poseidon hashing uses an on-chain syscall and never runs on the host")
 }
 
 /// Root of a completely empty tree: `zeros(DEPTH)` where `zeros(0) = ZERO_LEAF`
