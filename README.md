@@ -36,29 +36,33 @@ strongest empirical attack on mixers.
 
 ## Status
 
-The complete system is the goal: k-anon slot epochs + a gasless rotating
-coordinator + ZK-deniable initiation (a Groth16 membership proof so even the
-relay cannot learn which committer acted) + real pooled behaviors + an
-adversarial evaluation harness + an automated Surfpool soak suite. The shared
-type layer and the on-chain settlement program are implemented and tested; the
-remaining components are under active development. The status table below is kept
-honest against the tree.
+The complete two-path system is built and proven end to end on Surfpool: k-anon
+slot epochs + a gasless rotating coordinator + a synchronized-crowd path + a
+ZK-deniable opt-in path (a Groth16 membership proof verified on-chain, so even
+the relay cannot learn which committer acted) + real pooled behaviors + an
+adversarial evaluation harness + anti-Sybil economics with incentives. Every
+component is implemented and tested, and a live Surfpool soak exercises both
+paths plus the adversarial cases with 17/17 on-chain assertions passing (see
+[`docs/PROOF.md`](docs/PROOF.md)). The status table below is kept honest against
+the tree.
 
 | Component | Path | Status |
 | --- | --- | --- |
-| Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` with domain separation, `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
-| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool` / `Commit` / `SettleEpoch`, depth-20 frontier Merkle accumulator, Epoch and Nullifier PDAs, on-chain k-floor and double-settle prevention. 7 mollusk tests passing; `build-sbf` green. |
-| ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **In progress** - Poseidon membership circuit + Groth16 trusted setup, then on-chain verification (alt_bn128) so a settled action proves membership without revealing which committer acted. |
+| Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` (circomlib Poseidon, cross-check-proven against the circuit), `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
+| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification. 24 mollusk tests; `build-sbf` green. |
+| ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and executes to a fresh output. A real proof verifies on-chain (fixture test) and live in the soak. |
 | Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. |
-| Gasless coordinator | `crates/mirror-coordinator` | **In progress** - slot-window batching, `k_floor` gate, and rotating fee-payer are implemented and tested; real on-chain `SettleEpoch` submission (v0 tx + ALT) is landing. |
-| Participant CLI | `crates/mirror-cli` | **In progress** - `commit` / `status`; on-chain submission and proof generation are landing. |
-| Pooled behaviors | `crates/mirror-behaviors` | **In progress** - `Behavior` trait + pooled-action adapters (fixed-shape transfer baseline, Jupiter swap, jitoSOL stake). |
-| Surfpool soak suite | `tests/` | **Planned** - automated end-to-end multi-epoch and adversarial soak against a local mainnet mirror. |
+| Gasless coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window batching, `k_floor` gate, rotating fee-payer, and real atomic crowd settlement (ComputeBudget + `SettleEpoch` + N participant behaviors, shared accounts in an ALT). |
+| Participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool` / `commit` / `deposit-commit` / `prove` (rebuilds the path + generates and verifies a Groth16 proof via snarkjs) / `status`. |
+| Pooled behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + pooled-action adapters: PlainTransfer (soak baseline), Jupiter swap, jitoSOL stake. |
+| Anti-Sybil + incentives | `programs/mirror-pool` + `crates/mirror-coordinator` | **Implemented** - entry-fee split into a reward pool, crowd-path dwell `ClaimReward`, honest `real_k` reporting; the ZK-path incentive is designed in [`docs/INCENTIVES.md`](docs/INCENTIVES.md). |
+| Surfpool soak suite | `crates/mirror-soak` | **Implemented** - live end-to-end soak, both paths + adversarial cases, 17/17 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
 
-"In progress" means the crate compiles as part of the workspace with its role
-fixed by the `mirror-core` API and partial logic in place; "Implemented" means
-the component's core logic is complete and tested. The status table is kept
-honest against the tree; see the roadmap for the build order.
+"Implemented" means the component's core logic is complete and tested. The host
+workspace tests, 24 on-chain mollusk tests, `build-sbf`, and the live Surfpool
+soak (17/17 assertions) are all green. See the roadmap for future work
+(swap/stake-from-pool via CPI, the ZK-path anonymity-mining incentive, and a
+production multi-party trusted-setup ceremony; the current setup is dev/test).
 
 ---
 
@@ -104,18 +108,21 @@ Solana entrypoint for the host.
 ```
 mirror-pool/
   crates/
-    mirror-core          # shared types + wire format + tests   [implemented]
-    mirror-coordinator   # off-chain gasless batch coordinator   [in progress]
-    mirror-cli           # participant CLI (commit / status)      [in progress]
+    mirror-core          # shared types + wire format + tests    [implemented]
+    mirror-coordinator   # off-chain gasless batch coordinator    [implemented]
+    mirror-cli           # participant CLI (commit/prove/status)  [implemented]
     mirror-harness       # adversarial evaluation harness         [implemented]
-    mirror-behaviors     # Behavior trait + pooled-action adapters[in progress]
-  circuits/              # Poseidon membership circuit + Groth16 setup [in progress]
+    mirror-behaviors     # Behavior trait + pooled-action adapters[implemented]
+    mirror-soak          # live Surfpool end-to-end soak suite    [implemented]
+  circuits/              # Poseidon membership circuit + Groth16 setup [implemented]
   programs/
     mirror-pool          # on-chain Pinocchio program (SBF)       [implemented]
   docs/
-    THREAT_MODEL.md      # attacker model + which attacks are defeated
-    ARCHITECTURE.md      # commit / batch / settle design in depth
-    ROADMAP.md           # build order and the path to full ZK-deniable initiation
+    THREAT_MODEL.md      # attacker model + which attacks each path defeats
+    ARCHITECTURE.md      # the two settlement paths + on-chain design in depth
+    ROADMAP.md           # what is built and what is future work
+    INCENTIVES.md        # entry-fee split, dwell reward, ZK-path incentive design
+    PROOF.md             # live Surfpool soak results + tx signatures
   Cargo.toml             # host workspace manifest
   Makefile               # fmt / clippy / test / build-sbf / harness / soak
   LICENSE                # MIT
@@ -184,8 +191,11 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   chain-analysis heuristics each design choice defeats.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) - commit / shared-epoch batch /
   gasless atomic settlement in depth, and the on-chain account model.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) - the build order and the path to full
-  ZK-deniable initiation.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) - what is built and what is future work.
+- [`docs/INCENTIVES.md`](docs/INCENTIVES.md) - the entry-fee split, the crowd-path
+  dwell reward, honest real-k, and the anonymity-preserving ZK-path incentive design.
+- [`docs/PROOF.md`](docs/PROOF.md) - the live Surfpool soak: both paths + the
+  adversarial cases, with transaction signatures and on-chain assertions.
 
 ---
 
