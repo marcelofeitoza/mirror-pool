@@ -26,6 +26,9 @@ sha2.workspace = true
 # big-endian field elements and the BN254 base-field G1 negation `prove` emits in
 # the SettleZk `proof_a`. Public crate; no cryptography of its own.
 num-bigint = "0.4"
+# OS randomness for confidential-value note blindings, dummy-input keys, and the
+# value-keygen wallet. Host-side only (the CLI never runs in the SBF program).
+rand.workspace = true
 
 # Split Solana client + transaction crates, pinned to the SAME majors the on-chain
 # program and the sibling host crates link (solana-pubkey v4, solana-instruction

@@ -37,6 +37,11 @@ pub const POOL_SEED: &[u8] = b"pool";
 pub const EPOCH_SEED: &[u8] = b"epoch";
 pub const NULLIFIER_SEED: &[u8] = b"nf";
 
+/// Confidential-value seed prefixes, byte-identical to the on-chain `pda` module.
+pub const VALUE_POOL_SEED: &[u8] = b"vpool";
+pub const VALUE_VAULT_SEED: &[u8] = b"vvault";
+pub const VALUE_NULLIFIER_SEED: &[u8] = b"vnf";
+
 /// Derive the Pool PDA: seeds `[b"pool", authority]`.
 pub fn pool_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[POOL_SEED, authority.as_ref()], program_id).0
@@ -60,6 +65,27 @@ pub fn nullifier_pda(program_id: &Pubkey, pool: &Pubkey, epoch: u64, nullifier: 
             &epoch.to_le_bytes(),
             nullifier,
         ],
+        program_id,
+    )
+    .0
+}
+
+/// Derive the ValuePool PDA: seeds `[b"vpool", authority]`.
+pub fn value_pool_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[VALUE_POOL_SEED, authority.as_ref()], program_id).0
+}
+
+/// Derive the value vault PDA (holds commingled lamports): seeds `[b"vvault", vpool]`.
+pub fn value_vault_pda(program_id: &Pubkey, vpool: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[VALUE_VAULT_SEED, vpool.as_ref()], program_id).0
+}
+
+/// Derive a value nullifier PDA (global spent-set): seeds `[b"vnf", vpool, nullifier(32)]`.
+/// A value nullifier is position-bound by the transaction circuit, so unlike the
+/// behavioral nullifier it is NOT epoch-scoped.
+pub fn value_nullifier_pda(program_id: &Pubkey, vpool: &Pubkey, nullifier: &Hash32) -> Pubkey {
+    Pubkey::find_program_address(
+        &[VALUE_NULLIFIER_SEED, vpool.as_ref(), nullifier],
         program_id,
     )
     .0
@@ -171,6 +197,97 @@ impl PoolState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ValuePool account layout, byte-identical to the on-chain `state::value_pool`.
+// (LE integers; see programs/mirror-pool/src/state/value_pool.rs.)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+mod value_pool_off {
+    pub const DEPTH: usize = crate::tree::DEPTH;
+    pub const VERSION: usize = 0;
+    pub const AUTHORITY: usize = 1;
+    pub const FEE: usize = 33;
+    pub const DENOM_FLAG: usize = 41;
+    pub const DENOM: usize = 42;
+    pub const BUMP: usize = 50;
+    pub const VAULT_BUMP: usize = 51;
+    pub const COMMITMENT_COUNT: usize = 52;
+    pub const CURRENT_ROOT: usize = 60;
+    pub const FRONTIER: usize = 92;
+    pub const FRONTIER_LEN: usize = DEPTH * 32;
+    pub const ROOT_HISTORY_SIZE: usize = 32;
+    pub const ROOT_HEAD: usize = FRONTIER + FRONTIER_LEN; // 732
+    pub const ROOT_RING: usize = ROOT_HEAD + 4; // 736
+    pub const ROOT_RING_LEN: usize = ROOT_HISTORY_SIZE * 32;
+    pub const LEN: usize = ROOT_RING + ROOT_RING_LEN; // 1760
+}
+
+/// A decoded snapshot of a ValuePool account, as read over RPC.
+#[derive(Clone, Debug)]
+pub struct ValuePoolState {
+    pub authority: Pubkey,
+    pub fee: u64,
+    pub denomination: Option<u64>,
+    pub commitment_count: u64,
+    pub current_root: Hash32,
+    /// `filled_subtrees`, one 32-byte sibling per level (the frontier).
+    pub frontier: Vec<Hash32>,
+    /// The recent-root ring buffer (the last `ROOT_HISTORY_SIZE` roots).
+    pub root_ring: Vec<Hash32>,
+}
+
+impl ValuePoolState {
+    /// Decode the raw ValuePool account bytes. Fails closed on a wrong length or an
+    /// uninitialized account.
+    pub fn decode(data: &[u8]) -> Result<ValuePoolState> {
+        if data.len() != value_pool_off::LEN {
+            bail!(
+                "value pool account is {} bytes, expected {} (layout drift or not a value pool)",
+                data.len(),
+                value_pool_off::LEN
+            );
+        }
+        if data[value_pool_off::VERSION] == 0 {
+            bail!("value pool account is not initialized (version 0)");
+        }
+        let read_u64 = |off: usize| -> u64 {
+            u64::from_le_bytes(data[off..off + 8].try_into().expect("8 bytes in range"))
+        };
+        let read_hash =
+            |off: usize| -> Hash32 { data[off..off + 32].try_into().expect("32 bytes in range") };
+
+        let denomination = if data[value_pool_off::DENOM_FLAG] == 0 {
+            None
+        } else {
+            Some(read_u64(value_pool_off::DENOM))
+        };
+        let mut frontier = Vec::with_capacity(value_pool_off::DEPTH);
+        for level in 0..value_pool_off::DEPTH {
+            frontier.push(read_hash(value_pool_off::FRONTIER + level * 32));
+        }
+        let mut root_ring = Vec::with_capacity(value_pool_off::ROOT_HISTORY_SIZE);
+        for i in 0..value_pool_off::ROOT_HISTORY_SIZE {
+            root_ring.push(read_hash(value_pool_off::ROOT_RING + i * 32));
+        }
+        Ok(ValuePoolState {
+            authority: Pubkey::new_from_array(read_hash(value_pool_off::AUTHORITY)),
+            fee: read_u64(value_pool_off::FEE),
+            denomination,
+            commitment_count: read_u64(value_pool_off::COMMITMENT_COUNT),
+            current_root: read_hash(value_pool_off::CURRENT_ROOT),
+            frontier,
+            root_ring,
+        })
+    }
+
+    /// Whether `root` is the current root or one of the last `ROOT_HISTORY_SIZE`
+    /// roots (i.e. a root a Transact would accept).
+    pub fn is_known_root(&self, root: &Hash32) -> bool {
+        root == &self.current_root || self.root_ring.iter().any(|r| r == root)
+    }
+}
+
 /// A thin blocking RPC wrapper. Pure transport; no keys or ids baked in.
 pub struct Chain {
     rpc: RpcClient,
@@ -197,6 +314,15 @@ impl Chain {
             .get_account(pool)
             .with_context(|| format!("reading pool account {pool}"))?;
         PoolState::decode(&account.data)
+    }
+
+    /// Read and decode a ValuePool account.
+    pub fn value_pool_state(&self, vpool: &Pubkey) -> Result<ValuePoolState> {
+        let account = self
+            .rpc
+            .get_account(vpool)
+            .with_context(|| format!("reading value pool account {vpool}"))?;
+        ValuePoolState::decode(&account.data)
     }
 
     /// Build, sign, and submit a v0 transaction whose fee payer is the first
@@ -324,6 +450,49 @@ pub fn commit_deposit_ix(
     }
 }
 
+/// Build the `InitValuePool` instruction (confidential-value layer).
+///
+/// Body: `[fee(8 LE)][denom_flag(1)][denomination(8 LE)]`. Accounts (see
+/// `instructions::init_value_pool`): vpool(w), vault(w), authority(signer),
+/// payer(signer, w), system_program. `authority` becomes `vpool.authority` (the
+/// Transact relay), so it must sign; `payer` funds both PDAs' rent. `denomination`
+/// is stored but NOT enforced in this program version.
+pub fn init_value_pool_ix(
+    program_id: &Pubkey,
+    vpool: &Pubkey,
+    vault: &Pubkey,
+    authority: &Pubkey,
+    payer: &Pubkey,
+    fee: u64,
+    denomination: Option<u64>,
+) -> Instruction {
+    let mut data = Vec::with_capacity(wire::INIT_VALUE_POOL_LEN);
+    data.push(wire::tag::INIT_VALUE_POOL);
+    data.extend_from_slice(&fee.to_le_bytes());
+    match denomination {
+        Some(d) => {
+            data.push(1);
+            data.extend_from_slice(&d.to_le_bytes());
+        }
+        None => {
+            data.push(0);
+            data.extend_from_slice(&0u64.to_le_bytes());
+        }
+    }
+    debug_assert_eq!(data.len(), wire::INIT_VALUE_POOL_LEN);
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*vpool, false),
+            AccountMeta::new(*vault, false),
+            AccountMeta::new_readonly(*authority, true),
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+        ],
+        data,
+    }
+}
+
 /// Read a Solana CLI keypair file (a JSON array of 64 bytes) into a `Keypair`.
 pub fn read_keypair(path: &std::path::Path) -> Result<Keypair> {
     let raw = std::fs::read_to_string(path)
@@ -428,6 +597,71 @@ mod tests {
         assert_eq!(
             nullifier_pda(&program, &pool, 7, &nf),
             nullifier_pda(&program, &pool, 7, &nf)
+        );
+    }
+
+    #[test]
+    fn value_pool_layout_offsets_match_program() {
+        // Keep the value-pool decoder pinned to the program's state::value_pool.
+        assert_eq!(value_pool_off::FRONTIER, 92);
+        assert_eq!(value_pool_off::ROOT_HEAD, 732);
+        assert_eq!(value_pool_off::ROOT_RING, 736);
+        assert_eq!(value_pool_off::LEN, 1760);
+    }
+
+    #[test]
+    fn init_value_pool_ix_layout() {
+        let program = Pubkey::new_from_array([9u8; 32]);
+        let authority = Pubkey::new_from_array([2u8; 32]);
+        let vpool = value_pool_pda(&program, &authority);
+        let vault = value_vault_pda(&program, &vpool);
+        let payer = Pubkey::new_from_array([3u8; 32]);
+        let ix = init_value_pool_ix(
+            &program,
+            &vpool,
+            &vault,
+            &authority,
+            &payer,
+            5_000,
+            Some(1_000),
+        );
+        assert_eq!(ix.program_id, program);
+        assert_eq!(ix.data.len(), wire::INIT_VALUE_POOL_LEN);
+        assert_eq!(ix.data[0], wire::tag::INIT_VALUE_POOL);
+        assert_eq!(ix.data[1..9], 5_000u64.to_le_bytes());
+        assert_eq!(ix.data[9], 1, "denom flag = Some");
+        assert_eq!(ix.data[10..18], 1_000u64.to_le_bytes());
+        // vpool(w,!s), vault(w,!s), authority(!w,s), payer(w,s), system(!w,!s).
+        assert!(ix.accounts[0].is_writable && !ix.accounts[0].is_signer);
+        assert!(ix.accounts[1].is_writable && !ix.accounts[1].is_signer);
+        assert!(!ix.accounts[2].is_writable && ix.accounts[2].is_signer);
+        assert!(ix.accounts[3].is_writable && ix.accounts[3].is_signer);
+        assert_eq!(ix.accounts[4].pubkey, SYSTEM_PROGRAM_ID);
+
+        // denom_flag = None encodes flag 0 and a zero denomination.
+        let ix_none = init_value_pool_ix(&program, &vpool, &vault, &authority, &payer, 0, None);
+        assert_eq!(ix_none.data[9], 0, "denom flag = None");
+        assert_eq!(ix_none.data[10..18], 0u64.to_le_bytes());
+    }
+
+    #[test]
+    fn value_pda_derivation_is_deterministic() {
+        let program = Pubkey::new_from_array([9u8; 32]);
+        let authority = Pubkey::new_from_array([2u8; 32]);
+        let vpool = value_pool_pda(&program, &authority);
+        assert_eq!(vpool, value_pool_pda(&program, &authority));
+        let vault = value_vault_pda(&program, &vpool);
+        assert_eq!(vault, value_vault_pda(&program, &vpool));
+        let nf = [5u8; 32];
+        assert_eq!(
+            value_nullifier_pda(&program, &vpool, &nf),
+            value_nullifier_pda(&program, &vpool, &nf)
+        );
+        // A value nullifier PDA is NOT epoch-scoped; a distinct nullifier differs.
+        let nf2 = [6u8; 32];
+        assert_ne!(
+            value_nullifier_pda(&program, &vpool, &nf),
+            value_nullifier_pda(&program, &vpool, &nf2)
         );
     }
 }

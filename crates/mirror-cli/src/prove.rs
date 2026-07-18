@@ -312,7 +312,7 @@ fn write_input_json(
 
 /// Split a snarkjs invocation string into `(program, prefix_args)`, so both
 /// `snarkjs` and `node /path/to/cli.cjs` work.
-fn snarkjs_command(snarkjs: &str) -> Result<(String, Vec<String>)> {
+pub(crate) fn snarkjs_command(snarkjs: &str) -> Result<(String, Vec<String>)> {
     let mut parts = snarkjs.split_whitespace().map(str::to_string);
     let program = parts
         .next()
@@ -320,7 +320,7 @@ fn snarkjs_command(snarkjs: &str) -> Result<(String, Vec<String>)> {
     Ok((program, parts.collect()))
 }
 
-fn run_fullprove(
+pub(crate) fn run_fullprove(
     snarkjs: &str,
     input: &Path,
     wasm: &Path,
@@ -362,7 +362,7 @@ fn run_fullprove(
     Ok(())
 }
 
-fn verify_proof(snarkjs: &str, vk: &Path, public: &Path, proof: &Path) -> Result<()> {
+pub(crate) fn verify_proof(snarkjs: &str, vk: &Path, public: &Path, proof: &Path) -> Result<()> {
     if !vk.exists() {
         bail!(
             "verification key not found at {}: run `bash circuits/build.sh` (or point --vk at it)",

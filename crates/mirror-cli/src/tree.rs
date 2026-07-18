@@ -125,6 +125,37 @@ pub fn incremental_path(leaf: &Hash32, leaf_index: u64, frontier_pre: &[Hash32])
     }
 }
 
+/// Append `leaf` at position `count` to a frontier snapshot (`filled_subtrees`),
+/// mutating it exactly like the on-chain `merkle::append`, and return the new root.
+///
+/// This is the non-test counterpart to [`Frontier::append`]. A confidential
+/// Transact appends TWO output commitments in one call: out0 lands at index
+/// `commitment_count` (its pre-insert frontier is the one read off-chain before the
+/// Transact), and out1 lands at `commitment_count + 1` (its pre-insert frontier is
+/// the frontier AFTER out0 was appended). This lets the CLI derive out1's frontier
+/// snapshot so a later spend can rebuild its inclusion path with
+/// [`incremental_path`].
+pub fn append_incremental(frontier: &mut [Hash32], count: u64, leaf: &Hash32) -> Hash32 {
+    assert_eq!(
+        frontier.len(),
+        DEPTH,
+        "frontier snapshot must have exactly DEPTH siblings"
+    );
+    let zeros = zero_ladder(DEPTH);
+    let mut current_index = count;
+    let mut current_hash = *leaf;
+    for level in 0..DEPTH {
+        if current_index & 1 == 0 {
+            frontier[level] = current_hash;
+            current_hash = merkle_node(&current_hash, &zeros[level]);
+        } else {
+            current_hash = merkle_node(&frontier[level], &current_hash);
+        }
+        current_index >>= 1;
+    }
+    current_hash
+}
+
 /// A sparse Poseidon Merkle tree rebuilt from an ordered leaf set.
 ///
 /// "Sparse" because the right part of the tree is empty: any missing right
@@ -303,6 +334,65 @@ mod tests {
         let n01 = merkle_node(&a, &b);
         let expected = merkle_node(&n01, &zeros[1]);
         assert_eq!(tree.root(), expected);
+    }
+
+    #[test]
+    fn append_incremental_matches_test_frontier_and_enables_second_output_path() {
+        // append_incremental (non-test) must mutate the frontier and compute the
+        // root identically to the test-only Frontier::append, and the mutated
+        // frontier must be a valid pre-insert snapshot for the NEXT leaf. This is
+        // exactly how the CLI derives the frontier snapshot for a Transact's second
+        // output commitment (out1 at index count+1).
+        const D: usize = 20;
+        let leaves: Vec<Hash32> = (0u8..6).map(|b| [b.wrapping_add(1); 32]).collect();
+
+        let mut reference = Frontier::new(D);
+        let mut frontier = vec![ZERO_LEAF; D];
+        for (i, leaf) in leaves.iter().enumerate() {
+            let ref_root = reference.append(leaf);
+            let root = append_incremental(&mut frontier, i as u64, leaf);
+            assert_eq!(root, ref_root, "roots must agree at {i}");
+            assert_eq!(
+                frontier,
+                reference.snapshot(),
+                "frontiers must agree at {i}"
+            );
+        }
+
+        // Simulate a Transact appending out0 then out1: out1's pre-insert frontier
+        // is the frontier after out0, and incremental_path over it must reproduce
+        // the full-rebuild path for out1.
+        let count_pre = leaves.len() as u64;
+        let out0 = [0x40u8; 32];
+        let out1 = [0x41u8; 32];
+        let snap0 = frontier.clone(); // pre-insert frontier for out0
+        let _ = append_incremental(&mut frontier, count_pre, &out0); // frontier now pre-insert for out1
+        let snap1 = frontier.clone();
+
+        let inc0 = incremental_path(&out0, count_pre, &snap0);
+        let inc1 = incremental_path(&out1, count_pre + 1, &snap1);
+
+        // inc0 is the path as of out0's insertion (before out1 exists), so it must
+        // match a rebuild of leaves-up-to-out0; inc1 matches the final tree.
+        let mut with_out0 = leaves.clone();
+        with_out0.push(out0);
+        let full0 = SparseMerkle::from_leaves(D, &with_out0);
+        assert_eq!(inc0.elements, full0.path(count_pre as usize).elements);
+        assert_eq!(
+            inc0.root,
+            full0.root(),
+            "out0 path must verify to the post-out0 root"
+        );
+
+        let mut all = with_out0.clone();
+        all.push(out1);
+        let full1 = SparseMerkle::from_leaves(D, &all);
+        assert_eq!(inc1.elements, full1.path(count_pre as usize + 1).elements);
+        assert_eq!(
+            inc1.root,
+            full1.root(),
+            "out1 path must verify to the final root"
+        );
     }
 
     #[test]

@@ -36,6 +36,8 @@ mod note;
 mod prove;
 mod tree;
 mod util;
+mod value;
+mod value_note;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -64,6 +66,12 @@ const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8899";
 /// Default directory for saved notes (gitignored).
 const DEFAULT_NOTE_DIR: &str = "notes";
 
+/// Default transaction-circuit artifacts (gitignored build outputs of
+/// `bash circuits/build_transaction.sh`).
+const DEFAULT_TX_WASM: &str = "circuits/transaction_js/transaction.wasm";
+const DEFAULT_TX_ZKEY: &str = "circuits/transaction_final.zkey";
+const DEFAULT_TX_VK: &str = "circuits/artifacts/transaction_verification_key.json";
+
 #[derive(Parser)]
 #[command(
     name = "mirror-cli",
@@ -88,6 +96,195 @@ enum Command {
     Prove(ProveArgs),
     /// Show pool config + current epoch on-chain.
     Status(StatusArgs),
+    /// (confidential value) Derive a value spend + viewing keypair and save a keyfile.
+    ValueKeygen(ValueKeygenArgs),
+    /// (confidential value, admin) Create a ValuePool + vault; print the ValuePool PDA.
+    InitValuePool(InitValuePoolArgs),
+    /// (confidential value) Deposit into a fresh shielded note; prove + emit Transact.
+    Shield(ShieldArgs),
+    /// (confidential value) Spend a note to a recipient + change; prove + emit Transact.
+    Transfer(TransferArgs),
+    /// (confidential value) Withdraw a note to a public recipient; prove + emit Transact.
+    Unshield(UnshieldArgs),
+    /// (confidential value) Trial-decrypt enc blobs and save recovered spendable notes.
+    Scan(ScanArgs),
+}
+
+/// Shared snarkjs + transaction-circuit artifact arguments for the value commands.
+#[derive(Args)]
+struct TxProveArgs {
+    /// Circuit witness generator (gitignored; `bash circuits/build_transaction.sh`).
+    #[arg(long, default_value = DEFAULT_TX_WASM)]
+    wasm: PathBuf,
+    /// Groth16 proving key (gitignored; `bash circuits/build_transaction.sh`).
+    #[arg(long, default_value = DEFAULT_TX_ZKEY)]
+    zkey: PathBuf,
+    /// Groth16 verification key (committed under circuits/artifacts/).
+    #[arg(long, default_value = DEFAULT_TX_VK)]
+    vk: PathBuf,
+    /// snarkjs invocation (default `snarkjs`; `node <dir>/cli.cjs` also works).
+    #[arg(long, default_value = "snarkjs")]
+    snarkjs: String,
+    /// Directory for input.json/proof.json/public.json (default: a temp dir).
+    #[arg(long)]
+    work_dir: Option<PathBuf>,
+    /// Also write the emitted Transact bundle (JSON) to this path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+impl TxProveArgs {
+    fn to_opts(&self) -> value::TransactProveOpts {
+        value::TransactProveOpts {
+            snarkjs: self.snarkjs.clone(),
+            wasm: self.wasm.clone(),
+            zkey: self.zkey.clone(),
+            vk: self.vk.clone(),
+            work_dir: self.work_dir.clone(),
+        }
+    }
+}
+
+#[derive(Args)]
+struct ValueKeygenArgs {
+    /// Seed for a deterministic (reproducible) wallet. Omit for OS randomness.
+    #[arg(long)]
+    seed: Option<String>,
+    /// Where to write the keyfile (both secrets; gitignored).
+    #[arg(long, default_value = "notes/value-key.json")]
+    out: PathBuf,
+}
+
+#[derive(Args)]
+struct InitValuePoolArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// Keypair that becomes `vpool.authority` (the Transact relay). Signs InitValuePool.
+    #[arg(long)]
+    authority: PathBuf,
+    /// Keypair that funds the ValuePool + vault rent (defaults to the authority).
+    #[arg(long)]
+    payer: Option<PathBuf>,
+    /// Relay fee (lamports) bound into every Transact's ext-data.
+    #[arg(long)]
+    fee: u64,
+    /// Fixed denomination (lamports), stored but NOT enforced in this version.
+    #[arg(long)]
+    denomination: Option<u64>,
+}
+
+#[derive(Args)]
+struct ShieldArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// The ValuePool PDA (base58) to deposit into.
+    #[arg(long)]
+    pool: String,
+    /// Depositor keypair: funds + co-signs the deposit (shield is not gasless).
+    #[arg(long)]
+    depositor: PathBuf,
+    /// The recipient value+viewing address ("<value_pub_hex>:<viewing_pub_hex>").
+    #[arg(long)]
+    to: String,
+    /// Lamports to deposit into the shielded note. Must be > 0.
+    #[arg(long)]
+    amount: u64,
+    /// Directory to save the note record into (gitignored).
+    #[arg(long, default_value = DEFAULT_NOTE_DIR)]
+    note_dir: PathBuf,
+    #[command(flatten)]
+    prove: TxProveArgs,
+}
+
+#[derive(Args)]
+struct TransferArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// The ValuePool PDA (base58).
+    #[arg(long)]
+    pool: String,
+    /// The spendable input note record (from `scan`).
+    #[arg(long)]
+    note: PathBuf,
+    /// The recipient value+viewing address ("<value_pub_hex>:<viewing_pub_hex>").
+    #[arg(long)]
+    to: String,
+    /// Amount to pay the recipient; the remainder returns to self as change.
+    #[arg(long)]
+    amount: u64,
+    /// Change destination address (default: the input note's own owner).
+    #[arg(long)]
+    change_to: Option<String>,
+    /// Directory to save note records into (gitignored).
+    #[arg(long, default_value = DEFAULT_NOTE_DIR)]
+    note_dir: PathBuf,
+    #[command(flatten)]
+    prove: TxProveArgs,
+}
+
+#[derive(Args)]
+struct UnshieldArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// The ValuePool PDA (base58).
+    #[arg(long)]
+    pool: String,
+    /// The spendable input note record (from `scan`).
+    #[arg(long)]
+    note: PathBuf,
+    /// The public Solana account (base58) credited by the withdrawal.
+    #[arg(long)]
+    recipient: String,
+    /// Lamports to withdraw to the recipient; the remainder returns to self.
+    #[arg(long)]
+    amount: u64,
+    /// Directory to save note records into (gitignored).
+    #[arg(long, default_value = DEFAULT_NOTE_DIR)]
+    note_dir: PathBuf,
+    #[command(flatten)]
+    prove: TxProveArgs,
+}
+
+#[derive(Args)]
+struct ScanArgs {
+    /// The wallet keyfile (from `value-keygen`) whose viewing key trial-decrypts.
+    #[arg(long)]
+    viewing_key: PathBuf,
+    /// A file of on-chain `enc` blobs, one hex blob per non-empty line.
+    #[arg(long)]
+    blobs: PathBuf,
+    /// Optional ordered on-chain value commitments (one hex per line) to recover
+    /// each hit's leaf index + inclusion path (needed on a no-history validator).
+    #[arg(long)]
+    leaves: Option<PathBuf>,
+    /// RPC endpoint (optional; used to verify a recovered note's root is on-chain).
+    #[arg(long)]
+    rpc_url: Option<String>,
+    /// The ValuePool PDA (base58); required to verify roots and save spendable notes.
+    #[arg(long)]
+    pool: Option<String>,
+    /// mirror-pool program id (base58); required to save spendable note records.
+    #[arg(long)]
+    program_id: Option<String>,
+    /// Directory to save recovered spendable notes into (gitignored).
+    #[arg(long, default_value = DEFAULT_NOTE_DIR)]
+    note_dir: PathBuf,
 }
 
 #[derive(Args)]
@@ -312,6 +509,12 @@ fn main() -> Result<()> {
         Command::DepositCommit(args) => run_deposit_commit(args),
         Command::Prove(args) => run_prove(args),
         Command::Status(args) => run_status(args),
+        Command::ValueKeygen(args) => run_value_keygen(args),
+        Command::InitValuePool(args) => run_init_value_pool(args),
+        Command::Shield(args) => run_shield(args),
+        Command::Transfer(args) => run_transfer(args),
+        Command::Unshield(args) => run_unshield(args),
+        Command::Scan(args) => run_scan(args),
     }
 }
 
@@ -586,6 +789,221 @@ fn run_status(args: StatusArgs) -> Result<()> {
             (epoch + 1) * pool_state.epoch_slots
         );
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Confidential-value layer handlers.
+// ---------------------------------------------------------------------------
+
+fn run_value_keygen(args: ValueKeygenArgs) -> Result<()> {
+    let wallet = match &args.seed {
+        Some(seed) => value_note::ValueWallet::from_seed(seed),
+        None => value_note::ValueWallet::random(),
+    };
+    let addr = wallet.address();
+    wallet.to_keyfile().save(&args.out)?;
+
+    println!("value public key:   {}", to_hex(&addr.value_public_key));
+    println!("viewing public key: {}", to_hex(&addr.viewing_public_key));
+    println!("address:            {}", addr.to_encoded());
+    println!("keyfile saved:      {}", args.out.display());
+    if args.seed.is_none() {
+        println!("(random wallet; keep the keyfile safe - it is the only copy of the secrets)");
+    }
+    Ok(())
+}
+
+fn run_init_value_pool(args: InitValuePoolArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let authority_kp = chain::read_keypair(&args.authority)?;
+    let payer_kp = match &args.payer {
+        Some(p) => chain::read_keypair(p)?,
+        None => chain::read_keypair(&args.authority)?,
+    };
+    let authority = authority_kp.pubkey();
+    let payer = payer_kp.pubkey();
+    let vpool = chain::value_pool_pda(&program_id, &authority);
+    let vault = chain::value_vault_pda(&program_id, &vpool);
+
+    let ix = chain::init_value_pool_ix(
+        &program_id,
+        &vpool,
+        &vault,
+        &authority,
+        &payer,
+        args.fee,
+        args.denomination,
+    );
+
+    // Fee payer first; add the authority only if it is a distinct signer.
+    let mut signers: Vec<&solana_keypair::Keypair> = vec![&payer_kp];
+    if authority != payer {
+        signers.push(&authority_kp);
+    }
+    let chain = Chain::new(args.rpc_url);
+    let sig = chain
+        .submit(&[ix], &signers)
+        .context("submitting InitValuePool")?;
+
+    println!("value pool authority: {authority}");
+    println!("value pool PDA:       {vpool}");
+    println!("vault PDA:            {vault}");
+    println!("fee:                  {} lamports", args.fee);
+    match args.denomination {
+        Some(d) => println!("denomination:         {d} lamports (stored, not enforced)"),
+        None => println!("denomination:         none"),
+    }
+    println!("signature:            {sig}");
+    Ok(())
+}
+
+fn run_shield(args: ShieldArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let value_pool = parse_pubkey(&args.pool, "pool")?;
+    let to = value_note::ValueAddress::parse(&args.to).context("--to")?;
+    let depositor_kp = chain::read_keypair(&args.depositor)?;
+
+    let emit = value::run_shield(value::ShieldOpts {
+        rpc_url: args.rpc_url,
+        program_id,
+        value_pool,
+        depositor: depositor_kp.pubkey(),
+        to,
+        amount: args.amount,
+        note_dir: args.note_dir,
+        prove: args.prove.to_opts(),
+        out: args.prove.out.clone(),
+    })?;
+    print_transact_emit(&emit)?;
+    Ok(())
+}
+
+fn run_transfer(args: TransferArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let value_pool = parse_pubkey(&args.pool, "pool")?;
+    let to = value_note::ValueAddress::parse(&args.to).context("--to")?;
+    let change_to = match &args.change_to {
+        Some(s) => Some(value_note::ValueAddress::parse(s).context("--change-to")?),
+        None => None,
+    };
+
+    let emit = value::run_transfer(value::TransferOpts {
+        rpc_url: args.rpc_url,
+        program_id,
+        value_pool,
+        note: args.note,
+        to,
+        amount: args.amount,
+        change_to,
+        note_dir: args.note_dir,
+        prove: args.prove.to_opts(),
+        out: args.prove.out.clone(),
+    })?;
+    print_transact_emit(&emit)?;
+    Ok(())
+}
+
+fn run_unshield(args: UnshieldArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let value_pool = parse_pubkey(&args.pool, "pool")?;
+    let recipient = parse_pubkey(&args.recipient, "recipient")?;
+
+    let emit = value::run_unshield(value::UnshieldOpts {
+        rpc_url: args.rpc_url,
+        program_id,
+        value_pool,
+        note: args.note,
+        recipient,
+        amount: args.amount,
+        note_dir: args.note_dir,
+        prove: args.prove.to_opts(),
+        out: args.prove.out.clone(),
+    })?;
+    print_transact_emit(&emit)?;
+    Ok(())
+}
+
+fn run_scan(args: ScanArgs) -> Result<()> {
+    let value_pool = match &args.pool {
+        Some(s) => Some(parse_pubkey(s, "pool")?),
+        None => None,
+    };
+    let program_id = match &args.program_id {
+        Some(s) => Some(parse_pubkey(s, "program-id")?),
+        None => None,
+    };
+    let found = value::run_scan(value::ScanOpts {
+        viewing_key: args.viewing_key,
+        blobs: args.blobs,
+        leaves: args.leaves,
+        rpc_url: args.rpc_url,
+        value_pool,
+        program_id,
+        note_dir: args.note_dir,
+    })?;
+
+    println!(
+        "scan: {} note(s) addressed to this viewing key",
+        found.len()
+    );
+    for (i, n) in found.iter().enumerate() {
+        println!(
+            "  [{i}] amount={} commitment={} leaf_index={}",
+            n.amount,
+            to_hex(&n.commitment),
+            n.leaf_index
+                .map(|x| x.to_string())
+                .unwrap_or_else(|| "unknown (pass --leaves)".to_string())
+        );
+        if let Some(p) = &n.saved_path {
+            println!("      spendable note saved: {}", p.display());
+        }
+    }
+    Ok(())
+}
+
+/// Print the emitted Transact bundle: a human summary then the machine-readable JSON.
+fn print_transact_emit(emit: &value::TransactEmit) -> Result<()> {
+    println!("proof generated and VERIFIED by snarkjs.");
+    println!();
+    let submitter = if emit.shield_requires_depositor_signature {
+        "the relay authority (fee payer + signer) AND the depositor (co-signs + funds the deposit)"
+    } else {
+        "the gasless relay authority ONLY (no user signature - this is the unlinkability)"
+    };
+    println!("Transact ({}) - submit signed by {}:", emit.op, submitter);
+    println!("  program_id:     {}", emit.program_id);
+    println!("  value pool:     {}", emit.value_pool);
+    println!("  authority:      {}", emit.authority);
+    println!("  vault:          {}", emit.vault);
+    println!("  fee:            {} lamports", emit.fee);
+    println!("  publicAmount:   {}", emit.public_amount_hex);
+    println!("  root:           {}", emit.root_hex);
+    println!("  extDataHash:    {}", emit.ext_data_hash_hex);
+    println!("  in nullifier0:  {}", emit.in_nullifier0_hex);
+    println!("  in nullifier1:  {}", emit.in_nullifier1_hex);
+    println!("  out commit0:    {}", emit.out_commitment0_hex);
+    println!("  out commit1:    {}", emit.out_commitment1_hex);
+    println!();
+    println!("  accounts (in order):");
+    for (i, a) in emit.accounts.iter().enumerate() {
+        let s = if a.is_signer { "signer" } else { "-" };
+        let w = if a.is_writable {
+            "writable"
+        } else {
+            "readonly"
+        };
+        println!("    {i}. {:<16} {} ({s}, {w})", a.role, a.pubkey);
+    }
+    println!();
+    println!("  data ({} bytes, hex):", emit.transact_data_hex.len() / 2);
+    println!("    {}", emit.transact_data_hex);
+    println!();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(emit).context("serializing emit")?
+    );
     Ok(())
 }
 

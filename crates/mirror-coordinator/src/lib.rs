@@ -51,11 +51,14 @@ pub use crowd::{
     CrowdSettleRequest, RpcSettleSubmitter, SettleContext, SettleParticipant,
     PLAIN_TRANSFER_MAX_PER_TX,
 };
+pub use value::{build_transact_message, submit_transact, ValueTransactRequest};
 
 /// The RPC boundary (real + mockable) the crowd-path submitter builds on.
 pub mod client;
 /// The crowd path: composing and submitting one atomic settlement transaction.
 pub mod crowd;
+/// The gasless confidential submit path: building + signing + sending a Transact.
+pub mod value;
 
 /// Coordinator configuration: epoch schedule, fee-payer rotation, tx shape.
 pub mod config {

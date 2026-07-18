@@ -175,6 +175,87 @@ pub fn settle_zk_data(
     data
 }
 
+/// Assemble the full `Transact` instruction data (tag + body) exactly as the
+/// on-chain `instructions::transact` handler parses it, with `proof_a` already
+/// negated (via [`ProofBytes`]).
+///
+/// ```text
+/// [tag(1)]
+///   [publicAmount(32)][extDataHash(32)][root(32)]
+///   [inputNullifier[0](32)][inputNullifier[1](32)]
+///   [outputCommitment[0](32)][outputCommitment[1](32)]
+///   [proof_a(64)][proof_b(128)][proof_c(64)]
+///   [fee(8 LE)]
+///   [enc0_len(2 LE)][enc0 bytes][enc1_len(2 LE)][enc1 bytes]
+/// ```
+///
+/// The seven 32-byte header values are the Groth16 public inputs, but the WIRE
+/// header order is `[publicAmount, extDataHash, root, ...]` while the public-input
+/// order fed to the verifier is `[root, publicAmount, extDataHash, ...]`; this
+/// builder takes them individually so the caller places each correctly. Each blob
+/// is length-prefixed (`u16` LE) and capped at [`wire::TRANSACT_MAX_ENC_LEN`].
+/// MUST stay byte-identical to the program's `wire::TRANSACT_HEADER_LEN` layout
+/// (the offset asserts below pin it).
+#[allow(clippy::too_many_arguments)]
+pub fn transact_data(
+    public_amount: &Hash32,
+    ext_data_hash: &Hash32,
+    root: &Hash32,
+    in_nullifier0: &Hash32,
+    in_nullifier1: &Hash32,
+    out_commitment0: &Hash32,
+    out_commitment1: &Hash32,
+    proof: &ProofBytes,
+    fee: u64,
+    enc0: &[u8],
+    enc1: &[u8],
+) -> Result<Vec<u8>> {
+    if enc0.len() > wire::TRANSACT_MAX_ENC_LEN || enc1.len() > wire::TRANSACT_MAX_ENC_LEN {
+        bail!(
+            "encrypted-note blob too long (enc0={}, enc1={}, cap={})",
+            enc0.len(),
+            enc1.len(),
+            wire::TRANSACT_MAX_ENC_LEN
+        );
+    }
+    let mut data = Vec::with_capacity(1 + wire::TRANSACT_HEADER_LEN + 4 + enc0.len() + enc1.len());
+    data.push(wire::tag::TRANSACT);
+    data.extend_from_slice(public_amount);
+    data.extend_from_slice(ext_data_hash);
+    data.extend_from_slice(root);
+    data.extend_from_slice(in_nullifier0);
+    data.extend_from_slice(in_nullifier1);
+    data.extend_from_slice(out_commitment0);
+    data.extend_from_slice(out_commitment1);
+    data.extend_from_slice(&proof.proof_a);
+    data.extend_from_slice(&proof.proof_b);
+    data.extend_from_slice(&proof.proof_c);
+    data.extend_from_slice(&fee.to_le_bytes());
+    data.extend_from_slice(&(enc0.len() as u16).to_le_bytes());
+    data.extend_from_slice(enc0);
+    data.extend_from_slice(&(enc1.len() as u16).to_le_bytes());
+    data.extend_from_slice(enc1);
+    // The fixed header (everything after the tag, before the blobs) must be
+    // exactly TRANSACT_HEADER_LEN bytes: 7*32 + 64 + 128 + 64 + 8.
+    debug_assert_eq!(
+        1 + wire::TRANSACT_HEADER_LEN + 4 + enc0.len() + enc1.len(),
+        data.len()
+    );
+    Ok(data)
+}
+
+// The header field placement above must match the program's TRANSACT offsets.
+const _: () = assert!(wire::TRANSACT_PUBLIC_AMOUNT_OFF == 0);
+const _: () = assert!(wire::TRANSACT_EXT_DATA_HASH_OFF == 32);
+const _: () = assert!(wire::TRANSACT_ROOT_OFF == 64);
+const _: () = assert!(wire::TRANSACT_IN_NULLIFIER0_OFF == 96);
+const _: () = assert!(wire::TRANSACT_IN_NULLIFIER1_OFF == 128);
+const _: () = assert!(wire::TRANSACT_OUT_COMMIT0_OFF == 160);
+const _: () = assert!(wire::TRANSACT_OUT_COMMIT1_OFF == 192);
+const _: () = assert!(wire::TRANSACT_PROOF_A_OFF == 224);
+const _: () = assert!(wire::TRANSACT_FEE_OFF == 480);
+const _: () = assert!(wire::TRANSACT_ENC_OFF == 488);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +333,109 @@ mod tests {
         let mut epoch_be = [0u8; 32];
         epoch_be[24..].copy_from_slice(&7u64.to_be_bytes());
         assert_eq!(data[369..401], epoch_be);
+    }
+
+    #[test]
+    fn transact_data_layout() {
+        let proof = ProofBytes {
+            proof_a: [1u8; 64],
+            proof_b: [2u8; 128],
+            proof_c: [3u8; 64],
+        };
+        let public_amount = [10u8; 32];
+        let ext_data_hash = [11u8; 32];
+        let root = [12u8; 32];
+        let nf0 = [13u8; 32];
+        let nf1 = [14u8; 32];
+        let out0 = [15u8; 32];
+        let out1 = [16u8; 32];
+        let enc0 = vec![0xAAu8; 100];
+        let enc1 = vec![0xBBu8; 50];
+        let data = transact_data(
+            &public_amount,
+            &ext_data_hash,
+            &root,
+            &nf0,
+            &nf1,
+            &out0,
+            &out1,
+            &proof,
+            777,
+            &enc0,
+            &enc1,
+        )
+        .unwrap();
+
+        assert_eq!(data[0], wire::tag::TRANSACT);
+        // Body offsets are relative to the byte AFTER the tag; add 1 here.
+        let b = 1;
+        assert_eq!(
+            data[b + wire::TRANSACT_PUBLIC_AMOUNT_OFF..b + 32],
+            public_amount
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_EXT_DATA_HASH_OFF..b + wire::TRANSACT_EXT_DATA_HASH_OFF + 32],
+            ext_data_hash
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_ROOT_OFF..b + wire::TRANSACT_ROOT_OFF + 32],
+            root
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_IN_NULLIFIER0_OFF..b + wire::TRANSACT_IN_NULLIFIER0_OFF + 32],
+            nf0
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_IN_NULLIFIER1_OFF..b + wire::TRANSACT_IN_NULLIFIER1_OFF + 32],
+            nf1
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_OUT_COMMIT0_OFF..b + wire::TRANSACT_OUT_COMMIT0_OFF + 32],
+            out0
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_OUT_COMMIT1_OFF..b + wire::TRANSACT_OUT_COMMIT1_OFF + 32],
+            out1
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_PROOF_A_OFF..b + wire::TRANSACT_PROOF_B_OFF],
+            [1u8; 64]
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_PROOF_B_OFF..b + wire::TRANSACT_PROOF_C_OFF],
+            [2u8; 128]
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_PROOF_C_OFF..b + wire::TRANSACT_FEE_OFF],
+            [3u8; 64]
+        );
+        assert_eq!(
+            data[b + wire::TRANSACT_FEE_OFF..b + wire::TRANSACT_ENC_OFF],
+            777u64.to_le_bytes()
+        );
+        // enc0: [len u16 LE][bytes], then enc1 the same. Nothing trailing.
+        let enc_start = b + wire::TRANSACT_ENC_OFF;
+        assert_eq!(&data[enc_start..enc_start + 2], &100u16.to_le_bytes());
+        assert_eq!(&data[enc_start + 2..enc_start + 102], &enc0[..]);
+        let enc1_start = enc_start + 2 + 100;
+        assert_eq!(&data[enc1_start..enc1_start + 2], &50u16.to_le_bytes());
+        assert_eq!(&data[enc1_start + 2..enc1_start + 52], &enc1[..]);
+        assert_eq!(data.len(), enc1_start + 52, "no trailing bytes");
+    }
+
+    #[test]
+    fn transact_data_rejects_oversized_blob() {
+        let proof = ProofBytes {
+            proof_a: [0u8; 64],
+            proof_b: [0u8; 128],
+            proof_c: [0u8; 64],
+        };
+        let z = [0u8; 32];
+        let too_big = vec![0u8; wire::TRANSACT_MAX_ENC_LEN + 1];
+        assert!(
+            transact_data(&z, &z, &z, &z, &z, &z, &z, &proof, 0, &too_big, &[]).is_err(),
+            "a blob over the cap must be rejected"
+        );
     }
 
     #[test]
