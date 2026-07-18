@@ -19,6 +19,12 @@ sha2.workspace = true
 light-poseidon = "0.4"
 ark-bn254 = "0.5"
 ark-ff = "0.5"
+# keccak256 for the value-note `extDataHash`. `sha3::Keccak256` is Ethereum-style
+# Keccak-256 (original padding), byte-identical to `ethers.keccak256` used by the
+# fixture generator and to the on-chain `sol_keccak256` / `solana-keccak-hasher`
+# syscall, so host, circuit fixtures, and program agree. Pinned inline (like the
+# ark/poseidon deps above); 0.10 matches the version already in the lockfile.
+sha3 = "0.10"
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -76,6 +76,14 @@ mod field {
         Fr::from(x)
     }
 
+    /// Field negation: canonical big-endian encoding of `(r - x) mod r`.
+    /// `negate(0)` is `0`. Used to encode a withdraw `publicAmount = r - v` with
+    /// the FIELD_SIZE offset, matching `(FIELD_SIZE - v) % r` in the fixture
+    /// generator.
+    pub fn negate(bytes: &[u8; 32]) -> [u8; 32] {
+        to_be(&(-from_be(bytes)))
+    }
+
     /// circomlib Poseidon over `inputs` (width = `inputs.len()`), returned as a
     /// canonical big-endian 32-byte field element. `new_circom` supports widths
     /// 1..=12; the scheme only uses 2 (nullifier / Merkle node) and 3
@@ -219,6 +227,48 @@ pub fn nullifier(secret: &Secret, epoch: Epoch) -> Nullifier {
 /// (and the cross-check test) can recompute roots and inclusion paths.
 pub fn merkle_node(left: &Hash32, right: &Hash32) -> Hash32 {
     field::poseidon(&[field::from_be(left), field::from_be(right)])
+}
+
+/// The Merkle tree depth the value-note circuit and the on-chain accumulator use
+/// (`2^20` leaves), matching `transaction.circom`'s `MERKLE_DEPTH` and the
+/// existing membership accumulator.
+pub const MERKLE_DEPTH: usize = 20;
+
+/// The canonical empty-subtree zero ladder for a depth-`depth` tree:
+/// `zeros[0] = 0`, `zeros[i] = Poseidon(zeros[i-1], zeros[i-1])`. Returns
+/// `depth + 1` entries; `zeros[level]` is the root of an empty subtree of that
+/// height, so `zeros[depth]` is the root of a fully empty tree. Matches the
+/// circuit and the fixture generator, and lets off-chain code build inclusion
+/// paths and dummy-input siblings.
+pub fn merkle_zeros(depth: usize) -> Vec<Hash32> {
+    let mut zeros = Vec::with_capacity(depth + 1);
+    let mut z = [0u8; 32];
+    zeros.push(z);
+    for _ in 0..depth {
+        z = merkle_node(&z, &z);
+        zeros.push(z);
+    }
+    zeros
+}
+
+/// Recompute a Merkle root from a `leaf`, its `leaf_index`, and the sibling
+/// `path_elements` bottom-up (`path_elements[i]` is the sibling hash at level
+/// `i`). `leaf_index` is decomposed little-endian: bit `i` selects whether the
+/// running node is the left child (`0`, sibling on the right) or the right child
+/// (`1`, sibling on the left) at level `i`. This is exactly the circuit's
+/// `Num2Bits` path selector combined with [`merkle_node`]'s `Poseidon(left,
+/// right)`, so a root computed here equals the one the circuit proves against and
+/// the accumulator stores.
+pub fn merkle_root_from_path(leaf: &Hash32, leaf_index: u64, path_elements: &[Hash32]) -> Hash32 {
+    let mut cur = *leaf;
+    for (level, sibling) in path_elements.iter().enumerate() {
+        cur = if (leaf_index >> level) & 1 == 0 {
+            merkle_node(&cur, sibling)
+        } else {
+            merkle_node(sibling, &cur)
+        };
+    }
+    cur
 }
 
 /// A coarse size bucket. Fixed buckets are the behavioral analog of Tornado's
@@ -430,6 +480,264 @@ pub mod wire {
     const _: () = assert!(CLAIM_REWARD_LEN == 1);
 }
 
+/// Confidential value-note (UTXO) primitives for the 2-in / 2-out JoinSplit
+/// `circuits/transaction.circom` (see `circuits/TRANSACTION.md`).
+///
+/// This is the value-carrying counterpart to the behavioral membership scheme in
+/// the crate root: instead of hiding *which initiator* acted, it proves a
+/// balanced spend of shielded value notes while hiding amounts, owners, and which
+/// notes were spent. A value note is `{ amount, public_key, blinding }`; its
+/// owner holds a `private_key`. Every hash is circomlib Poseidon over BN254,
+/// canonical 32-byte BIG-ENDIAN, exactly as the circuit enforces and the
+/// `sol_poseidon` syscall computes, so this module (host), the circuit, and the
+/// on-chain program agree byte-for-byte:
+///
+/// ```text
+/// public_key = Poseidon(private_key)                         // 1-input (t=2)
+/// commitment = Poseidon(amount, public_key, blinding)        // 3-input (t=4)  -- Merkle leaf
+/// signature  = Poseidon(private_key, commitment, pathIndex)  // 3-input (t=4)
+/// nullifier  = Poseidon(commitment, pathIndex, signature)    // 3-input (t=4)
+/// ```
+///
+/// `pathIndex` (the circuit's `merklePathIndices`) is the note's leaf index as a
+/// single field element (`Fr::from(leaf_index)`, passed here as a `u64`); the
+/// circuit `Num2Bits`-decomposes it into [`MERKLE_DEPTH`] little-endian selector
+/// bits. Binding the index makes a note's nullifier position-specific.
+///
+/// Correctness is pinned by the fixture cross-check test, which reproduces the
+/// committed circuit's output commitments, input nullifiers, Merkle root,
+/// `publicAmount`, and `extDataHash` for the SHIELD, TRANSFER, and UNSHIELD
+/// fixtures exactly.
+pub mod note {
+    use crate::{field, Hash32};
+    use serde::{Deserialize, Serialize};
+    use sha3::{Digest, Keccak256};
+
+    /// Bit width the circuit range-binds each output amount and the
+    /// `publicAmount` magnitude to (`Num2Bits(248)`). A valid magnitude is in
+    /// `[0, 2^248)`; a `u64` is always in range.
+    pub const MAX_AMOUNT_BITS: u32 = 248;
+
+    /// A value-note owner keypair. `public_key = Poseidon(private_key)`.
+    #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct ValueKeypair {
+        /// The owner's secret scalar, canonical big-endian (< r). Whoever knows
+        /// it can spend notes addressed to `public_key()`.
+        pub private_key: Hash32,
+    }
+
+    impl ValueKeypair {
+        /// Build a keypair from a secret scalar, canonicalizing it into the field
+        /// (reducing mod r) so the stored `private_key` is always a canonical
+        /// `Fr` (< r). For inputs already < r (as the fixtures use) this is the
+        /// identity.
+        pub fn from_private_key(private_key: Hash32) -> Self {
+            Self {
+                private_key: field::to_be(&field::from_be(&private_key)),
+            }
+        }
+
+        /// `public_key = Poseidon(private_key)` (1-input Poseidon, t = 2).
+        pub fn public_key(&self) -> Hash32 {
+            field::poseidon(&[field::from_be(&self.private_key)])
+        }
+    }
+
+    impl core::fmt::Debug for ValueKeypair {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            // Never print the secret scalar.
+            write!(f, "ValueKeypair {{ private_key: *** }}")
+        }
+    }
+
+    /// A confidential value note (UTXO): `{ amount, public_key, blinding }`. The
+    /// [`Note::commitment`] `Poseidon(amount, public_key, blinding)` is its Merkle
+    /// leaf.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+    pub struct Note {
+        /// Note value. The circuit `Num2Bits(248)`-range-binds output amounts; a
+        /// `u64` is always in range.
+        pub amount: u64,
+        /// Owner public key `Poseidon(private_key)`, canonical big-endian.
+        pub public_key: Hash32,
+        /// Per-note blinding factor, canonical big-endian (< r); hides the amount
+        /// and makes commitments unlinkable.
+        pub blinding: Hash32,
+    }
+
+    impl Note {
+        pub fn new(amount: u64, public_key: Hash32, blinding: Hash32) -> Self {
+            Self {
+                amount,
+                public_key,
+                blinding,
+            }
+        }
+
+        /// `commitment = Poseidon(amount, public_key, blinding)` (3-input Poseidon,
+        /// t = 4): the note's Merkle leaf.
+        pub fn commitment(&self) -> Hash32 {
+            field::poseidon(&[
+                field::from_u64(self.amount),
+                field::from_be(&self.public_key),
+                field::from_be(&self.blinding),
+            ])
+        }
+
+        /// A dummy input has `amount == 0`; the circuit disables its Merkle
+        /// membership check (`ForceEqualIfEnabled` with `enabled = amount`), so it
+        /// may sit at the zero ladder with index 0. This is what lets a shield
+        /// spend two dummy inputs.
+        pub fn is_dummy(&self) -> bool {
+            self.amount == 0
+        }
+    }
+
+    /// `signature = Poseidon(private_key, commitment, pathIndex)` where
+    /// `pathIndex` is `leaf_index` as a single field element (3-input Poseidon,
+    /// t = 4).
+    pub fn signature(private_key: &Hash32, commitment: &Hash32, leaf_index: u64) -> Hash32 {
+        field::poseidon(&[
+            field::from_be(private_key),
+            field::from_be(commitment),
+            field::from_u64(leaf_index),
+        ])
+    }
+
+    /// `nullifier = Poseidon(commitment, pathIndex, signature)` (3-input Poseidon,
+    /// t = 4). This is the tag the program marks spent; it is deterministic from
+    /// the note plus its position, so double-spends collide.
+    pub fn nullifier(commitment: &Hash32, leaf_index: u64, signature: &Hash32) -> Hash32 {
+        field::poseidon(&[
+            field::from_be(commitment),
+            field::from_u64(leaf_index),
+            field::from_be(signature),
+        ])
+    }
+
+    /// Convenience: the nullifier of `note` spent by `keypair` at `leaf_index`.
+    /// Recomputes the commitment and signature, then returns
+    /// `nullifier(commitment, leaf_index, signature(private_key, commitment,
+    /// leaf_index))`.
+    pub fn note_nullifier(keypair: &ValueKeypair, note: &Note, leaf_index: u64) -> Hash32 {
+        let commitment = note.commitment();
+        let sig = signature(&keypair.private_key, &commitment, leaf_index);
+        nullifier(&commitment, leaf_index, &sig)
+    }
+
+    /// Net public value crossing the shielded boundary (in Tornado-Nova terms
+    /// `publicAmount = extAmount - fee`), before FIELD_SIZE-offset field encoding.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+    pub enum SignedAmount {
+        /// transfer: no public value moves. `publicAmount = 0`.
+        Transfer,
+        /// shield / deposit of `v` into the pool. `publicAmount = v`.
+        Deposit(u64),
+        /// unshield / withdraw of `v` out of the pool. `publicAmount = r - v`.
+        Withdraw(u64),
+    }
+
+    /// Errors decoding a `publicAmount` field element.
+    #[derive(Debug, thiserror::Error)]
+    pub enum ValueNoteError {
+        /// The value is in neither the deposit range `[0, 2^248)` nor the withdraw
+        /// range `(r - 2^248, r)`, so it is not a valid signed encoding.
+        #[error(
+            "publicAmount is in neither the deposit [0, 2^248) nor withdraw (r - 2^248, r) range"
+        )]
+        PublicAmountOutOfRange(Hash32),
+        /// The value is a valid signed encoding but its magnitude exceeds `u64`,
+        /// so it is not a representable token amount.
+        #[error("decoded publicAmount magnitude exceeds u64 (not a representable token amount)")]
+        MagnitudeExceedsU64,
+    }
+
+    /// Encode a [`SignedAmount`] to the canonical `publicAmount` field element
+    /// (canonical big-endian) using the FIELD_SIZE offset: `Deposit(v) -> v`,
+    /// `Withdraw(v) -> r - v` (field negation), `Transfer -> 0`. A `u64` magnitude
+    /// is always `< 2^248`, so the encoding is always in range.
+    pub fn public_amount(signed: SignedAmount) -> Hash32 {
+        match signed {
+            SignedAmount::Transfer => [0u8; 32],
+            SignedAmount::Deposit(v) => field::to_be(&field::from_u64(v)),
+            SignedAmount::Withdraw(v) => field::negate(&field::to_be(&field::from_u64(v))),
+        }
+    }
+
+    /// Decode a `publicAmount` field element back to a [`SignedAmount`]. The
+    /// deposit range `[0, 2^248)` and the withdraw range `(r - 2^248, r)` are
+    /// disjoint (r is ~2^253.6), so the sign is unambiguous and no negative value
+    /// can wrap into a large positive one. Rejects a value in neither range, and
+    /// a valid encoding whose magnitude does not fit `u64`.
+    pub fn decode_public_amount(public_amount: &Hash32) -> Result<SignedAmount, ValueNoteError> {
+        if public_amount == &[0u8; 32] {
+            return Ok(SignedAmount::Transfer);
+        }
+        // publicAmount < 2^248  <=>  its most-significant byte is zero (a value
+        // with any of bits 248..255 set has a nonzero top byte).
+        if is_valid_amount_magnitude(public_amount) {
+            return Ok(SignedAmount::Deposit(magnitude_to_u64(public_amount)?));
+        }
+        // r - publicAmount < 2^248  <=>  the negation's top byte is zero.
+        let neg = field::negate(public_amount);
+        if is_valid_amount_magnitude(&neg) {
+            return Ok(SignedAmount::Withdraw(magnitude_to_u64(&neg)?));
+        }
+        Err(ValueNoteError::PublicAmountOutOfRange(*public_amount))
+    }
+
+    /// True iff `magnitude` (canonical big-endian) is `< 2^248`, the in-circuit
+    /// `Num2Bits(248)` bound. Equivalent to the most-significant byte being zero.
+    pub fn is_valid_amount_magnitude(magnitude: &Hash32) -> bool {
+        magnitude[0] == 0
+    }
+
+    /// Extract a `u64` from a canonical big-endian magnitude, erroring if it does
+    /// not fit (bytes above the low 8 are nonzero).
+    fn magnitude_to_u64(be: &Hash32) -> Result<u64, ValueNoteError> {
+        if be[..24].iter().any(|&b| b != 0) {
+            return Err(ValueNoteError::MagnitudeExceedsU64);
+        }
+        let mut low = [0u8; 8];
+        low.copy_from_slice(&be[24..32]);
+        Ok(u64::from_be_bytes(low))
+    }
+
+    /// Canonical `extDataHash` public input: `keccak256(preimage) mod r`, where
+    ///
+    /// ```text
+    /// preimage = recipient(32) || relayer(32) || fee_u64_be(8) || enc_out0 || enc_out1
+    /// ```
+    ///
+    /// `keccak256` is Ethereum-style Keccak-256, byte-identical to the on-chain
+    /// `sol_keccak256` / `solana-keccak-hasher` syscall and to `ethers.keccak256`
+    /// in the fixture generator, so host, program, and circuit fixtures agree. The
+    /// circuit only binds `extDataHash` against malleation; the program recomputes
+    /// it from the ext data it receives and requires equality, so any tamper with
+    /// recipient / relayer / fee / payload changes the hash and fails
+    /// verification. The `enc_out*` are the encrypted output-note payloads that let
+    /// recipients discover their outputs; their lengths are part of the agreed
+    /// serialization.
+    pub fn ext_data_hash(
+        recipient: &[u8; 32],
+        relayer: &[u8; 32],
+        fee: u64,
+        enc_out0: &[u8],
+        enc_out1: &[u8],
+    ) -> Hash32 {
+        let mut hasher = Keccak256::new();
+        hasher.update(recipient);
+        hasher.update(relayer);
+        hasher.update(fee.to_be_bytes());
+        hasher.update(enc_out0);
+        hasher.update(enc_out1);
+        let digest: [u8; 32] = hasher.finalize().into();
+        // Reduce the 256-bit big-endian digest into the field and re-encode
+        // canonically, matching `BigInt(keccak256(...)) % r` in the generator.
+        field::to_be(&field::from_be(&digest))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,5 +931,274 @@ mod tests {
             k_floor: 10,
         };
         assert!(!k.meets_floor(&sched), "9 < 10 must not settle");
+    }
+}
+
+#[cfg(test)]
+mod value_note_tests {
+    use super::note::*;
+    use super::{field, merkle_root_from_path, merkle_zeros, Hash32, MERKLE_DEPTH};
+    use serde_json::Value;
+
+    // The three committed transaction fixtures (the circuit's own snarkjs output)
+    // and the scheme metadata, embedded so the cross-check is hermetic.
+    const META: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../circuits/artifacts/transaction_fixture_meta.json"
+    ));
+    const SHIELD: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../circuits/artifacts/transaction_shield_fixture.json"
+    ));
+    const TRANSFER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../circuits/artifacts/transaction_proof_fixture.json"
+    ));
+    const UNSHIELD: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../circuits/artifacts/transaction_unshield_fixture.json"
+    ));
+
+    // A small field element (blindings / amounts appear as small integers in the
+    // generator), as a canonical big-endian Hash32.
+    fn fe(x: u64) -> Hash32 {
+        field::to_be(&field::from_u64(x))
+    }
+
+    // A field element parsed from the generator's decimal constants.
+    fn dec(s: &str) -> Hash32 {
+        field::from_dec(s)
+    }
+
+    // The public signals array of a fixture, as decimal strings, in the fixed
+    // on-chain order [root, publicAmount, extDataHash, inNf0, inNf1, outC0, outC1].
+    fn public_signals(fixture: &str) -> Vec<String> {
+        let v: Value = serde_json::from_str(fixture).unwrap();
+        v["publicSignals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    // Fixed 32-byte-per-32 recipient / relayer and the deterministic encrypted
+    // payloads, matching gen_transaction_fixture.js exactly.
+    fn recipient() -> [u8; 32] {
+        let mut r = [0u8; 32];
+        for (i, b) in r.iter_mut().enumerate() {
+            *b = (i + 1) as u8; // 0x01..0x20
+        }
+        r
+    }
+    fn relayer() -> [u8; 32] {
+        let mut r = [0u8; 32];
+        for (i, b) in r.iter_mut().enumerate() {
+            *b = (0x20 - i) as u8; // 0x20..0x01
+        }
+        r
+    }
+    fn payload(seed: u64) -> Vec<u8> {
+        (0..48u64)
+            .map(|i| ((seed * 131 + i * 17) & 0xff) as u8)
+            .collect()
+    }
+
+    // A dummy input (amount == 0) built exactly as the generator's dummyInput().
+    fn dummy(sk: &str, blinding: &str) -> (ValueKeypair, Note) {
+        let kp = ValueKeypair::from_private_key(dec(sk));
+        let note = Note::new(0, kp.public_key(), dec(blinding));
+        (kp, note)
+    }
+
+    /// DECISIVE circomlib-compatibility check: reproduce, for the committed
+    /// SHIELD, TRANSFER, and UNSHIELD circuit fixtures, every public signal the
+    /// value-note primitives are responsible for - output commitments, input
+    /// nullifiers, the Merkle root, `publicAmount`, and `extDataHash` - using only
+    /// mirror-core. If this passes, a proof generated for `transaction.circom`
+    /// verifies against a root and public inputs this code (and the on-chain
+    /// accumulator, which uses the same Poseidon with the same big-endian byte
+    /// order) produces.
+    #[test]
+    fn transaction_fixtures_cross_check() {
+        // Public-input order and shape are part of the scheme; pin the meta.
+        let meta: Value = serde_json::from_str(META).unwrap();
+        assert_eq!(
+            meta["publicInputOrder"],
+            serde_json::json!([
+                "root",
+                "publicAmount",
+                "extDataHash",
+                "inputNullifier[0]",
+                "inputNullifier[1]",
+                "outputCommitment[0]",
+                "outputCommitment[1]"
+            ]),
+            "public-input order must match the canonical scheme"
+        );
+        assert_eq!(meta["nPublic"], serde_json::json!(7));
+        assert_eq!(meta["merkleDepth"].as_u64().unwrap() as usize, MERKLE_DEPTH);
+
+        // Fixed keypairs from the generator.
+        let alice = ValueKeypair::from_private_key(dec("100000000000000000000000000000000001"));
+        let bob = ValueKeypair::from_private_key(dec("200000000000000000000000000000000002"));
+        let alice_pk = alice.public_key();
+        let bob_pk = bob.public_key();
+
+        let zeros = merkle_zeros(MERKLE_DEPTH);
+
+        // Assert a whole fixture's public signals against reproduced values.
+        let check = |case: &str,
+                     ps: &[String],
+                     root: Hash32,
+                     pa: Hash32,
+                     edh: Hash32,
+                     nf0: Hash32,
+                     nf1: Hash32,
+                     out0: Hash32,
+                     out1: Hash32| {
+            assert_eq!(root, field::from_dec(&ps[0]), "{case} root");
+            assert_eq!(pa, field::from_dec(&ps[1]), "{case} publicAmount");
+            assert_eq!(edh, field::from_dec(&ps[2]), "{case} extDataHash");
+            assert_eq!(nf0, field::from_dec(&ps[3]), "{case} inputNullifier[0]");
+            assert_eq!(nf1, field::from_dec(&ps[4]), "{case} inputNullifier[1]");
+            assert_eq!(out0, field::from_dec(&ps[5]), "{case} outputCommitment[0]");
+            assert_eq!(out1, field::from_dec(&ps[6]), "{case} outputCommitment[1]");
+        };
+
+        // ---- SHIELD: 2 dummy inputs, +10, outputs [10, 0] on an empty tree ----
+        {
+            let ps = public_signals(SHIELD);
+            let (d1_kp, d1) = dummy(
+                "300000000000000000000000000000000004",
+                "555000000000000000000000000000000001",
+            );
+            let (d2_kp, d2) = dummy(
+                "300000000000000000000000000000000005",
+                "555000000000000000000000000000000002",
+            );
+            check(
+                "SHIELD",
+                &ps,
+                zeros[MERKLE_DEPTH], // empty-tree root; dummy inputs are unchecked
+                public_amount(SignedAmount::Deposit(10)),
+                ext_data_hash(&recipient(), &relayer(), 0, &payload(1), &payload(2)),
+                note_nullifier(&d1_kp, &d1, 0),
+                note_nullifier(&d2_kp, &d2, 0),
+                Note::new(10, alice_pk, fe(11)).commitment(),
+                Note::new(0, alice_pk, fe(12)).commitment(),
+            );
+        }
+
+        // ---- TRANSFER: 2 real inputs (30, 20), 2 outputs (35, 15), pa 0 ----
+        {
+            let ps = public_signals(TRANSFER);
+            let in0 = Note::new(30, alice_pk, fe(31));
+            let in1 = Note::new(20, alice_pk, fe(32));
+            // Leaves c0@0 and c1@1: recompute the root from c0's path (sibling c1
+            // at level 0, then the zero ladder above).
+            let mut path = vec![in1.commitment()];
+            path.extend_from_slice(&zeros[1..MERKLE_DEPTH]);
+            let root = merkle_root_from_path(&in0.commitment(), 0, &path);
+            check(
+                "TRANSFER",
+                &ps,
+                root,
+                public_amount(SignedAmount::Transfer),
+                ext_data_hash(&recipient(), &relayer(), 0, &payload(3), &payload(4)),
+                note_nullifier(&alice, &in0, 0),
+                note_nullifier(&alice, &in1, 1),
+                Note::new(35, bob_pk, fe(41)).commitment(),
+                Note::new(15, alice_pk, fe(42)).commitment(),
+            );
+        }
+
+        // ---- UNSHIELD: 1 real input (20) + dummy, -7, outputs [13, 0] ----
+        {
+            let ps = public_signals(UNSHIELD);
+            let real = Note::new(20, alice_pk, fe(51));
+            // Single leaf at index 0: its siblings are the full zero ladder.
+            let root = merkle_root_from_path(&real.commitment(), 0, &zeros[0..MERKLE_DEPTH]);
+            let (d9_kp, d9) = dummy(
+                "300000000000000000000000000000000012",
+                "555000000000000000000000000000000009",
+            );
+            check(
+                "UNSHIELD",
+                &ps,
+                root,
+                public_amount(SignedAmount::Withdraw(7)),
+                ext_data_hash(&recipient(), &relayer(), 0, &payload(5), &payload(6)),
+                note_nullifier(&alice, &real, 0),
+                note_nullifier(&d9_kp, &d9, 0),
+                Note::new(13, alice_pk, fe(61)).commitment(),
+                Note::new(0, alice_pk, fe(62)).commitment(),
+            );
+        }
+    }
+
+    #[test]
+    fn public_amount_round_trips() {
+        for v in [1u64, 7, 10, 250_000_000, u64::MAX] {
+            assert_eq!(
+                decode_public_amount(&public_amount(SignedAmount::Deposit(v))).unwrap(),
+                SignedAmount::Deposit(v),
+                "deposit {v} must round-trip"
+            );
+            assert_eq!(
+                decode_public_amount(&public_amount(SignedAmount::Withdraw(v))).unwrap(),
+                SignedAmount::Withdraw(v),
+                "withdraw {v} must round-trip"
+            );
+        }
+        assert_eq!(
+            decode_public_amount(&public_amount(SignedAmount::Transfer)).unwrap(),
+            SignedAmount::Transfer
+        );
+        // Deposit(0) encodes to the zero field element, which decodes as Transfer.
+        assert_eq!(public_amount(SignedAmount::Deposit(0)), [0u8; 32]);
+    }
+
+    #[test]
+    fn public_amount_rejects_out_of_range() {
+        // 2^248 exactly (top byte 0x01): in neither disjoint range.
+        let mut two_pow_248 = [0u8; 32];
+        two_pow_248[0] = 0x01;
+        assert!(matches!(
+            decode_public_amount(&two_pow_248),
+            Err(ValueNoteError::PublicAmountOutOfRange(_))
+        ));
+
+        // 2^250 (top byte 0x04): squarely in the forbidden middle band.
+        let mut mid = [0u8; 32];
+        mid[0] = 0x04;
+        assert!(matches!(
+            decode_public_amount(&mid),
+            Err(ValueNoteError::PublicAmountOutOfRange(_))
+        ));
+
+        // 2^100: a valid deposit-range field element whose magnitude exceeds u64.
+        let mut big = [0u8; 32];
+        big[31 - 12] = 1 << 4; // bit 100 set (byte index 19 from the MSB)
+        assert!(is_valid_amount_magnitude(&big), "2^100 < 2^248");
+        assert!(matches!(
+            decode_public_amount(&big),
+            Err(ValueNoteError::MagnitudeExceedsU64)
+        ));
+    }
+
+    #[test]
+    fn note_primitives_compose_and_bind() {
+        let kp = ValueKeypair::from_private_key(fe(12345));
+        let note = Note::new(42, kp.public_key(), fe(999));
+        // note_nullifier is exactly nullifier(commitment, i, signature(...)).
+        let c = note.commitment();
+        let sig = signature(&kp.private_key, &c, 3);
+        assert_eq!(note_nullifier(&kp, &note, 3), nullifier(&c, 3, &sig));
+        // Position-specific: a different leaf index yields a different nullifier.
+        assert_ne!(note_nullifier(&kp, &note, 3), note_nullifier(&kp, &note, 4));
+        // Dummy detection.
+        assert!(Note::new(0, kp.public_key(), fe(1)).is_dummy());
+        assert!(!note.is_dummy());
     }
 }
