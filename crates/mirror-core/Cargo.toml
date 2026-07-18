@@ -25,6 +25,23 @@ ark-ff = "0.5"
 # syscall, so host, circuit fixtures, and program agree. Pinned inline (like the
 # ark/poseidon deps above); 0.10 matches the version already in the lockfile.
 sha3 = "0.10"
+# Encrypted output-notes (host-side discovery). These are OFF-CHAIN only: the
+# `encrypted_note` module runs in the coordinator/cli, never in the SBF program,
+# so OS randomness (`rand`) and the RustCrypto AEAD/KDF stack are all fine here.
+# X25519 ECDH to the recipient's viewing key (curve25519-dalek 4.x, already in the
+# lockfile). `static_secrets` lets us build a secret from fixed bytes (the
+# recipient's stored viewing key and the deterministic-test ephemeral path).
+x25519-dalek = { version = "2", default-features = false, features = [
+    "static_secrets",
+    "precomputed-tables",
+    "zeroize",
+] }
+# AEAD sealing the note plaintext. 12-byte nonce; ciphertext = plaintext + 16B tag.
+chacha20poly1305 = "0.10"
+# HKDF-SHA256 turns the ECDH shared secret into the AEAD key + nonce.
+hkdf = "0.12"
+# OS randomness for the per-message ephemeral X25519 secret (host-side only).
+rand.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

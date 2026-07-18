@@ -562,6 +562,13 @@ pub mod wire {
     const _: () = assert!(TRANSACT_FEE_OFF == 480);
 }
 
+/// Encrypted output-notes and client-side discovery (host-side only). ADDITIVE:
+/// the sender seals a note's spend material to the recipient's X25519 viewing key,
+/// the ciphertext rides on-chain as a Transact `enc` blob, and the recipient scans
+/// and trial-decrypts to recover spendable notes. See the module docs for the
+/// exact on-chain blob byte layout.
+pub mod encrypted_note;
+
 /// Confidential value-note (UTXO) primitives for the 2-in / 2-out JoinSplit
 /// `circuits/transaction.circom` (see `circuits/TRANSACTION.md`).
 ///
