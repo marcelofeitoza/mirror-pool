@@ -417,6 +417,13 @@ pub mod wire {
         /// Crowd-path participation incentive: claim a dwell-proportional share
         /// of the on-chain reward pool (see [`super::CLAIM_REWARD_LEN`]).
         pub const CLAIM_REWARD: u8 = 5;
+        /// Confidential-value layer: create a ValuePool (its own value-note
+        /// accumulator + vault). See [`super::INIT_VALUE_POOL_LEN`].
+        pub const INIT_VALUE_POOL: u8 = 6;
+        /// Confidential-value layer: a Tornado-Nova-style 2-in/2-out JoinSplit
+        /// settlement (shield / transfer / unshield). See
+        /// [`super::TRANSACT_HEADER_LEN`].
+        pub const TRANSACT: u8 = 7;
     }
 
     /// INIT_POOL layout:
@@ -470,6 +477,75 @@ pub mod wire {
     /// byte-identical to the program's `wire::SETTLE_ZK_LEN`.
     pub const SETTLE_ZK_LEN: usize = 1 + 8 + 8 + 64 + 128 + 64 + 32 + 32 + 32 + 32;
 
+    // --- Confidential-value layer (ADDITIVE): ValuePool + Transact. Kept
+    // byte-identical to the on-chain program's mirrored `wire` module; the
+    // compile-time asserts below (and the program's) pin the numbers so the two
+    // sides cannot drift. ---
+
+    /// INIT_VALUE_POOL layout: `[tag(1)][fee(8 LE)][denom_flag(1)][denomination(8 LE)]`.
+    ///
+    /// `fee` is the relay fee (lamports) bound into every Transact's ext-data.
+    /// `denomination` is an `Option<u64>` reserved for the fixed-denomination mode
+    /// landing next: `denom_flag == 0` means `None` (and `denomination` is
+    /// ignored); it is stored but NOT enforced in this version. MUST stay
+    /// byte-identical to the program's `wire::INIT_VALUE_POOL_LEN`.
+    pub const INIT_VALUE_POOL_LEN: usize = 1 + 8 + 1 + 8;
+
+    /// Groth16 proof component sizes for the transaction circuit (groth16-solana
+    /// v0.2.0 byte layout), shared by the Transact wire layout.
+    pub const TRANSACT_PROOF_A_LEN: usize = 64;
+    pub const TRANSACT_PROOF_B_LEN: usize = 128;
+    pub const TRANSACT_PROOF_C_LEN: usize = 64;
+    /// One Groth16 public input (a canonical big-endian BN254 scalar).
+    pub const TRANSACT_PUBLIC_INPUT_LEN: usize = 32;
+    /// Number of transaction public inputs, in the fixed order
+    /// [root, publicAmount, extDataHash, inNullifier0, inNullifier1,
+    /// outCommitment0, outCommitment1].
+    pub const TRANSACT_N_PUBLIC_INPUTS: usize = 7;
+    /// Per-blob cap on an encrypted output-note payload (bytes). Bounds the
+    /// length arithmetic and keeps a Transact inside transaction limits.
+    pub const TRANSACT_MAX_ENC_LEN: usize = 256;
+
+    // Field offsets inside the fixed Transact header (after the tag byte).
+    pub const TRANSACT_PUBLIC_AMOUNT_OFF: usize = 0;
+    pub const TRANSACT_EXT_DATA_HASH_OFF: usize = 32;
+    pub const TRANSACT_ROOT_OFF: usize = 64;
+    pub const TRANSACT_IN_NULLIFIER0_OFF: usize = 96;
+    pub const TRANSACT_IN_NULLIFIER1_OFF: usize = 128;
+    pub const TRANSACT_OUT_COMMIT0_OFF: usize = 160;
+    pub const TRANSACT_OUT_COMMIT1_OFF: usize = 192;
+    pub const TRANSACT_PROOF_A_OFF: usize = 224;
+    pub const TRANSACT_PROOF_B_OFF: usize = TRANSACT_PROOF_A_OFF + TRANSACT_PROOF_A_LEN; // 288
+    pub const TRANSACT_PROOF_C_OFF: usize = TRANSACT_PROOF_B_OFF + TRANSACT_PROOF_B_LEN; // 416
+    pub const TRANSACT_FEE_OFF: usize = TRANSACT_PROOF_C_OFF + TRANSACT_PROOF_C_LEN; // 480
+    /// First byte of the two length-prefixed encrypted-note blobs.
+    pub const TRANSACT_ENC_OFF: usize = TRANSACT_FEE_OFF + 8; // 488
+
+    /// TRANSACT layout (ONE JoinSplit per call):
+    ///
+    /// ```text
+    /// [tag(1)]
+    ///   [publicAmount(32)][extDataHash(32)][root(32)]
+    ///   [inputNullifier[0](32)][inputNullifier[1](32)]
+    ///   [outputCommitment[0](32)][outputCommitment[1](32)]
+    ///   [proof_a(64)][proof_b(128)][proof_c(64)]
+    ///   [fee(8 LE)]
+    ///   [enc0_len(2 LE)][enc0 bytes][enc1_len(2 LE)][enc1 bytes]
+    /// ```
+    ///
+    /// The fixed header (body after the tag byte, before the two blobs) is
+    /// [`TRANSACT_HEADER_LEN`] bytes. Each blob is a `u16` little-endian length
+    /// followed by that many bytes, capped at [`TRANSACT_MAX_ENC_LEN`]. The seven
+    /// 32-byte values are the Groth16 public inputs in the fixed order
+    /// [root, publicAmount, extDataHash, inNullifier0, inNullifier1,
+    /// outCommitment0, outCommitment1]. MUST stay byte-identical to the program's
+    /// `wire::TRANSACT_HEADER_LEN` and offsets.
+    pub const TRANSACT_HEADER_LEN: usize = 7 * TRANSACT_PUBLIC_INPUT_LEN
+        + TRANSACT_PROOF_A_LEN
+        + TRANSACT_PROOF_B_LEN
+        + TRANSACT_PROOF_C_LEN
+        + 8;
+
     // Layout sanity: keep the documented sizes honest at compile time and in
     // lockstep with the on-chain program's mirrored constants.
     const _: () = assert!(INIT_POOL_LEN == 23);
@@ -478,6 +554,12 @@ pub mod wire {
     const _: () = assert!(COMMIT_DEPOSIT_LEN == 41);
     const _: () = assert!(SETTLE_ZK_LEN == 401);
     const _: () = assert!(CLAIM_REWARD_LEN == 1);
+    const _: () = assert!(INIT_VALUE_POOL_LEN == 18);
+    const _: () = assert!(TRANSACT_HEADER_LEN == 488);
+    const _: () = assert!(TRANSACT_ENC_OFF == TRANSACT_HEADER_LEN);
+    const _: () = assert!(TRANSACT_PROOF_B_OFF == 288);
+    const _: () = assert!(TRANSACT_PROOF_C_OFF == 416);
+    const _: () = assert!(TRANSACT_FEE_OFF == 480);
 }
 
 /// Confidential value-note (UTXO) primitives for the 2-in / 2-out JoinSplit

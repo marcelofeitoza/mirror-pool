@@ -77,7 +77,59 @@ pub fn empty_root() -> [u8; 32] {
     z
 }
 
-/// Append `leaf` to the accumulator stored inline in `pool_data`.
+/// A frontier accumulator stored inline in an account: the six offset-based
+/// operations [`append_with`] needs. Implemented once per account layout so the
+/// Tornado frontier math is shared, not duplicated. The behavioral [`pool`]
+/// implements it here; the confidential [`crate::state::value_pool`] implements
+/// it for its own byte layout, so both accumulators reuse this exact insert.
+pub trait FrontierStore {
+    /// Total leaves ever appended (= next leaf index).
+    fn commitment_count(data: &[u8]) -> Result<u64, ProgramError>;
+    /// Record the new leaf count.
+    fn set_commitment_count(data: &mut [u8], count: u64) -> Result<(), ProgramError>;
+    /// The stored left-sibling hash at `level` (0 = leaf level).
+    fn filled_subtree(data: &[u8], level: usize) -> Result<[u8; 32], ProgramError>;
+    /// Store a left-sibling hash at `level`.
+    fn set_filled_subtree(
+        data: &mut [u8],
+        level: usize,
+        value: &[u8; 32],
+    ) -> Result<(), ProgramError>;
+    /// Record the latest root.
+    fn set_current_root(data: &mut [u8], root: &[u8; 32]) -> Result<(), ProgramError>;
+    /// Push the latest root into the recent-root ring buffer.
+    fn record_root_history(data: &mut [u8], root: &[u8; 32]) -> Result<(), ProgramError>;
+}
+
+/// The behavioral [`pool`] frontier (delegates to the `pool` accessors).
+pub struct PoolFrontier;
+
+impl FrontierStore for PoolFrontier {
+    fn commitment_count(data: &[u8]) -> Result<u64, ProgramError> {
+        pool::commitment_count(data)
+    }
+    fn set_commitment_count(data: &mut [u8], count: u64) -> Result<(), ProgramError> {
+        pool::set_commitment_count(data, count)
+    }
+    fn filled_subtree(data: &[u8], level: usize) -> Result<[u8; 32], ProgramError> {
+        pool::filled_subtree(data, level)
+    }
+    fn set_filled_subtree(
+        data: &mut [u8],
+        level: usize,
+        value: &[u8; 32],
+    ) -> Result<(), ProgramError> {
+        pool::set_filled_subtree(data, level, value)
+    }
+    fn set_current_root(data: &mut [u8], root: &[u8; 32]) -> Result<(), ProgramError> {
+        pool::set_current_root(data, root)
+    }
+    fn record_root_history(data: &mut [u8], root: &[u8; 32]) -> Result<(), ProgramError> {
+        pool::record_root_history(data, root)
+    }
+}
+
+/// Append `leaf` to the frontier accumulator `S` stored inline in `data`.
 ///
 /// Updates `filled_subtrees`, `current_root`, and `commitment_count` in place
 /// and returns the new root. The standard Tornado insert: walk from the leaf to
@@ -85,8 +137,11 @@ pub fn empty_root() -> [u8; 32] {
 /// running zero hash (even index), recording the new left sibling on the way up.
 /// `filled_subtrees[i]` is always written (even index at level `i`) before it is
 /// ever read (odd index at level `i`), so the frontier needs no pre-seeding.
-pub fn append(pool_data: &mut [u8], leaf: &[u8; 32]) -> Result<[u8; 32], ProgramError> {
-    let index = pool::commitment_count(pool_data)?;
+pub fn append_with<S: FrontierStore>(
+    data: &mut [u8],
+    leaf: &[u8; 32],
+) -> Result<[u8; 32], ProgramError> {
+    let index = S::commitment_count(data)?;
     if index >= (1u64 << DEPTH) {
         return Err(MirrorPoolError::TreeFull.into());
     }
@@ -100,11 +155,11 @@ pub fn append(pool_data: &mut [u8], leaf: &[u8; 32]) -> Result<[u8; 32], Program
         let (left, right) = if current_index & 1 == 0 {
             // This node is a left child: right sibling is the empty subtree, and
             // this node becomes the recorded left sibling for its level.
-            pool::set_filled_subtree(pool_data, level, &current_hash)?;
+            S::set_filled_subtree(data, level, &current_hash)?;
             (current_hash, current_zero)
         } else {
             // Right child: pair with the previously recorded left sibling.
-            let left = pool::filled_subtree(pool_data, level)?;
+            let left = S::filled_subtree(data, level)?;
             (left, current_hash)
         };
         current_hash = hash_pair(&left, &right);
@@ -112,13 +167,20 @@ pub fn append(pool_data: &mut [u8], leaf: &[u8; 32]) -> Result<[u8; 32], Program
         current_index >>= 1;
     }
 
-    pool::set_current_root(pool_data, &current_hash)?;
-    // Record the new root in the recent-root ring so SETTLE_ZK can verify a proof
-    // made against this snapshot even after later commits move the frontier.
-    pool::record_root_history(pool_data, &current_hash)?;
+    S::set_current_root(data, &current_hash)?;
+    // Record the new root in the recent-root ring so a settle can verify a proof
+    // made against this snapshot even after later appends move the frontier.
+    S::record_root_history(data, &current_hash)?;
     let next = index
         .checked_add(1)
         .ok_or(MirrorPoolError::ArithmeticOverflow)?;
-    pool::set_commitment_count(pool_data, next)?;
+    S::set_commitment_count(data, next)?;
     Ok(current_hash)
+}
+
+/// Append `leaf` to the behavioral [`pool`] accumulator stored inline in
+/// `pool_data`. Thin wrapper over [`append_with`] pinned to [`PoolFrontier`], so
+/// the crowd `COMMIT` / `COMMIT_DEPOSIT` callers are unchanged.
+pub fn append(pool_data: &mut [u8], leaf: &[u8; 32]) -> Result<[u8; 32], ProgramError> {
+    append_with::<PoolFrontier>(pool_data, leaf)
 }

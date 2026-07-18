@@ -44,6 +44,10 @@ pub fn process_instruction(
         }
         wire::tag::SETTLE_ZK => instructions::settle_zk::process(program_id, accounts, data),
         wire::tag::CLAIM_REWARD => instructions::claim_reward::process(program_id, accounts, data),
+        wire::tag::INIT_VALUE_POOL => {
+            instructions::init_value_pool::process(program_id, accounts, data)
+        }
+        wire::tag::TRANSACT => instructions::transact::process(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

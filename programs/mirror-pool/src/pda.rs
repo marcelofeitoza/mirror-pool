@@ -8,11 +8,18 @@
 //! and rejects any mismatch ([`MirrorPoolError::InvalidPda`]).
 //!
 //! ```text
-//! Pool PDA       seeds = [b"pool",  authority(32)]
-//! Epoch PDA      seeds = [b"epoch", pool(32), epoch_id(8 LE)]
-//! Nullifier PDA  seeds = [b"nf",    pool(32), epoch_id(8 LE), nullifier(32)]
-//! Dwell PDA      seeds = [b"dwell", pool(32), participant(32)]
+//! Pool PDA          seeds = [b"pool",   authority(32)]
+//! Epoch PDA         seeds = [b"epoch",  pool(32), epoch_id(8 LE)]
+//! Nullifier PDA     seeds = [b"nf",     pool(32), epoch_id(8 LE), nullifier(32)]
+//! Dwell PDA         seeds = [b"dwell",  pool(32), participant(32)]
+//! ValuePool PDA     seeds = [b"vpool",  authority(32)]
+//! Value vault PDA   seeds = [b"vvault", vpool(32)]
+//! Value nf PDA      seeds = [b"vnf",    vpool(32), nullifier(32)]
 //! ```
+//!
+//! The confidential-value seeds (`vpool` / `vvault` / `vnf`) are a SEPARATE
+//! namespace from the behavioral pool: a value nullifier is globally unique
+//! (position-bound by the transaction circuit), so its PDA is NOT epoch-scoped.
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -30,6 +37,12 @@ pub const EPOCH_SEED: &[u8] = b"epoch";
 pub const NULLIFIER_SEED: &[u8] = b"nf";
 /// Seed prefix for the per-participant Dwell PDA (crowd-path incentive).
 pub const DWELL_SEED: &[u8] = b"dwell";
+/// Seed prefix for the confidential-value ValuePool PDA.
+pub const VALUE_POOL_SEED: &[u8] = b"vpool";
+/// Seed prefix for the confidential-value vault PDA (holds commingled lamports).
+pub const VALUE_VAULT_SEED: &[u8] = b"vvault";
+/// Seed prefix for the confidential-value nullifier PDA (global spent-set).
+pub const VALUE_NULLIFIER_SEED: &[u8] = b"vnf";
 
 /// Find a program-derived address and its bump.
 ///

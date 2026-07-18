@@ -75,6 +75,12 @@ pub mod state;
 /// `circuits/artifacts/vk.rs`). Consumed only by the SETTLE_ZK handler.
 pub mod vk;
 
+/// Vendored Groth16 verifying key for the 2-in/2-out JoinSplit transaction
+/// circuit (`src/transaction_vk.rs`, copied verbatim from
+/// `circuits/artifacts/transaction_vk.rs`). Consumed only by the TRANSACT
+/// handler.
+pub mod transaction_vk;
+
 #[cfg(not(feature = "no-entrypoint"))]
 mod entrypoint;
 
@@ -103,6 +109,12 @@ pub mod wire {
         /// Crowd-path participation incentive: claim a dwell-proportional share
         /// of the on-chain reward pool (see [`super::CLAIM_REWARD_LEN`]).
         pub const CLAIM_REWARD: u8 = 5;
+        /// Confidential-value layer: create a ValuePool (see
+        /// [`super::INIT_VALUE_POOL_LEN`]).
+        pub const INIT_VALUE_POOL: u8 = 6;
+        /// Confidential-value layer: settle one 2-in/2-out JoinSplit (see
+        /// [`super::TRANSACT_HEADER_LEN`]).
+        pub const TRANSACT: u8 = 7;
     }
 
     /// COMMIT layout: `[tag(1)][commitment(32)]`.
@@ -167,6 +179,45 @@ pub mod wire {
     /// Size of one commitment / nullifier on the wire.
     pub const HASH_LEN: usize = 32;
 
+    // --- Confidential-value layer (ADDITIVE): ValuePool + Transact. These are
+    // REDEFINED here (not imported from `mirror-core`) for the same reason the
+    // rest of this module is: a Solana program must not depend on the std host
+    // crate. They MUST stay byte-for-byte identical to `mirror_core::wire`; the
+    // compile-time asserts below (and mirror-core's) pin the numbers. ---
+
+    /// INIT_VALUE_POOL layout: `[tag(1)][fee(8 LE)][denom_flag(1)][denomination(8 LE)]`.
+    /// MUST match `mirror_core::wire::INIT_VALUE_POOL_LEN`.
+    pub const INIT_VALUE_POOL_LEN: usize = 1 + 8 + 1 + 8;
+
+    /// Number of transaction public inputs, in the fixed order
+    /// [root, publicAmount, extDataHash, inNullifier0, inNullifier1,
+    /// outCommitment0, outCommitment1]. MUST match `mirror_core::wire`.
+    pub const TRANSACT_N_PUBLIC_INPUTS: usize = 7;
+    /// Per-blob cap on an encrypted output-note payload (bytes).
+    pub const TRANSACT_MAX_ENC_LEN: usize = 256;
+
+    // Field offsets inside the fixed Transact header (after the tag byte). These
+    // MUST match `mirror_core::wire`'s TRANSACT_* offsets.
+    pub const TRANSACT_PUBLIC_AMOUNT_OFF: usize = 0;
+    pub const TRANSACT_EXT_DATA_HASH_OFF: usize = 32;
+    pub const TRANSACT_ROOT_OFF: usize = 64;
+    pub const TRANSACT_IN_NULLIFIER0_OFF: usize = 96;
+    pub const TRANSACT_IN_NULLIFIER1_OFF: usize = 128;
+    pub const TRANSACT_OUT_COMMIT0_OFF: usize = 160;
+    pub const TRANSACT_OUT_COMMIT1_OFF: usize = 192;
+    pub const TRANSACT_PROOF_A_OFF: usize = 224;
+    pub const TRANSACT_PROOF_B_OFF: usize = TRANSACT_PROOF_A_OFF + PROOF_A_LEN; // 288
+    pub const TRANSACT_PROOF_C_OFF: usize = TRANSACT_PROOF_B_OFF + PROOF_B_LEN; // 416
+    pub const TRANSACT_FEE_OFF: usize = TRANSACT_PROOF_C_OFF + PROOF_C_LEN; // 480
+    /// First byte of the two length-prefixed encrypted-note blobs.
+    pub const TRANSACT_ENC_OFF: usize = TRANSACT_FEE_OFF + 8; // 488
+
+    /// Fixed Transact header length (body after the tag byte, before the two
+    /// length-prefixed enc blobs). See `mirror_core::wire::TRANSACT_HEADER_LEN`
+    /// for the full documented layout. MUST match it byte-for-byte.
+    pub const TRANSACT_HEADER_LEN: usize =
+        7 * PUBLIC_INPUT_LEN + PROOF_A_LEN + PROOF_B_LEN + PROOF_C_LEN + 8;
+
     /// Hard upper bound on nullifiers per SETTLE_EPOCH call. Bounds the
     /// `n * 32` length arithmetic (no overflow) and keeps a single settle
     /// inside transaction and compute limits. Larger epochs settle in
@@ -183,6 +234,15 @@ pub mod wire {
     const _: () = assert!(
         SETTLE_ZK_LEN == 1 + 8 + 8 + PROOF_A_LEN + PROOF_B_LEN + PROOF_C_LEN + 4 * PUBLIC_INPUT_LEN
     );
+    // Confidential-value layer: pin the Transact / ValuePool sizes in lockstep
+    // with `mirror_core::wire` (which asserts the same numbers).
+    const _: () = assert!(INIT_VALUE_POOL_LEN == 18);
+    const _: () = assert!(TRANSACT_HEADER_LEN == 488);
+    const _: () = assert!(TRANSACT_ENC_OFF == TRANSACT_HEADER_LEN);
+    const _: () = assert!(TRANSACT_PROOF_B_OFF == 288);
+    const _: () = assert!(TRANSACT_PROOF_C_OFF == 416);
+    const _: () = assert!(TRANSACT_FEE_OFF == 480);
+    const _: () = assert!(TRANSACT_N_PUBLIC_INPUTS == 7);
 }
 
 /// Program-local error codes, surfaced on-chain as `ProgramError::Custom`.
@@ -246,6 +306,22 @@ pub enum MirrorPoolError {
     /// CLAIM_REWARD: paying the computed reward would drop the pool below rent
     /// exemption. Never drain the account below rent; fail closed instead.
     RewardPoolInsufficient = 17,
+    /// TRANSACT: the recomputed `extDataHash` (keccak256 over
+    /// `recipient || relayer || fee_be || enc0 || enc1`, reduced mod r) does not
+    /// equal the proof's `extDataHash` public input, i.e. the relay tampered with
+    /// the recipient, relayer, fee, or an encrypted payload. Fail closed.
+    ExtDataMismatch = 18,
+    /// TRANSACT: the `publicAmount` public input is in neither the deposit range
+    /// `[0, 2^248)` nor the withdraw range `(r - 2^248, r)`, or its decoded
+    /// magnitude does not fit a `u64`. Not a representable signed token amount.
+    InvalidPublicAmount = 19,
+    /// TRANSACT: the value vault does not hold enough lamports to pay the decoded
+    /// withdraw amount while staying rent-exempt. Never drain below rent.
+    InsufficientVault = 20,
+    /// INIT_VALUE_POOL on a ValuePool account that is already configured.
+    ValuePoolAlreadyInitialized = 21,
+    /// The referenced ValuePool account has not been initialized.
+    ValuePoolNotInitialized = 22,
     /// Skeleton guard: reserved for handlers whose logic has not landed yet.
     /// Unused in v1 (all five instructions are implemented) but kept so the
     /// off-chain error mapping stays stable.
