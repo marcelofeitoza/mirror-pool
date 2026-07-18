@@ -322,6 +322,13 @@ pub enum MirrorPoolError {
     ValuePoolAlreadyInitialized = 21,
     /// The referenced ValuePool account has not been initialized.
     ValuePoolNotInitialized = 22,
+    /// TRANSACT: the ValuePool pins a fixed denomination (`denomination = Some(d)`)
+    /// and the public deposit/withdraw magnitude is not exactly `d`. Fixed-denom
+    /// pools give amount k-anonymity: every public value crossing is byte-identical,
+    /// so amounts cannot single out a participant. Internal transfers (publicAmount
+    /// == 0) move no public value and are exempt. Fail closed: the check runs before
+    /// the Groth16 proof is verified, so a mismatch is rejected with no state change.
+    DenominationMismatch = 23,
     /// Skeleton guard: reserved for handlers whose logic has not landed yet.
     /// Unused in v1 (all five instructions are implemented) but kept so the
     /// off-chain error mapping stays stable.

@@ -812,3 +812,282 @@ fn transact_unshield_credits_recipient() {
         2
     );
 }
+
+// --- Fixed-denomination mode (Level 1 amount privacy) ---------------------------
+//
+// A ValuePool with `denomination = Some(d)` accepts a PUBLIC deposit/withdraw only
+// when its magnitude equals `d`, giving amount k-anonymity (every public value
+// crossing is byte-identical). Internal transfers (publicAmount == 0) are exempt.
+// The SHIELD fixture deposits 10 and the UNSHIELD fixture withdraws 7, so those are
+// the "matching" denominations; any other `d` yields DenominationMismatch. The
+// denomination check runs BEFORE proof verification (and before any nullifier PDA
+// is created), so a mismatch is rejected cheaply and fail-closed with no state
+// change.
+
+#[test]
+fn transact_fixed_denom_accepts_matching_shield() {
+    let mut env = Env::new();
+    let authority = fixture_relayer_authority();
+    env.fund(authority, 5 * SOL);
+    // Denomination equals the SHIELD fixture's deposit magnitude (10).
+    let (vpool, vault) = build_value_pool(
+        &mut env,
+        &authority,
+        0,
+        Some(10),
+        &extra::SHIELD_PUBLIC_INPUTS[0],
+        SOL,
+    );
+    let vault_start = env.get(&vault).lamports;
+
+    let recipient = fixture_recipient();
+    env.fund(recipient, 0);
+    let depositor = Pubkey::new_unique();
+    env.fund(depositor, SOL);
+    let depositor_start = env.get(&depositor).lamports;
+
+    let nf0 = env.vnf_pda(&vpool, &extra::SHIELD_PUBLIC_INPUTS[3]);
+    let nf1 = env.vnf_pda(&vpool, &extra::SHIELD_PUBLIC_INPUTS[4]);
+    let ix = env.transact_ix(
+        &vpool,
+        &authority,
+        &nf0,
+        &nf1,
+        &recipient,
+        &depositor,
+        &vault,
+        &extra::SHIELD_PUBLIC_INPUTS,
+        &extra::SHIELD_PROOF_A,
+        &extra::SHIELD_PROOF_B,
+        &extra::SHIELD_PROOF_C,
+        0,
+        &payload(1),
+        &payload(2),
+    );
+    // A shield of exactly D verifies on-chain and credits the vault.
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(env.get(&vault).lamports, vault_start + 10);
+    assert_eq!(env.get(&depositor).lamports, depositor_start - 10);
+    assert_eq!(
+        value_pool::commitment_count(&env.get(&vpool).data).unwrap(),
+        2
+    );
+}
+
+#[test]
+fn transact_fixed_denom_rejects_mismatched_shield() {
+    let mut env = Env::new();
+    let authority = fixture_relayer_authority();
+    env.fund(authority, 5 * SOL);
+    // Pool pins D = 11 but the SHIELD fixture deposits 10 (a shield of D+1 relative
+    // to the fixture): the amounts differ, so it is rejected.
+    let (vpool, vault) = build_value_pool(
+        &mut env,
+        &authority,
+        0,
+        Some(11),
+        &extra::SHIELD_PUBLIC_INPUTS[0],
+        SOL,
+    );
+    let vault_start = env.get(&vault).lamports;
+
+    let recipient = fixture_recipient();
+    env.fund(recipient, 0);
+    let depositor = Pubkey::new_unique();
+    env.fund(depositor, SOL);
+    let depositor_start = env.get(&depositor).lamports;
+
+    let nf0 = env.vnf_pda(&vpool, &extra::SHIELD_PUBLIC_INPUTS[3]);
+    let nf1 = env.vnf_pda(&vpool, &extra::SHIELD_PUBLIC_INPUTS[4]);
+    let ix = env.transact_ix(
+        &vpool,
+        &authority,
+        &nf0,
+        &nf1,
+        &recipient,
+        &depositor,
+        &vault,
+        &extra::SHIELD_PUBLIC_INPUTS,
+        &extra::SHIELD_PROOF_A,
+        &extra::SHIELD_PROOF_B,
+        &extra::SHIELD_PROOF_C,
+        0,
+        &payload(1),
+        &payload(2),
+    );
+    env.process(
+        &ix,
+        &[Check::err(custom(MirrorPoolError::DenominationMismatch))],
+    );
+    // Fail-closed: rejected before proof verify, so no nullifier PDA, no
+    // commitments, and no lamports moved.
+    assert_eq!(
+        env.get(&nf0).owner,
+        Pubkey::default(),
+        "no nullifier PDA on a denomination mismatch"
+    );
+    assert_eq!(
+        value_pool::commitment_count(&env.get(&vpool).data).unwrap(),
+        0
+    );
+    assert_eq!(env.get(&vault).lamports, vault_start, "vault untouched");
+    assert_eq!(env.get(&depositor).lamports, depositor_start);
+}
+
+#[test]
+fn transact_fixed_denom_accepts_matching_unshield() {
+    let mut env = Env::new();
+    let authority = fixture_relayer_authority();
+    env.fund(authority, 5 * SOL);
+    // Denomination equals the UNSHIELD fixture's withdraw magnitude (7).
+    let (vpool, vault) = build_value_pool(
+        &mut env,
+        &authority,
+        0,
+        Some(7),
+        &extra::UNSHIELD_PUBLIC_INPUTS[0],
+        SOL,
+    );
+    let vault_start = env.get(&vault).lamports;
+
+    let recipient = fixture_recipient();
+    env.fund(recipient, 0);
+    let depositor = Pubkey::new_unique();
+    env.fund(depositor, SOL);
+
+    let nf0 = env.vnf_pda(&vpool, &extra::UNSHIELD_PUBLIC_INPUTS[3]);
+    let nf1 = env.vnf_pda(&vpool, &extra::UNSHIELD_PUBLIC_INPUTS[4]);
+    let ix = env.transact_ix(
+        &vpool,
+        &authority,
+        &nf0,
+        &nf1,
+        &recipient,
+        &depositor,
+        &vault,
+        &extra::UNSHIELD_PUBLIC_INPUTS,
+        &extra::UNSHIELD_PROOF_A,
+        &extra::UNSHIELD_PROOF_B,
+        &extra::UNSHIELD_PROOF_C,
+        0,
+        &payload(5),
+        &payload(6),
+    );
+    // An unshield of exactly D verifies on-chain and credits the recipient.
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(env.get(&recipient).lamports, 7);
+    assert_eq!(env.get(&vault).lamports, vault_start - 7);
+    assert_eq!(
+        value_pool::commitment_count(&env.get(&vpool).data).unwrap(),
+        2
+    );
+}
+
+#[test]
+fn transact_fixed_denom_rejects_mismatched_unshield() {
+    let mut env = Env::new();
+    let authority = fixture_relayer_authority();
+    env.fund(authority, 5 * SOL);
+    // Pool pins D = 8 but the UNSHIELD fixture withdraws 7: the amounts differ.
+    let (vpool, vault) = build_value_pool(
+        &mut env,
+        &authority,
+        0,
+        Some(8),
+        &extra::UNSHIELD_PUBLIC_INPUTS[0],
+        SOL,
+    );
+    let vault_start = env.get(&vault).lamports;
+
+    let recipient = fixture_recipient();
+    env.fund(recipient, 0);
+    let depositor = Pubkey::new_unique();
+    env.fund(depositor, SOL);
+
+    let nf0 = env.vnf_pda(&vpool, &extra::UNSHIELD_PUBLIC_INPUTS[3]);
+    let nf1 = env.vnf_pda(&vpool, &extra::UNSHIELD_PUBLIC_INPUTS[4]);
+    let ix = env.transact_ix(
+        &vpool,
+        &authority,
+        &nf0,
+        &nf1,
+        &recipient,
+        &depositor,
+        &vault,
+        &extra::UNSHIELD_PUBLIC_INPUTS,
+        &extra::UNSHIELD_PROOF_A,
+        &extra::UNSHIELD_PROOF_B,
+        &extra::UNSHIELD_PROOF_C,
+        0,
+        &payload(5),
+        &payload(6),
+    );
+    env.process(
+        &ix,
+        &[Check::err(custom(MirrorPoolError::DenominationMismatch))],
+    );
+    // Fail-closed: no nullifier PDA, no commitments, no lamports moved.
+    assert_eq!(
+        env.get(&nf0).owner,
+        Pubkey::default(),
+        "no nullifier PDA on a denomination mismatch"
+    );
+    assert_eq!(
+        value_pool::commitment_count(&env.get(&vpool).data).unwrap(),
+        0
+    );
+    assert_eq!(env.get(&vault).lamports, vault_start, "vault untouched");
+    assert_eq!(env.get(&recipient).lamports, 0);
+}
+
+#[test]
+fn transact_fixed_denom_allows_transfer() {
+    let mut env = Env::new();
+    let authority = fixture_relayer_authority();
+    env.fund(authority, 5 * SOL);
+    // A fixed-denom pool (D = 10) must still allow internal transfers, which move
+    // no public value (publicAmount == 0), regardless of the denomination.
+    let (vpool, vault) = build_value_pool(
+        &mut env,
+        &authority,
+        0,
+        Some(10),
+        &transfer::PUBLIC_INPUTS[0],
+        5 * SOL,
+    );
+    let vault_start = env.get(&vault).lamports;
+
+    let recipient = fixture_recipient();
+    env.fund(recipient, 0);
+    let depositor = Pubkey::new_unique();
+    env.fund(depositor, SOL);
+
+    let nf0 = env.vnf_pda(&vpool, &transfer::PUBLIC_INPUTS[3]);
+    let nf1 = env.vnf_pda(&vpool, &transfer::PUBLIC_INPUTS[4]);
+    let ix = env.transact_ix(
+        &vpool,
+        &authority,
+        &nf0,
+        &nf1,
+        &recipient,
+        &depositor,
+        &vault,
+        &transfer::PUBLIC_INPUTS,
+        &transfer::PROOF_A,
+        &transfer::PROOF_B,
+        &transfer::PROOF_C,
+        0,
+        &payload(3),
+        &payload(4),
+    );
+    // The transfer is unaffected by the denomination: it verifies and settles.
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        value_pool::commitment_count(&env.get(&vpool).data).unwrap(),
+        2,
+        "transfer inserts both output commitments"
+    );
+    // No public value moved.
+    assert_eq!(env.get(&recipient).lamports, 0);
+    assert_eq!(env.get(&vault).lamports, vault_start, "vault untouched");
+}

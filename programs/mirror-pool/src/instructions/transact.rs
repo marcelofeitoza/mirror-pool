@@ -79,6 +79,7 @@ const R_BE: [u8; 32] = [
 /// The net public value crossing the shielded boundary, decoded from
 /// `publicAmount` with the FIELD_SIZE offset (mirrors
 /// `mirror_core::note::SignedAmount`).
+#[derive(Clone, Copy)]
 enum SignedAmount {
     /// transfer: no public value moves.
     Transfer,
@@ -148,8 +149,9 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         return Err(MirrorPoolError::ValuePoolNotInitialized.into());
     }
 
-    // ValuePool integrity + authority binding + (2) known-root, in one borrow.
-    {
+    // ValuePool integrity + authority binding + (2) known-root + fixed
+    // denomination, in one borrow.
+    let denomination = {
         let vpool_data = vpool_account.try_borrow()?;
         if vpool_data.len() != value_pool::LEN || !value_pool::is_initialized(&vpool_data)? {
             return Err(MirrorPoolError::ValuePoolNotInitialized.into());
@@ -160,6 +162,32 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         // (2) The proof's root must be a known recent root.
         if !value_pool::is_known_root(&vpool_data, &root)? {
             return Err(MirrorPoolError::RootNotKnown.into());
+        }
+        value_pool::denomination(&vpool_data)?
+    };
+
+    // (2b) Fixed-denomination enforcement (Level 1 amount privacy). Decode the
+    // signed publicAmount once and reuse the result for the lamport move below.
+    // When the pool pins a denomination, every PUBLIC deposit/withdraw must move
+    // exactly that amount, so all public value crossings are byte-identical and an
+    // amount cannot single out a participant (amount k-anonymity). Internal
+    // transfers (publicAmount == 0) move no public value and are always allowed.
+    //
+    // Check order: this runs BEFORE the ext-data recompute, before any input
+    // nullifier PDA is created, and before the expensive Groth16 verification, so a
+    // denomination mismatch is rejected cheaply and fail-closed with NO state
+    // change. When `denomination` is `None` the behavior is unchanged (arbitrary
+    // amounts). Decoding here also fails an out-of-range publicAmount before any
+    // state change (a strict superset of the pre-existing decode below).
+    let signed_amount = decode_public_amount(&public_amount)?;
+    if let Some(d) = denomination {
+        match signed_amount {
+            SignedAmount::Transfer => {}
+            SignedAmount::Deposit(v) | SignedAmount::Withdraw(v) => {
+                if v != d {
+                    return Err(MirrorPoolError::DenominationMismatch.into());
+                }
+            }
         }
     }
 
@@ -226,10 +254,11 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         value_pool::append(&mut vpool_data, &out_commitment1)?
     };
 
-    // (7) Move lamports per the decoded publicAmount, keeping the vault
+    // (7) Move lamports per the decoded publicAmount (decoded once above, and
+    // already checked against any fixed denomination), keeping the vault
     // rent-exempt. deposit: depositor -> vault; withdraw: vault -> recipient;
     // transfer: nothing.
-    match decode_public_amount(&public_amount)? {
+    match signed_amount {
         SignedAmount::Transfer => {}
         SignedAmount::Deposit(v) => {
             if v > 0 {
