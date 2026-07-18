@@ -1,5 +1,23 @@
 # mirror-pool circuits
 
+This directory holds two independent Groth16 circuits and their dev/test trusted
+setups and on-chain artifacts:
+
+- **`membership.circom`**: the ZK-deniable initiation (behavioral) circuit,
+  documented in the rest of this file.
+- **`transaction.circom`**: a 2-in / 2-out confidential-value JoinSplit
+  (Tornado-Nova style) for shielded value notes (UTXOs): shield, private
+  transfer, and unshield. Its canonical note/nullifier scheme, the FIELD_SIZE
+  `publicAmount` encoding, the 7 public inputs, build steps, and groth16-solana
+  layout are specified in **[`TRANSACTION.md`](./TRANSACTION.md)**. Build it with
+  `bash build_transaction.sh` (or `npm run build:transaction`). It is additive:
+  it shares `convert_to_rust.js` (via `--circuit=transaction`) but leaves the
+  membership circuit and all its artifacts untouched.
+
+---
+
+## Membership circuit
+
 Zero-knowledge membership circuit for mirror-pool's ZK-deniable initiation.
 
 mirror-pool is "Tornado Cash for behavior": participants commit an intent into a

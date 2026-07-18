@@ -6,11 +6,14 @@
   "description": "Groth16 membership circuit for mirror-pool ZK-deniable initiation (clean-room, circomlib + snarkjs only).",
   "scripts": {
     "build": "bash build.sh",
-    "fixture": "node gen_fixture.js"
+    "build:transaction": "bash build_transaction.sh",
+    "fixture": "node gen_fixture.js",
+    "fixture:transaction": "node gen_transaction_fixture.js"
   },
   "dependencies": {
     "circomlib": "^2.0.5",
     "circomlibjs": "^0.1.7",
+    "ethers": "^5.8.0",
     "snarkjs": "^0.7.5"
   }
 }
