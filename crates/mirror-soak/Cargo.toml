@@ -44,3 +44,10 @@ solana-commitment-config = "3"
 [[bin]]
 name = "mirror-soak"
 path = "src/main.rs"
+
+# The confidential-VALUE soak (JoinSplit shield/transfer/unshield). Shares the
+# crate's deps + the shipped mirror-cli, but is a separate binary so the
+# behavioral soak (src/main.rs) stays untouched.
+[[bin]]
+name = "mirror-soak-value"
+path = "src/bin/confidential.rs"
