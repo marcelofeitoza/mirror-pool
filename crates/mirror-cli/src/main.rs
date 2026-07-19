@@ -172,7 +172,8 @@ struct InitValuePoolArgs {
     /// Relay fee (lamports) bound into every Transact's ext-data.
     #[arg(long)]
     fee: u64,
-    /// Fixed denomination (lamports), stored but NOT enforced in this version.
+    /// Fixed denomination (lamports): when set, every public deposit/withdraw must
+    /// move exactly this amount (enforced on-chain as DenominationMismatch).
     #[arg(long)]
     denomination: Option<u64>,
 }
@@ -851,7 +852,7 @@ fn run_init_value_pool(args: InitValuePoolArgs) -> Result<()> {
     println!("vault PDA:            {vault}");
     println!("fee:                  {} lamports", args.fee);
     match args.denomination {
-        Some(d) => println!("denomination:         {d} lamports (stored, not enforced)"),
+        Some(d) => println!("denomination:         {d} lamports (enforced on-chain)"),
         None => println!("denomination:         none"),
     }
     println!("signature:            {sig}");

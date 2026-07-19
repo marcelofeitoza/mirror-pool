@@ -97,6 +97,8 @@ program's `wire` module (SBF parser) with compile-time size asserts on both side
 | `3` | `CommitDeposit` | participant (ZK opt-in) | escrow `amount` into the pool, append one commitment leaf whose `actionHash` binds `(recipient, amount)`, collect the entry fee |
 | `4` | `SettleZk` | rotating relay | verify a Groth16 membership proof on-chain, check the root/actionHash/nullifier, release the escrow to a fresh recipient |
 | `5` | `ClaimReward` | participant (crowd) | pay a dwell-proportional, drain-safe share of the on-chain reward pool |
+| `6` | `InitValuePool` | operator | create the confidential ValuePool (its own value-note accumulator + 32-root ring) and its vault PDA, and fix `authority`, `fee`, and `denomination` forever |
+| `7` | `Transact` | rotating relay | verify one 2-in/2-out JoinSplit Groth16 proof on-chain, spend two input nullifiers, insert two output commitments, and move lamports per the signed `publicAmount` (shield / transfer / unshield) |
 
 ### 2.1 `InitPool` (tag 0, body 22 bytes)
 
@@ -509,7 +511,189 @@ work (`docs/ROADMAP.md`).
 
 ---
 
-## 9. Component status
+## 9. Confidential-value layer
+
+Everything above hides *who initiated* an action while leaving every amount public
+(Non-goal 1 of the threat model). The confidential-value layer is the optional
+complement: a Tornado-Nova-style shielded pool that hides *how much* moves. It is a
+SEPARATE subsystem from the behavioral Pool (its own account, its own accumulator,
+its own two instructions), so a deployment can run the behavioral pool, the
+confidential pool, or both. When the two combine, mirror-pool hides both axes at
+once: a confidential transfer settles through the same gasless relay with no user
+signature and carries `publicAmount == 0`, so an observer learns neither which
+wallet initiated it nor how much it moved. The value lives only in the on-chain
+commitments and the encrypted note payloads. The layer is a clean-room
+implementation of the public, open-source Tornado-Nova transaction circuit (the
+standard Poseidon JoinSplit), cited as prior art.
+
+### 9.1 ValuePool and vault accounts
+
+`InitValuePool` (tag 6, body 17 bytes: `[fee (u64 LE)][denom_flag (u8)][denomination
+(u64 LE)]`) creates two PDAs. The **ValuePool** (`[b"vpool", authority]`) is a
+value-note accumulator fully independent of the behavioral Pool; the behavioral Pool
+never grows from confidential activity. A separate **vault** PDA (`[b"vvault",
+vpool]`, zero data, program-owned) holds the commingled lamports so the data
+account's balance stays pure rent. `authority` (the Transact relay), `fee`, and
+`denomination` are fixed at init.
+
+```
+offset  size       field              meaning
+0       1          version            0 = uninitialized, 1 = v1
+1       32         authority          relay pubkey allowed to submit Transact
+33      8          fee                relay fee (lamports) bound into ext-data
+41      1          denom_flag         0 = None, 1 = Some(denomination)
+42      8          denomination       fixed-denom magnitude (0 when None)
+50      1          bump               ValuePool PDA bump
+51      1          vault_bump         vault PDA bump
+52      8          commitment_count   total value-note leaves ever appended
+60      32         current_root       frontier accumulator root (latest)
+92      640        filled_subtrees    frontier right-edge siblings (DEPTH * 32)
+732     4          root_head          ring index of the next root write
+736     1024       root_ring          recent-root ring (ROOT_HISTORY_SIZE * 32)
+```
+
+The value accumulator reuses the exact `state::merkle` frontier insert the
+behavioral pool uses (`DEPTH = 20`, up to about 1.05M leaves) and keeps its own
+32-root history ring, because a JoinSplit proof is made against a root snapshot and
+must still verify after later appends.
+
+### 9.2 The value-note (UTXO) scheme
+
+A value note is `{ amount, public_key, blinding }`, a shielded UTXO. Its owner holds
+a value keypair, distinct from any Solana wallet:
+
+```
+public_key = Poseidon(private_key)                        // 1-input, t=2
+commitment = Poseidon(amount, public_key, blinding)       // 3-input, t=4  (Merkle leaf)
+signature  = Poseidon(private_key, commitment, leafIndex) // 3-input, t=4
+nullifier  = Poseidon(commitment, leafIndex, signature)   // 3-input, t=4
+```
+
+The nullifier is bound to both the owner (through `signature`, which needs the
+private key) and the leaf position, so the same note at a different index yields a
+different nullifier and a double-spend collides. A dummy input has `amount == 0`;
+the circuit skips its Merkle-membership check, which is what lets a shield spend two
+dummy inputs.
+
+### 9.3 publicAmount and extDataHash
+
+`publicAmount` is the net public value crossing the shielded boundary, encoded as a
+signed BN254 field element with the standard FIELD_SIZE offset:
+
+```
+shield   (deposit v)  : publicAmount = v          (top byte 0, in [0, 2^248))
+unshield (withdraw v) : publicAmount = r - v      (in (r - 2^248, r))
+transfer              : publicAmount = 0
+```
+
+The two ranges are disjoint, so the on-chain decoder recovers the sign
+unambiguously and rejects anything in neither range or exceeding a `u64`.
+`extDataHash` is `keccak256(recipient || relayer || fee_be || enc0 || enc1) mod r`;
+the program recomputes it from the accounts and payloads it receives and requires
+equality, so the relay cannot retarget the recipient, change the fee, or swap the
+encrypted payloads. The value path uses the same host and on-chain Poseidon and the
+same big-endian scalar encoding as the behavioral membership path (section 7).
+
+### 9.4 Transact (tag 7): one 2-in/2-out JoinSplit
+
+A single universal statement, distinguished only by the signed `publicAmount`,
+covers all three operations: **shield** (`+v`, two dummy inputs, lamports depositor
+-> vault), **transfer** (`0`, real inputs and outputs, no lamports move), and
+**unshield** (`r - v`, lamports vault -> recipient). The instruction body (after the
+tag byte) is:
+
+```
+[publicAmount(32)][extDataHash(32)][root(32)]
+  [inputNullifier[0](32)][inputNullifier[1](32)]
+  [outputCommitment[0](32)][outputCommitment[1](32)]
+  [proof_a(64)][proof_b(128)][proof_c(64)]
+  [fee(8 LE)]
+  [enc0_len(2 LE)][enc0][enc1_len(2 LE)][enc1]
+```
+
+Accounts: `0` vpool (writable), `1` authority (signer, writable; MUST equal
+`vpool.authority`, pays nullifier rent), `2`/`3` the two value nullifier PDAs
+(writable; seeds `[b"vnf", vpool, inputNullifier]`), `4` recipient (writable;
+credited on unshield), `5` depositor (signer + writable for a shield only), `6`
+system program, `7` clock, `8` vault (writable). The handler's checks run in a
+fixed, fail-closed order: (1) authority is a signer and equals `vpool.authority`;
+(2) `root` is a known recent root; (2b) if a denomination is pinned, the decoded
+deposit/withdraw magnitude equals it (`DenominationMismatch`, checked before the
+expensive work); (3) the recomputed `extDataHash` equals the proof's; (4) create
+each input nullifier PDA (an all-zero dummy sentinel is skipped, `NullifierSpent`
+on replay); (5) the Groth16 proof verifies against the seven public inputs; (6)
+both output commitments are appended to the value accumulator; (7) lamports move
+per the decoded `publicAmount`, keeping the vault rent-exempt; (8) enc0/enc1 are
+emitted as return data for client discovery.
+
+The JoinSplit circuit (`circuits/transaction.circom`, depth 20, 27278 R1CS
+constraints, 7 public inputs, 56 private inputs) enforces, per input, the key,
+commitment, signature, and nullifier relations plus Merkle inclusion when
+`amount != 0`; per output, the commitment and a 248-bit range bind; and globally,
+value conservation `sum(inAmount) + publicAmount == sum(outAmount)`, distinct input
+nullifiers, and tamper-evidence of `extDataHash`. On-chain `Transact` verifies the
+proof with `groth16-solana` via the alt_bn128 pairing syscalls against the vendored
+`transaction_vk.rs`, in the fixed public-input order:
+
+```
+[root, publicAmount, extDataHash,
+ inputNullifier[0], inputNullifier[1],
+ outputCommitment[0], outputCommitment[1]]
+```
+
+`proof_a` is emitted pre-negated so the program needs no runtime ark
+serialization. The circuit's trusted setup is the same reproducible development/test
+setup as the membership circuit (its phase-2 entropy is public), so it MUST NOT
+secure real value; a production ceremony is roadmap work (`docs/ROADMAP.md`).
+
+### 9.5 Encrypted notes and discovery
+
+Each output commitment is opaque on-chain, so the sender posts an encrypted note
+blob (the two `enc` fields, bound into `extDataHash`) that lets the recipient
+discover and rebuild the note. A recipient address is a pair of keys: the BN254
+**value** key that authorizes spending (and that the commitment binds) and an
+X25519 **viewing** key used only to encrypt and discover notes off-chain. Splitting
+them lets a recipient hand the viewing key to an auditor or watch-only wallet
+without granting spend authority. The blob is ECIES (X25519 ECDH -> HKDF-SHA256 ->
+ChaCha20-Poly1305): a fresh ephemeral key per message makes the AEAD `(key, nonce)`
+pair unique by construction, so nonce reuse is impossible. The plaintext is the 40
+bytes the recipient does not already know, `amount(8, big-endian) || blinding(32)`,
+and the on-chain blob is a fixed 100 bytes (`ephemeral_pub(32) || nonce(12) ||
+ct+tag(56)`), well under the 256-byte per-blob cap. The recipient trial-decrypts
+every blob with their viewing secret (`scan`), keeps the hits, and rebuilds each
+note's commitment from their own value key to locate its leaf and later spend it.
+
+### 9.6 Fixed-denomination mode (amount k-anonymity)
+
+Setting `ValuePool.denomination = Some(d)` at init pins every *public* value
+crossing: a shield or unshield must move exactly `d` lamports or the Transact is
+rejected on-chain with `DenominationMismatch`. Internal transfers move no public
+value (`publicAmount == 0`) and are always allowed. This is the value analog of the
+behavioral pool's fixed size buckets: when every deposit and withdrawal is
+byte-identical in magnitude, the amount cannot single a participant out. The check
+runs before the ext-data recompute, before any nullifier PDA is created, and before
+Groth16 verification, so a mismatch fails cheaply with no state change; the CLI
+mirrors the same check client-side and refuses a doomed Transact before proving.
+
+### 9.7 CLI and coordinator flow
+
+`mirror-cli` carries the participant surface for the value layer: `value-keygen`,
+`init-value-pool`, `shield`, `transfer`, `unshield`, and `scan`. As with the
+behavioral `prove`, none of the proving commands self-submit: each rebuilds the
+value Merkle path off-chain from the note's captured frontier snapshot, generates
+and verifies a Groth16 proof through snarkjs, cross-checks the public signals, and
+*emits* the `Transact` instruction bytes plus account list for the relay.
+`mirror-coordinator::submit_transact` is the gasless submitter: it wraps the emit in
+the same normalized `TxProfile` (identical CU limit and priority fee) as the crowd
+path, with the relay authority as fee payer at index 0. A transfer or unshield is
+signed ONLY by the relay (there is no user signature, which is the who-initiated
+unlinkability), while a shield additionally co-signs the depositor, who authorizes
+and funds their own deposit. A Transact uses no Address Lookup Table because its
+per-settlement nullifier PDAs change every time, so all its accounts stay static.
+
+---
+
+## 10. Component status
 
 | component | path | status |
 |-----------|------|--------|
@@ -521,7 +705,13 @@ work (`docs/ROADMAP.md`).
 | participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`status`; prove rebuilds the path, runs snarkjs, emits `SettleZk` |
 | adversarial harness | `crates/mirror-harness` | **Implemented** - FIFO, amount, gas-payer, and wallet-fingerprint attacks measuring attacker advantage over 1/k, Baseline vs mirror-pool; FIFO advantage collapses to about 0 under shared-epoch batching |
 | anti-Sybil entry fee + dwell reward | `programs/mirror-pool` + `docs/INCENTIVES.md` | **Implemented** (crowd path) - entry-fee split, reward pool, dwell accrual, drain-safe `ClaimReward`; ZK-path reward is designed, not implemented |
-| Surfpool soak | `tests/` | **In progress** - automated end-to-end multi-epoch run against a local mainnet mirror |
+| confidential-value program (ValuePool + Transact) | `programs/mirror-pool` | **Implemented** - `InitValuePool`/`Transact`; separate ValuePool value-note accumulator + 32-root ring + vault PDA; on-chain 2-in/2-out JoinSplit Groth16 (alt_bn128), value nullifier PDAs, `publicAmount` lamport moves, fixed-denomination enforcement (`DenominationMismatch`) |
+| confidential JoinSplit circuit + setup + verifying key | `circuits/` | **Implemented** - depth-20 2-in/2-out Tornado-Nova transaction circuit (7 public inputs), dev/test Groth16 setup, committed shield/transfer/unshield fixtures + vendored `transaction_vk.rs` |
+| value notes + encrypted notes | `crates/mirror-core` | **Implemented** - `note` (value-note commitment / nullifier / `publicAmount` / `extDataHash`) + `encrypted_note` (ECIES X25519 -> HKDF-SHA256 -> ChaCha20-Poly1305, 100-byte blob, `scan`) |
+| confidential CLI | `crates/mirror-cli` | **Implemented** - `value-keygen`/`init-value-pool`/`shield`/`transfer`/`unshield`/`scan`; proves with snarkjs and emits `Transact` |
+| gasless confidential submitter | `crates/mirror-coordinator` | **Implemented** - `submit_transact` (relay-only signer for transfer/unshield, depositor co-sign for shield), normalized `TxProfile`, mockable RPC boundary |
+| confidential-value soak | `tests/` | **Implemented** - shield / transfer / unshield + fixed-denomination end-to-end on a local mainnet mirror, 25/25 on-chain assertions (`docs/PROOF.md`) |
+| Surfpool soak (behavioral crowd path) | `tests/` | **In progress** - automated end-to-end multi-epoch run against a local mainnet mirror |
 
 The harness implements four attacks today (FIFO temporal matching, amount
 matching, gas-payer reuse, wallet fingerprinting); temporal-correlation,
@@ -530,7 +720,7 @@ trait, and the docs say so plainly rather than claiming they run.
 
 ---
 
-## 10. Prior art
+## 11. Prior art
 
 mirror-pool is an independent clean-room implementation built entirely from public
 techniques and papers. Each mechanism traces to a documented attack or a public

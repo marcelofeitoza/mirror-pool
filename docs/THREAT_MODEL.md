@@ -20,10 +20,19 @@ same idea:
   is visible, the output goes to a fresh address, and no participant signs at
   settle.
 
+Both behavioral paths leave every **amount** public by design (Non-goal 1). A third,
+**optional confidential-value layer** deliberately steps BEYOND the "behavior, not
+funds" theme: a Tornado-Nova-style shielded pool (`ValuePool` + `Transact`) that
+hides amounts inside the pool and, for internal transfers and withdrawals, unlinks
+the initiator as well. It is a separate, opt-in subsystem, not a change to the
+behavioral guarantee; Section 4 states exactly what it hides and Non-goal 1 and
+Section 8 state honestly what it does not. A deployment that runs it can hide both
+who initiated an action and how much moved.
+
 This document defines who we defend against, what an observer actually sees on
 Solana, which attacks each path defeats (with the empirical numbers that justify
 each defense), the falsifiable metric we hold ourselves to, and, just as
-importantly, what we do **not** claim for either path.
+importantly, what we do **not** claim for any path.
 
 Every defense maps to a concrete mechanism in the codebase.
 `crates/mirror-core/src/lib.rs` is the shared vocabulary: `Commitment`,
@@ -315,6 +324,34 @@ Both paths keep membership public, exactly as Tornado did for funds: the *link
 inside the set* is what is protected, and on the ZK path that protection is
 cryptographic.
 
+**Confidential-value layer (`InitValuePool` / `Transact`, optional).** This is the
+one part of mirror-pool that hides amounts. It is opt-in and separate from the two
+behavioral paths, and its guarantees and limits are stated bluntly here because it
+extends beyond the behavioral "not for funds" theme.
+
+- **Hidden:** the amount of every note inside the pool. A note's value lives only in
+  its Poseidon commitment and in the encrypted-note ciphertext addressed to the
+  recipient's viewing key, never in cleartext on-chain. An internal **transfer**
+  carries `publicAmount == 0`, moves no lamports, and settles through the gasless
+  relay with no user signature, so it hides both the amount and which committer
+  initiated it: the depositor-to-output link is protected by a zero-knowledge
+  membership + balance proof at the 1/k bound, exactly as on the ZK opt-in path. An
+  **unshield** is likewise relay-signed with no acting-wallet signature and its
+  change returns as a fresh confidential note.
+- **Public:** the **magnitude at the public boundary**. A **shield** exposes the
+  deposited amount (the depositor also co-signs and funds it) and an **unshield**
+  exposes the withdrawn amount and its recipient account, because real lamports
+  cross the vault boundary in the clear. The **pool TVL is public** (the vault PDA's
+  lamport balance is on-chain), as is each `Transact`'s relay fee and the fact that
+  a wallet interacted with the pool. Fixed-denomination mode narrows every public
+  crossing to one uniform amount (`DenominationMismatch` otherwise), which gives
+  amount k-anonymity at the boundary but does not make the magnitude private.
+- **Trusted setup is development/test.** The JoinSplit circuit's Groth16 setup uses
+  public phase-2 entropy (reproducible by design), so its toxic waste is public. It
+  MUST NOT secure real value until a real multi-party ceremony is run
+  (`docs/ROADMAP.md`); this is a soundness caveat, not a confidentiality one, but it
+  is disclosed here rather than buried.
+
 ---
 
 ## 5. The k-anonymity metric (falsifiable, or it does not count)
@@ -369,12 +406,18 @@ nominal set of 100 with 91 excluded is real_k = 9, which does not meet a k_floor
 
 Stated bluntly, because a privacy tool that is vague about its non-goals is a trap:
 
-1. **We do not hide amounts.** Every balance delta is public and intended to be.
-   (Solana already has an amounts-only privacy primitive: Token-2022 confidential
-   transfers hide the amount while leaving sender, receiver, and mint public, so
-   the entity graph stays intact [4]. mirror-pool is the complement: amounts
-   public, initiator signal or bijection unattributable.) Anyone expecting fund
-   hiding is in the wrong tool.
+1. **The behavioral paths do not hide amounts.** On the crowd and ZK opt-in paths
+   every balance delta is public and intended to be. (Solana already has an
+   amounts-only privacy primitive: Token-2022 confidential transfers hide the amount
+   while leaving sender, receiver, and mint public, so the entity graph stays intact
+   [4]. The behavioral core is the complement: amounts public, initiator signal or
+   bijection unattributable.) Anyone expecting the behavioral pool to hide funds is
+   in the wrong tool. The **optional confidential-value layer** is the exception and
+   is scoped precisely in Section 4: it hides amounts *inside* the pool, but the
+   shield-in and unshield-out magnitudes and the pool TVL stay public, and its
+   trusted setup is dev/test. Turning it on is a deliberate choice to add amount
+   privacy on top of the behavioral guarantee, not a claim that the behavioral paths
+   hide funds.
 2. **We do not defend the destination history of external payees.** If a pooled
    action pays a known merchant, the merchant's canonical ATA identifies the
    merchant; that is inherent to deterministic ATAs. We hide **which participant**
@@ -505,13 +548,23 @@ because a threat model that only enumerates its wins is untrustworthy.
    like a mirror-pool settlement. That is intentional (uniformity is the defense),
    but it means the pool's aggregate activity (volume per bucket per epoch) is
    public analytics.
+10. **Confidential-value boundary and TVL (optional layer only).** When the
+    confidential-value layer is enabled, amounts are hidden *inside* the pool, but
+    the public boundary is not: a shield exposes the deposited amount and depositor,
+    an unshield exposes the withdrawn amount and recipient, and the vault's TVL is a
+    public on-chain balance. Fixed-denomination mode makes those crossings uniform
+    but not private. Its trusted setup is dev/test (a soundness caveat, Section 4),
+    and, as with the ZK path, a user who sweeps an unshield output into a wallet
+    clusterable to their deposit wallet re-links themselves. This residual exists
+    only for deployments that opt into the layer.
 
 None of these residuals reintroduce the property each path sells: within a settled
 epoch that met its floor, the crowd path keeps every participant's action
-indistinguishable *as a signal* from the rest of the crowd, and the ZK path keeps
-the depositor-to-output bijection hidden at the 1/k bound. They erode the context
-around the set, not the indistinguishability inside it, and every one is either
-measured by the harness or has a named roadmap mitigation.
+indistinguishable *as a signal* from the rest of the crowd, the ZK path keeps the
+depositor-to-output bijection hidden at the 1/k bound, and the confidential-value
+layer keeps in-pool amounts and internal-transfer initiators hidden. They erode the
+context around the set, not the indistinguishability inside it, and every one is
+either measured by the harness or has a named roadmap mitigation.
 
 ---
 

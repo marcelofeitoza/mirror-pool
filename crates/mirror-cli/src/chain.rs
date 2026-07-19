@@ -455,8 +455,9 @@ pub fn commit_deposit_ix(
 /// Body: `[fee(8 LE)][denom_flag(1)][denomination(8 LE)]`. Accounts (see
 /// `instructions::init_value_pool`): vpool(w), vault(w), authority(signer),
 /// payer(signer, w), system_program. `authority` becomes `vpool.authority` (the
-/// Transact relay), so it must sign; `payer` funds both PDAs' rent. `denomination`
-/// is stored but NOT enforced in this program version.
+/// Transact relay), so it must sign; `payer` funds both PDAs' rent. `denomination`,
+/// when set, is enforced on-chain: every public deposit/withdraw must move exactly
+/// that amount, or the Transact is rejected with `DenominationMismatch`.
 pub fn init_value_pool_ix(
     program_id: &Pubkey,
     vpool: &Pubkey,

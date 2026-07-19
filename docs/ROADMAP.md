@@ -2,16 +2,20 @@
 
 mirror-pool is "Tornado Cash for behavior, not funds." N participants voluntarily
 pool an action so the action is publicly visible but its initiator is not. The
-privacy target is behavioral obscurity: making an on-chain action un-attributable
-to a specific wallet by an automated chain-analysis pipeline. It is not about
-hiding funds, amounts, or the fact that an action occurred.
+behavioral privacy target is obscurity of the initiator: making an on-chain action
+un-attributable to a specific wallet by an automated chain-analysis pipeline. That
+core is not about hiding funds, amounts, or the fact that an action occurred. An
+optional confidential-value layer (below) deliberately extends BEYOND that theme: a
+Tornado-Nova-style shielded pool that also hides amounts, so a deployment that turns
+it on hides both who initiated an action and how much moved.
 
 This document states what is **built** and what is **future**. The complete
-two-path system is built: a crowd path that defeats copy-trading and signal
-extraction via synchronized identical actions, and a ZK opt-in path that provides
-cryptographic who-initiated unlinkability, sharing one accumulator, one epoch
-clock, one k-floor, and one anti-Sybil economy. Everything under "Future work" is
-called out as such so a reviewer never mistakes an aspiration for a claim.
+two-path behavioral system is built: a crowd path that defeats copy-trading and
+signal extraction via synchronized identical actions, and a ZK opt-in path that
+provides cryptographic who-initiated unlinkability, sharing one accumulator, one
+epoch clock, one k-floor, and one anti-Sybil economy. The optional confidential-
+value layer is built too and soak-proven end to end. Everything under "Future work"
+is called out as such so a reviewer never mistakes an aspiration for a claim.
 
 ---
 
@@ -135,6 +139,34 @@ operator-owned and detected Sybils) and gates settlement on it. Implemented on t
 crowd path; the ZK-path anonymity-mining equivalent is designed, not implemented
 (see Future work).
 
+### The confidential-value layer (`programs/mirror-pool` + `circuits/` + crates)
+
+An optional, SEPARATE subsystem that hides amounts, complementing the behavioral
+core's who-initiated privacy. A dedicated `ValuePool` account (its own Poseidon
+value-note accumulator + 32-root history ring + a vault PDA for the commingled
+lamports) is created by `InitValuePool` (tag 6). One `Transact` instruction (tag 7)
+settles a Tornado-Nova-style 2-in/2-out JoinSplit: a single universal statement
+covers shield (`publicAmount = +v`), transfer (`publicAmount = 0`), and unshield
+(`publicAmount = r - v`), distinguished only by the signed public amount. The
+program verifies the JoinSplit Groth16 proof on-chain (`groth16-solana`, alt_bn128,
+7 public inputs), checks the root-history ring and the `extDataHash` binding, spends
+two input nullifier PDAs, inserts two output commitments, and moves lamports per the
+decoded amount. Value notes are `Poseidon(amount, pubkey, blinding)` UTXOs with
+position-bound nullifiers; output notes are delivered as on-chain encrypted blobs
+(ECIES: X25519 -> HKDF-SHA256 -> ChaCha20-Poly1305, 100-byte blob) that the
+recipient discovers by trial-decryption with a viewing key. An optional fixed-
+denomination mode (`ValuePool.denomination = Some(d)`) enforces that every public
+shield/unshield moves exactly `d` (`DenominationMismatch`), giving amount
+k-anonymity. The CLI (`value-keygen`/`init-value-pool`/`shield`/`transfer`/
+`unshield`/`scan`) proves with snarkjs and emits the `Transact`; the coordinator's
+`submit_transact` settles it gaslessly (relay-only signer for transfer/unshield, so
+the user never signs; depositor co-sign for a shield). Because a confidential
+transfer settles through the gasless relay with `publicAmount == 0`, mirror-pool
+then hides both who initiated and how much moved. The whole path is soak-proven end
+to end (shield / transfer / unshield + fixed-denomination, 25/25 on-chain
+assertions; `docs/PROOF.md`). The JoinSplit trusted setup is the same reproducible
+development/test setup as the membership circuit and MUST NOT secure real value.
+
 ---
 
 ## Future work
@@ -166,11 +198,40 @@ and its trusted setup.
 
 ### A real multi-party trusted-setup ceremony
 
-The current Groth16 setup is a reproducible development/test setup: its phase-2
-entropy is public by design, which makes the toxic waste public, so it must not
-secure real value. A production deployment needs a real multi-party (phase-2)
-ceremony with independent contributors and a pre-committed beacon. This is
-setup/operational work; the circuit and on-chain verifier do not change.
+Both Groth16 setups (the behavioral membership circuit and the confidential-value
+JoinSplit circuit) are reproducible development/test setups: their phase-2 entropy
+is public by design, which makes the toxic waste public, so they must not secure
+real value. A production deployment needs a real multi-party (phase-2) ceremony per
+circuit, with independent contributors and a pre-committed beacon. This is
+setup/operational work; the circuits and on-chain verifiers do not change.
+
+### Confidential deposits (hide even the shield amount)
+
+Today the confidential layer's shield and unshield expose their magnitude at the
+public boundary (only internal transfers carry `publicAmount == 0`); the fixed-
+denomination mode narrows that to one uniform amount but does not remove it. A
+confidential-deposit rail would let the shield amount itself be hidden (for example,
+funding the pool from an already-shielded balance or a batched deposit clearing), so
+that even entering and leaving the pool leaks no magnitude. This is additive to the
+existing `Transact` statement and does not change the who-initiated mechanics.
+
+### n-in / n-out JoinSplit beyond 2-in / 2-out
+
+The `Transact` statement is fixed at two inputs and two outputs, which forces
+multi-note consolidation or splits across several transactions. A parameterized
+n-in / n-out circuit (the standard Tornado-Nova generalization) would settle larger
+UTXO reshuffles in one proof. It is a circuit-shape change plus a wider instruction
+layout; the account model, nullifier PDAs, and verifier integration are unchanged.
+
+### Confidential swap and stake from the value pool
+
+The behavioral ZK path already has swap-from-pool and stake-from-pool on its
+roadmap (via CPI at settle). The confidential-value layer is the natural home for
+the amount-hiding version: execute a pooled swap or stake whose input note is
+spent inside a `Transact` and whose output lands as a fresh confidential note, so
+neither the initiator nor the amount is exposed. This reuses the shipped JoinSplit
+plus the behavior adapters and adds a CPI step at settle, mirroring the behavioral
+plan below.
 
 ### Multi-transaction atomic settlement for large epochs
 
@@ -213,18 +274,31 @@ settlement trace.
 | Adversarial harness (FIFO/amount/gas-payer/fingerprint, real k) | Built |
 | Anti-Sybil entry fee + crowd-path dwell reward | Built |
 | Membership circuit + dev/test trusted setup + vendored verifying key | Built |
+| Confidential-value layer: ValuePool + 2-in/2-out JoinSplit `Transact` (shield/transfer/unshield) | Built |
+| Confidential JoinSplit circuit + dev/test setup + vendored verifying key | Built |
+| Value notes + encrypted-note discovery (ECIES, viewing key, `scan`) | Built |
+| Fixed-denomination mode (amount k-anonymity, `DenominationMismatch`) | Built |
+| Gasless confidential submit (`submit_transact`, relay-only signer) | Built |
+| Confidential CLI (`value-keygen`/`shield`/`transfer`/`unshield`/`scan`) | Built |
 | Swap/stake-from-pool via CPI on the ZK path | Future |
 | ZK-path anonymity-mining reward (dwell/age proof) | Future |
-| Multi-party production trusted-setup ceremony | Future |
+| Multi-party production trusted-setup ceremony (both circuits) | Future |
 | Multi-transaction atomic settlement for large epochs | Future |
+| Confidential deposits (hide even the shield/unshield magnitude) | Future |
+| n-in / n-out JoinSplit beyond 2-in / 2-out | Future |
+| Confidential swap/stake from the value pool | Future |
 | Cross-epoch privacy, decentralized coordinator, more behaviors | Future |
 
 **One-line honest claim:** mirror-pool ships a complete two-path behavioral
-anonymity pool. The crowd path collapses the strongest empirical mixer attack
-(FIFO temporal matching) to the 1/real_k baseline via shared-epoch batch
-settlement, proven by an adversarial harness, and defeats fingerprint and
-amount-match attacks with a gasless rotating coordinator and fixed size buckets;
-the ZK opt-in path adds cryptographic who-initiated unlinkability with an on-chain
-Groth16 membership proof. The remaining work is CPI-executed pooled actions, an
-anonymous ZK-path reward, a production trusted-setup ceremony, and scaling, all
-extensions of shipped patterns rather than new claims.
+anonymity pool plus an optional confidential-value layer. The crowd path collapses
+the strongest empirical mixer attack (FIFO temporal matching) to the 1/real_k
+baseline via shared-epoch batch settlement, proven by an adversarial harness, and
+defeats fingerprint and amount-match attacks with a gasless rotating coordinator and
+fixed size buckets; the ZK opt-in path adds cryptographic who-initiated
+unlinkability with an on-chain Groth16 membership proof; and the confidential-value
+layer adds a Tornado-Nova 2-in/2-out JoinSplit that hides amounts (soak-proven end
+to end), so a deployment can hide both who initiated and how much moved. The
+remaining work is CPI-executed pooled actions, an anonymous ZK-path reward, a
+production trusted-setup ceremony, confidential deposits, an n-in/n-out JoinSplit,
+confidential swap/stake, and scaling, all extensions of shipped patterns rather than
+new claims.

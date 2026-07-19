@@ -11,8 +11,14 @@ anonymity set is the set of participants in the round, exactly as a mixer's
 anonymity set is the set of deposits of one denomination.
 
 This is behavioral obscurity for the Superteam Brasil "Privacy-Through-Noise"
-theme: the goal is to make on-chain *behavior* hard for automated chain-analysis
-to read, explicitly **not** to hide balances or move value privately.
+theme: the core goal is to make on-chain *behavior* hard for automated
+chain-analysis to read.
+
+An optional **confidential-value layer** goes further and also hides *how much*:
+value lives in encrypted notes and moves through a Tornado-Nova-style
+zero-knowledge JoinSplit, so a private transfer reveals neither the initiator nor
+the amount. That extends past the behavioral theme into value-shielding and is a
+separate opt-in pool mode (see the status table and [`docs/PROOF.md`](docs/PROOF.md)).
 
 ---
 
@@ -43,8 +49,10 @@ the relay cannot learn which committer acted) + real pooled behaviors + an
 adversarial evaluation harness + anti-Sybil economics with incentives. Every
 component is implemented and tested, and a live Surfpool soak exercises both
 paths plus the adversarial cases with 17/17 on-chain assertions passing (see
-[`docs/PROOF.md`](docs/PROOF.md)). The status table below is kept honest against
-the tree.
+[`docs/PROOF.md`](docs/PROOF.md)). A separate confidential-value layer (JoinSplit
+shield / private-transfer / unshield, hiding amounts) is also built and
+soak-proven live with 25/25 on-chain assertions. The status table below is kept
+honest against the tree.
 
 | Component | Path | Status |
 | --- | --- | --- |
@@ -56,7 +64,11 @@ the tree.
 | Participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool` / `commit` / `deposit-commit` / `prove` (rebuilds the path + generates and verifies a Groth16 proof via snarkjs) / `status`. |
 | Pooled behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + pooled-action adapters: PlainTransfer (soak baseline), Jupiter swap, jitoSOL stake. |
 | Anti-Sybil + incentives | `programs/mirror-pool` + `crates/mirror-coordinator` | **Implemented** - entry-fee split into a reward pool, crowd-path dwell `ClaimReward`, honest `real_k` reporting; the ZK-path incentive is designed in [`docs/INCENTIVES.md`](docs/INCENTIVES.md). |
-| Surfpool soak suite | `crates/mirror-soak` | **Implemented** - live end-to-end soak, both paths + adversarial cases, 17/17 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
+| Surfpool soak suite | `crates/mirror-soak` | **Implemented** - live end-to-end soak, both behavioral paths + adversarial cases, 17/17 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
+| Confidential-value circuit | `circuits/` | **Implemented** - 2-in/2-out Tornado-Nova JoinSplit (`transaction.circom`): membership + nullifiers + value conservation + range proofs + extDataHash binding; setup + vk + shield/transfer/unshield fixtures. |
+| Confidential value pool (on-chain) | `programs/mirror-pool` | **Implemented** - `InitValuePool` + `Transact`: own Poseidon value-note accumulator + root history + vault, on-chain Groth16 JoinSplit verify, nullifier PDAs, deposit/withdraw per `publicAmount`, fixed-denomination mode. Amounts never in cleartext except public deposit/withdraw. |
+| Confidential notes + client ops | `crates/mirror-core` + `mirror-cli` + `mirror-coordinator` | **Implemented** - ECIES encrypted notes + `scan` discovery; `value-keygen`/`shield`/`transfer`/`unshield` (snarkjs-prove + emit); gasless `submit_transact` (transfer/unshield relay-only signed = the unlinkability). |
+| Confidential soak | `crates/mirror-soak` | **Implemented** - live shield -> hidden-amount transfer -> unshield + fixed-denom + adversarial, 25/25 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
 
 "Implemented" means the component's core logic is complete and tested. The host
 workspace tests, 24 on-chain mollusk tests, `build-sbf`, and the live Surfpool
