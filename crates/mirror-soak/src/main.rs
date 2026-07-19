@@ -64,8 +64,6 @@ use solana_transaction::versioned::VersionedTransaction;
 
 /// The default local RPC: the Surfpool mainnet mirror.
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8899";
-/// The built program id (programs/mirror-pool/target/deploy/mirror_pool-keypair.json).
-const DEFAULT_PROGRAM_ID: &str = "7vUgz7eMA2HD1DrTrKp3YWvUgpmyyrab8ogmnfdHhuve";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -76,9 +74,11 @@ struct Args {
     /// RPC endpoint (default: the running local Surfpool).
     #[arg(long, default_value = DEFAULT_RPC_URL)]
     rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long, default_value = DEFAULT_PROGRAM_ID)]
-    program_id: String,
+    /// mirror-pool program id (base58). Defaults to the deployed keypair's pubkey
+    /// (programs/mirror-pool/target/deploy/mirror_pool-keypair.json), so a fresh
+    /// clone that builds + deploys locally works without passing this.
+    #[arg(long)]
+    program_id: Option<String>,
     /// Slots per epoch window. Small enough that "wait for close" is quick, big
     /// enough that a 4-commit burst reliably lands in one window on Surfpool.
     #[arg(long, default_value_t = 64)]
@@ -462,8 +462,26 @@ fn hex_decode(s: &str) -> Result<Vec<u8>> {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let program_id =
-        Pubkey::from_str(&args.program_id).map_err(|e| anyhow!("invalid --program-id: {e}"))?;
+    let program_id = match &args.program_id {
+        Some(s) => Pubkey::from_str(s).map_err(|e| anyhow!("invalid --program-id: {e}"))?,
+        None => {
+            // Derive from the built deploy keypair so a fresh clone is self-consistent.
+            let kp = repo_root()?.join("programs/mirror-pool/target/deploy/mirror_pool-keypair.json");
+            let out = Command::new("solana")
+                .args(["address", "-k", &kp.to_string_lossy()])
+                .output()
+                .context("deriving the program id via `solana address -k` (or pass --program-id)")?;
+            if !out.status.success() {
+                bail!(
+                    "could not derive program id from {} (run `cargo build-sbf` first, or pass --program-id): {}",
+                    kp.display(),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            Pubkey::from_str(&s).map_err(|e| anyhow!("derived program id is invalid: {e}"))?
+        }
+    };
     let w = args.epoch_slots;
 
     let root = repo_root()?;

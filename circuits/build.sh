@@ -4,10 +4,16 @@
 # Groth16 trusted setup, then export the verifying key, a known-good proof
 # fixture, and the Rust-consumable forms for the on-chain groth16-solana verifier.
 #
-# WARNING: this is a DEVELOPMENT / TEST setup only. The phase-2 contribution uses
-# a hard-coded entropy string so the build is reproducible. It is NOT a secure
-# ceremony and MUST NOT be used to secure real value. A real multi-party trusted
-# setup ceremony is a separate deliverable.
+# WARNING: this is a DEVELOPMENT / TEST setup only. snarkjs mixes fresh randomness
+# into every phase-2 contribution, so the verifying key is NOT byte-reproducible
+# across rebuilds; trust here rests on the committed verifying key + proof fixtures
+# verifying (they do) and the on-chain program embedding that committed key, not on
+# rebuild determinism. It is NOT a secure ceremony and MUST NOT be used to secure
+# real value. A real multi-party trusted setup ceremony is a separate deliverable.
+#
+# NOTE: re-running this OVERWRITES circuits/artifacts/* with a fresh vk + fixtures
+# that will NOT match the committed on-chain vk. Run `git checkout -- circuits/artifacts`
+# before the on-chain tests, or the embedded-vk proofs will fail to verify.
 #
 # Requirements: circom 2.x, node, and the npm deps (circomlib, snarkjs) installed
 # via `npm install` in this directory.

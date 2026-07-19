@@ -89,10 +89,10 @@ solana program deploy \
 #    circuits/membership_final.zkey, circuits/membership_js/membership.wasm,
 #    circuits/artifacts/verification_key.json  (build with `bash circuits/build.sh`)
 
-# 4. run the soak (defaults target the running Surfpool + the built program id)
+# 4. run the soak (it auto-deploys if missing and defaults --program-id to the
+#    built keypair's pubkey, so a fresh clone needs no id passed)
 cargo run -p mirror-soak -- \
   --rpc-url http://127.0.0.1:8899 \
-  --program-id 7vUgz7eMA2HD1DrTrKp3YWvUgpmyyrab8ogmnfdHhuve \
   --epoch-slots 64 --k-floor 3
 ```
 
@@ -160,14 +160,14 @@ encrypted note blobs).
 | PASS | both input nullifier PDAs created (anti-replay) | nf0=2XaYECkreoWRk6b1oggeb7m6NsefU5NE9f5irWFoA2E6 nf1=CpAhAPmG1B7buFMhowk3pCh8VszbJiosRHQicm4cm8gY both program-owned + spent |
 | PASS | shield publicAmount encodes the deposit magnitude (public deposit) | publicAmount=000000000000000000000000000000000000000000000000000000001dcd6500 |
 | PASS | shield replay rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x3: 7 log messages: Program ComputeBudget111111111111111111111111111111 invoke [1] Program Comput |
-| PASS | Alice scan recovered a SPENDABLE note from the enc blobs | recovered note /Users/marcelofeitoza/Development/solana/cloak/extra/noise-bounty-claude/mirror-pool/.soak/notes-value/value-28c794b627ef7973b8737cd27f2564d0f1fceca3b1f9fb11dcc6155a125604ff.json (spendable=true) |
+| PASS | Alice scan recovered a SPENDABLE note from the enc blobs | recovered note .soak/notes-value/value-28c794b627ef7973b8737cd27f2564d0f1fceca3b1f9fb11dcc6155a125604ff.json (spendable=true) |
 | PASS | transfer carries NO cleartext amount (publicAmount == 0) | publicAmount=0000000000000000000000000000000000000000000000000000000000000000 |
 | PASS | on-chain Transact bytes carry a zeroed publicAmount for the transfer | transact_data[1..33] (publicAmount) is 32 zero bytes |
 | PASS | mutated public input rejected (ProofVerificationFailed) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0xc: 11 log messages: Program ComputeBudget111111111111111111111111111111 invoke [1] Program Compu |
 | PASS | transfer advanced the value root (2 new output commitments) | commitment_count 2->4, root changed |
 | PASS | transfer moved NO public lamports (vault unchanged) | vault 500890880 -> 500890880 |
 | PASS | transfer created new nullifier PDAs (input note spent) | nf0=3XXRMvuUGdZNHHPeBw5Ky798LjzHdCnN3f5QhVZXDkbx nf1=GF4sZMEoDirKpaBhdooevKP2GctGVv5AyWm4rUChYBfq both program-owned + spent |
-| PASS | Bob scan auto-discovered his payment note (recipient-directed) | recovered note /Users/marcelofeitoza/Development/solana/cloak/extra/noise-bounty-claude/mirror-pool/.soak/notes-value/value-28eeb3512c04468d96ee2fe83b0f4ec66b6b5182d3023dddc27f2e3bc37971f7.json (spendable=true) |
+| PASS | Bob scan auto-discovered his payment note (recipient-directed) | recovered note .soak/notes-value/value-28eeb3512c04468d96ee2fe83b0f4ec66b6b5182d3023dddc27f2e3bc37971f7.json (spendable=true) |
 | PASS | fresh recipient credited by the withdrawn amount | recipient kD68zh32B1d1ncEa7iitCSXrHFj4DixyhETaKKnNhBw credited 200000000 lamports (= withdraw 200000000) |
 | PASS | vault debited by exactly the withdrawn amount | vault debited 200000000 lamports |
 | PASS | unshield advanced the value root | commitment_count 4->6, root changed |
@@ -208,10 +208,10 @@ solana program deploy \
 #    circuits/transaction_final.zkey, circuits/transaction_js/transaction.wasm,
 #    circuits/artifacts/transaction_verification_key.json
 
-# 4. run the confidential-value soak against the fresh program id
+# 4. run the confidential-value soak against the id you just deployed
 cargo run -p mirror-soak --bin mirror-soak-value -- \
   --rpc-url http://127.0.0.1:8899 \
-  --program-id BDhUdkZeHrk1cNG2Yss6Z5jTMHEkqqvPiJJTAZSSmFti
+  --program-id "$(solana address -k .soak/keys/confidential-program.json)"
 ```
 
 Every run creates fresh pools (fresh relay authorities) and fresh wallets, so the run

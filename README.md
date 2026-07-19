@@ -71,10 +71,11 @@ honest against the tree.
 | Confidential soak | `crates/mirror-soak` | **Implemented** - live shield -> hidden-amount transfer -> unshield + fixed-denom + adversarial, 25/25 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
 
 "Implemented" means the component's core logic is complete and tested. The host
-workspace tests, 24 on-chain mollusk tests, `build-sbf`, and the live Surfpool
-soak (17/17 assertions) are all green. See the roadmap for future work
-(swap/stake-from-pool via CPI, the ZK-path anonymity-mining incentive, and a
-production multi-party trusted-setup ceremony; the current setup is dev/test).
+workspace tests, 42 on-chain mollusk tests, `build-sbf`, and the two live Surfpool
+soaks (behavioral 17/17 + confidential 25/25 on-chain assertions) are all green.
+See the roadmap for future work (swap/stake-from-pool via CPI, confidential
+deposits, the ZK-path anonymity-mining incentive, and production multi-party
+trusted-setup ceremonies; the current setups are dev/test).
 
 ---
 
@@ -172,26 +173,27 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
 
 **What mirror-pool does NOT do (explicit non-goals)**
 
-- **It does not hide funds, amounts, or balances.** The action, its size class,
-  and its on-chain effects are public by design. This is behavioral obscurity,
-  not a mixer and not confidential transfers.
-- **It does not provide value-transfer privacy or unlinkable payments.** It
-  anonymizes *who initiated a shared action*, not *who paid whom*.
+- **The behavioral pool does not hide amounts or balances.** In the crowd and
+  ZK-deniable paths, the action, its size class, and its on-chain effects are
+  public by design; that layer is behavioral obscurity, not a mixer. (The
+  optional confidential-value layer *does* hide amounts, via the JoinSplit
+  `Transact`; see the status table and `docs/ARCHITECTURE.md`. The public
+  deposit/withdraw magnitude and the pool TVL remain visible even there.)
+- **The behavioral pool does not provide value-transfer privacy or unlinkable
+  payments.** It anonymizes *who initiated a shared action*, not *who paid whom*.
 - **It does not manufacture anonymity from operator-owned cover traffic.**
   Decoys the operator controls inflate the nominal count and add zero real
   anonymity to anyone who clusters the operator; they are excluded from
   `real_k`. A pool with real `k=1` provides no anonymity regardless of nominal
   size.
-- **ZK-deniable initiation is landing, not yet complete.** Until the Groth16
-  membership proof is wired into settlement, the commit-reveal path hides the
-  initiator within the epoch but does not cryptographically prove membership, so
-  the settle authority is trusted not to fabricate participants. Closing that
-  with an on-chain membership proof is core scope, not optional; see
-  `docs/ROADMAP.md`.
+- **The trusted setups are dev/test, not a real ceremony.** Both Groth16
+  circuits (membership and the confidential JoinSplit) use a single-contributor
+  dev setup. The committed verifying keys and fixtures verify and the on-chain
+  program embeds them, but a production multi-party ceremony is future work
+  (`docs/ROADMAP.md`).
 - **It is not a Sybil oracle.** Real k-anonymity assumes participants are
-  economically distinct. Without a per-identity entry cost an attacker can fill a
-  round and reduce the real set to one; Sybil resistance is a first-class
-  roadmap item, not a solved property.
+  economically distinct. The per-identity entry-fee cost raises the price of
+  flooding a round, but Sybil resistance is not a solved property.
 - **Not audited, not production-deployed.** This is a bounty-stage research
   implementation. Do not rely on it to protect real activity.
 
