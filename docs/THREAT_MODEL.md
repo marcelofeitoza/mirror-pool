@@ -395,6 +395,23 @@ in two concrete ways, and we ship the tools to falsify it:
    operator's published fee-payer and cover-wallet disclosures. If the recomputed
    real k is below what the pool reported, the report was false.
 
+`real_k` is a count (nominal minus known operator/Sybil decoys). It is
+complemented by an information-theoretic **effective** anonymity-set size that
+measures how much anonymity a *partitioning* adversary actually leaves, on the
+axis the empirical literature made memorable: the Serjantov-Danezis effective set
+`2^H(p)` and the min-entropy (worst-case) set `1 / max_i p_i` over the
+distribution `p` an adversary assigns after clustering committers by funding
+provenance (plus the timing / amount / fingerprint channels). `crates/mirror-harness`
+prints this table alongside the attack table: a naive pool advertising k=32 has an
+effective set of about 7.5 (worst case 1) under funding-provenance partitioning,
+while mirror-pool keeps it at 32 because the shielded funding path breaks the
+partition and shared-epoch batching zeroes the behavioral channels. It also shows
+the Sybil-dominance case where the effective set collapses to `real_k`, making the
+`excluded` subtraction an information-theoretic result rather than a bare
+assertion. This is a model (synthetic populations, a modeled Zipf common-funder
+distribution); the details, the full table, and its honest limits are in
+[`EFFECTIVE_K.md`](EFFECTIVE_K.md).
+
 We publish real k per epoch. We never publish nominal as if it were anonymity. The
 unit test `real_k_excludes_sybils` in `crates/mirror-core/src/lib.rs` pins this: a
 nominal set of 100 with 91 excluded is real_k = 9, which does not meet a k_floor of

@@ -10,12 +10,19 @@
 //! same attacks, mirroring the Python simulator's loader.
 
 use anyhow::{ensure, Result};
-use mirror_harness::{run_suite, AttackReport, SuiteResult, DEFAULT_SEED};
+use mirror_harness::effective_k::{effective_k_under_sybils, run_effective_k, Channel, EffectiveK};
+use mirror_harness::{
+    run_suite, AttackReport, Population, PopulationConfig, Scenario, SuiteResult, DEFAULT_SEED,
+};
 
 /// At least 2000 synthetic participants per (scenario, k); 2048 divides
 /// evenly into batches for every k below.
 const N_PARTICIPANTS: usize = 2048;
 const KS: [usize; 3] = [4, 8, 16];
+/// Nominal set sizes for the effective-k table. Larger than the attack-table
+/// `KS` so the effective-vs-nominal gap is legible (a pool advertising k=16/32/64
+/// is the interesting regime for the "advertised != effective" claim).
+const KS_EFFECTIVE: [usize; 3] = [16, 32, 64];
 
 fn pct(x: f64) -> String {
     format!("{:6.2}%", 100.0 * x)
@@ -57,6 +64,132 @@ fn find(reports: &[AttackReport], name: &str) -> Option<AttackReport> {
     SuiteResult::report(reports, name)
 }
 
+/// Ratio of effective to nominal, as a percentage (100% = the advertised set is
+/// fully real; a small value is a large overstatement).
+fn retained(eff: &EffectiveK) -> String {
+    format!(
+        "{:5.1}%",
+        100.0 * eff.shannon_effective_k / eff.nominal_k as f64
+    )
+}
+
+fn print_effective_row(label: &str, eff: &EffectiveK) {
+    println!(
+        "{:<11} {:>9} {:>13.2} {:>13.2} {:>11.2} {:>11}   {:>8}",
+        label,
+        eff.nominal_k,
+        eff.shannon_effective_k,
+        eff.min_entropy_k,
+        eff.worst_case_k,
+        eff.dominant_class_size,
+        retained(eff),
+    );
+}
+
+/// The effective-k table: nominal vs Serjantov-Danezis Shannon-effective vs
+/// min-entropy (worst-case), Baseline vs MirrorPool, at several nominal k.
+fn print_effective_k_section() {
+    println!("=================================================================================");
+    println!("EFFECTIVE anonymity-set size (information-theoretic; Serjantov-Danezis 2002)");
+    println!("=================================================================================");
+    println!(
+        "Effective set = 2^H(p) over the candidate initiators an adversary is left with, where"
+    );
+    println!(
+        "H is Shannon entropy; min-entropy set = 1/max_i p_i (the attacker's single best guess)."
+    );
+    println!(
+        "Dominant leak modeled: funding-provenance partitioning (a few common funders cluster the"
+    );
+    println!(
+        "committers), plus the timing / amount / fingerprint channels the attack battery models."
+    );
+    println!(
+        "Baseline funds from clustered sources and settles per-actor; MirrorPool funds via the"
+    );
+    println!(
+        "shielded path (provenance broken) and settles one shared-epoch batch (timing/amount/fee"
+    );
+    println!("normalized), so its behavioral channels carry zero variance. MODEL, not a live-pool");
+    println!("measurement (see docs/EFFECTIVE_K.md).");
+    println!();
+
+    // (a) Provenance ALONE: directly comparable to the marquee "advertised k
+    // shrinks to a small effective k (worst-case 1)" result.
+    println!("(a) Funding-provenance channel ALONE (the dominant real leak):");
+    println!("{}", "-".repeat(81));
+    println!(
+        "{:<11} {:>9} {:>13} {:>13} {:>11} {:>11}   {:>8}",
+        "scenario", "nominal", "shannon-eff", "min-entropy", "worst", "dom-class", "retained"
+    );
+    for &k in &KS_EFFECTIVE {
+        let (base, mirror) = run_effective_k(
+            k,
+            N_PARTICIPANTS,
+            DEFAULT_SEED,
+            &[Channel::FundingProvenance],
+        );
+        print_effective_row("Baseline", &base);
+        print_effective_row("MirrorPool", &mirror);
+    }
+    println!();
+
+    // (b) Every channel: provenance + timing + amount + fingerprint composed.
+    println!("(b) All channels (provenance + timing + amount + fingerprint):");
+    println!("{}", "-".repeat(81));
+    println!(
+        "{:<11} {:>9} {:>13} {:>13} {:>11} {:>11}   {:>8}",
+        "scenario", "nominal", "shannon-eff", "min-entropy", "worst", "dom-class", "retained"
+    );
+    for &k in &KS_EFFECTIVE {
+        let (base, mirror) = run_effective_k(k, N_PARTICIPANTS, DEFAULT_SEED, &Channel::ALL);
+        print_effective_row("Baseline", &base);
+        print_effective_row("MirrorPool", &mirror);
+    }
+    println!();
+
+    // (c) Sybil dominance: the concrete inflated-nominal case. Shows the metric
+    // is live (effective-k drops to real_k), fixing the excluded=0 gap.
+    println!("(c) Sybil dominance (75% of the nominal set is attacker-owned decoy traffic):");
+    println!("{}", "-".repeat(81));
+    println!(
+        "an adversary that owns the decoys removes them, so effective-k collapses to real_k ="
+    );
+    println!("nominal - excluded. This is KAnon's honest subtraction, measured information-theoretically.");
+    for &k in &KS_EFFECTIVE {
+        let mirror = Population::generate(&PopulationConfig {
+            n_participants: N_PARTICIPANTS,
+            k,
+            seed: DEFAULT_SEED,
+            scenario: Scenario::MirrorPool,
+        });
+        let (eff, kanon) = effective_k_under_sybils(&mirror, 0.75, DEFAULT_SEED);
+        println!(
+            "  nominal k={:<3} excluded={:<3} -> real_k={:<3} | effective-k (shannon) = {:.2}",
+            kanon.nominal,
+            kanon.excluded,
+            kanon.real_k(),
+            eff.shannon_effective_k,
+        );
+    }
+    println!();
+
+    println!("headline (funding-provenance shrinkage, the empirical marquee result):");
+    for &k in &KS_EFFECTIVE {
+        let (base, mirror) = run_effective_k(
+            k,
+            N_PARTICIPANTS,
+            DEFAULT_SEED,
+            &[Channel::FundingProvenance],
+        );
+        println!(
+            "  k={k:<3} advertised  ->  Baseline effective {:.1} (worst-case {:.0})  vs  \
+             MirrorPool effective {:.1}",
+            base.shannon_effective_k, base.worst_case_k, mirror.shannon_effective_k,
+        );
+    }
+}
+
 fn main() -> Result<()> {
     println!("mirror-harness: adversarial evaluation, Baseline vs MirrorPool");
     println!(
@@ -93,5 +226,8 @@ fn main() -> Result<()> {
             pp(mirror),
         );
     }
+
+    println!();
+    print_effective_k_section();
     Ok(())
 }

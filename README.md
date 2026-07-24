@@ -73,7 +73,7 @@ honest against the tree.
 | Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` (circomlib Poseidon, cross-check-proven against the circuit), `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
 | On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification. 42 mollusk tests; `build-sbf` green; deployed + exercised on public devnet. |
 | ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and executes to a fresh output. A real proof verifies on-chain (fixture test) and live in the soak. |
-| Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. |
+| Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. Also prints an information-theoretic effective-k table (Serjantov-Danezis `2^H(p)` + min-entropy) under funding-provenance partitioning; see [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md). |
 | Gasless coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window batching, `k_floor` gate, rotating fee-payer, and real atomic crowd settlement (ComputeBudget + `SettleEpoch` + N participant behaviors, shared accounts in an ALT). |
 | Participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool` / `commit` / `deposit-commit` / `prove` (rebuilds the path + generates and verifies a Groth16 proof via snarkjs) / `status`. |
 | Pooled behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + pooled-action adapters: PlainTransfer (soak baseline), Jupiter swap, jitoSOL stake. |
@@ -222,6 +222,10 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) - what is built and what is future work.
 - [`docs/INCENTIVES.md`](docs/INCENTIVES.md) - the entry-fee split, the crowd-path
   dwell reward, honest real-k, and the anonymity-preserving ZK-path incentive design.
+- [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md) - the information-theoretic effective
+  anonymity-set size (Serjantov-Danezis `2^H(p)` + min-entropy): advertised k is
+  not effective k. A naive pool advertising k=32 has effective k ~7.5 (worst-case
+  1) under funding-provenance partitioning; mirror-pool keeps it at 32.
 - [`docs/PROOF.md`](docs/PROOF.md) - the live Surfpool soak: both paths + the
   adversarial cases, with transaction signatures and on-chain assertions.
 

@@ -57,6 +57,12 @@ use mirror_core::{Epoch, EpochSchedule, KAnon, SizeBucket};
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
+/// Information-theoretic effective anonymity-set size (Serjantov-Danezis 2002):
+/// nominal `k` vs the effective `2^H(p)` and min-entropy sizes an adversary
+/// leaves after partitioning by funding provenance and the behavioral channels.
+/// This is the answer to "advertised k != effective k"; see the module docs.
+pub mod effective_k;
+
 /// Fixed default seed so every run of the harness reproduces byte-identical
 /// numbers. Never replace this with wall-clock entropy: reviewers must be able
 /// to re-derive the published table.
