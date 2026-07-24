@@ -368,7 +368,9 @@ fn transact_pipeline_generates_and_verifies_real_proof() {
 
     let opts = TransactProveOpts {
         snarkjs: "snarkjs".to_string(),
+        use_snarkjs: true,
         wasm: root.join("circuits/transaction_js/transaction.wasm"),
+        r1cs: root.join("circuits/transaction.r1cs"),
         zkey: root.join("circuits/transaction_final.zkey"),
         vk: root.join("circuits/artifacts/transaction_verification_key.json"),
         work_dir: Some(std::env::temp_dir().join("mirror-cli-transact-live-test")),
@@ -396,6 +398,110 @@ fn transact_pipeline_generates_and_verifies_real_proof() {
     assert_eq!(
         data.len(),
         1 + mirror_core::wire::TRANSACT_HEADER_LEN + 4 + 48 + 48
+    );
+}
+
+/// The committed on-chain TRANSACTION verifying key (byte-for-byte the one
+/// `programs/mirror-pool/src/transaction_vk.rs` embeds), so the test can run the
+/// EXACT on-chain Groth16 verifier over a Rust-generated transaction proof.
+mod committed_tx_vk {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../circuits/artifacts/transaction_vk.rs"
+    ));
+}
+
+/// DECISIVE end-to-end check for the in-process (Node-free) transaction prover:
+/// prove the committed TRANSFER witness entirely in Rust (`ark-circom` +
+/// `ark-groth16`, no snarkjs), then confirm the emitted `groth16-solana` proof
+/// bytes + 7 public inputs are accepted by the SAME on-chain `Groth16Verifier` +
+/// committed transaction verifying key the program runs.
+///
+/// Gated behind MIRROR_PROVE_LIVE=1 + #[ignore] because it needs the gitignored
+/// transaction r1cs/wasm/zkey (`bash circuits/build_transaction.sh`), NOT because it
+/// needs Node - this path spawns none. Run with:
+///   MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored rust_transact
+#[test]
+#[ignore = "requires the built transaction r1cs/wasm/zkey; set MIRROR_PROVE_LIVE=1"]
+fn rust_transact_pipeline_verifies_and_on_chain_verifier_accepts() {
+    use groth16_solana::groth16::Groth16Verifier;
+
+    if std::env::var("MIRROR_PROVE_LIVE").ok().as_deref() != Some("1") {
+        eprintln!("MIRROR_PROVE_LIVE != 1; skipping live Rust transact test");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    // Reproduce the committed TRANSFER witness (2 real inputs, publicAmount 0).
+    let alice = ValueKeypair::from_private_key(dec("100000000000000000000000000000000001"));
+    let bob = ValueKeypair::from_private_key(dec("200000000000000000000000000000000002"));
+    let in0 = Note::new(30, alice.public_key(), fe(31));
+    let in1 = Note::new(20, alice.public_key(), fe(32));
+    let mtree = tree::SparseMerkle::from_leaves(tree::DEPTH, &[in0.commitment(), in1.commitment()]);
+    let p0 = mtree.path(0);
+    let p1 = mtree.path(1);
+    let witness = TransactWitness {
+        inputs: [
+            ValueInput {
+                note: in0,
+                keypair: alice,
+                leaf_index: 0,
+                path_elements: p0.elements,
+            },
+            ValueInput {
+                note: in1,
+                keypair: alice,
+                leaf_index: 1,
+                path_elements: p1.elements,
+            },
+        ],
+        outputs: [
+            Note::new(35, bob.public_key(), fe(41)),
+            Note::new(15, alice.public_key(), fe(42)),
+        ],
+        signed_amount: SignedAmount::Transfer,
+        root: p0.root,
+        ext: ExtData {
+            recipient: recipient(),
+            relayer: relayer(),
+            fee: 0,
+            enc0: payload(3),
+            enc1: payload(4),
+        },
+    };
+
+    // Prove entirely in Rust (default path; use_snarkjs = false).
+    let opts = TransactProveOpts {
+        snarkjs: "snarkjs".to_string(),
+        use_snarkjs: false,
+        wasm: root.join("circuits/transaction_js/transaction.wasm"),
+        r1cs: root.join("circuits/transaction.r1cs"),
+        zkey: root.join("circuits/transaction_final.zkey"),
+        vk: root.join("circuits/artifacts/transaction_verification_key.json"),
+        work_dir: None,
+    };
+    let proof = prove_transact(&witness, &opts)
+        .expect("in-process Rust proving must succeed and ark-verify the transfer");
+
+    // DECISIVE: the EXACT on-chain verifier + committed transaction vk accepts it.
+    // groth16-solana public inputs are in the circuit-declaration order the
+    // witness's public_inputs() already produces.
+    let public_inputs: [[u8; 32]; 7] = witness.public_inputs();
+    let mut verifier = Groth16Verifier::new(
+        &proof.proof_a,
+        &proof.proof_b,
+        &proof.proof_c,
+        &public_inputs,
+        &committed_tx_vk::VERIFYINGKEY,
+    )
+    .expect("verifier construction");
+    verifier.verify().expect(
+        "on-chain groth16-solana verifier must ACCEPT the Rust-generated transaction proof",
     );
 }
 

@@ -30,6 +30,26 @@ num-bigint = "0.4"
 # value-keygen wallet. Host-side only (the CLI never runs in the SBF program).
 rand.workspace = true
 
+# In-process, pure-Rust Groth16 proving for the membership circuit (no Node/snarkjs
+# on the default `prove` path). `ark-circom` 0.5 loads the SAME circom build
+# artifacts snarkjs uses (the compiled `.wasm` witness calculator, run in-process by
+# the pure-Rust `wasmer` VM, and the `.zkey` proving key via `read_zkey`), builds the
+# witness from typed Rust inputs, and `ark-groth16` produces a proof over
+# `ark-bn254`. The proving key is read from the SAME committed `.zkey` the on-chain
+# verifying key (src/vk.rs) was derived from, so the proof verifies against the
+# unchanged committed vk. Pinned to arkworks 0.5 to match mirror-core's
+# light-poseidon 0.4 -> ark-bn254/ark-ff 0.5, so the `Fr`/`Fq` types agree repo-wide.
+ark-circom = "0.5"
+ark-groth16 = "0.5"
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+ark-snark = "0.5"
+# ark-circom's `wasmer-wasix` witness runtime constructs a WASI stdin handle that
+# calls `tokio::runtime::Handle::current()`, so the witness calculation must run
+# inside a Tokio runtime CONTEXT (no reactor driving needed - nothing reads stdin).
+# We enter a lightweight current-thread runtime around the in-process proof.
+tokio.workspace = true
+
 # Split Solana client + transaction crates, pinned to the SAME majors the on-chain
 # program and the sibling host crates link (solana-pubkey v4, solana-instruction
 # v3, solana-keypair/signer v3, solana-rpc-client v4) so Pubkey / Instruction /
@@ -48,3 +68,9 @@ solana-commitment-config = "3"
 # Blocking JSON-RPC client (no async runtime in the CLI); talks to the local
 # Surfpool mainnet mirror at http://127.0.0.1:8899 by default.
 solana-rpc-client = "4"
+
+[dev-dependencies]
+# The SAME on-chain Groth16 verifier the program embeds (programs/mirror-pool), used
+# in tests to prove the Rust-generated SettleZk proof bytes are accepted by the exact
+# verifier + committed verifying key the program runs, not merely by ark-groth16.
+groth16-solana = "0.2.0"

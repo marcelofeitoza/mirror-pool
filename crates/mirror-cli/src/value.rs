@@ -232,24 +232,57 @@ impl TransactWitness {
     }
 }
 
-/// snarkjs invocation + artifact paths for proving a Transact.
+/// Artifact paths (+ optional snarkjs fallback) for proving a Transact.
 pub struct TransactProveOpts {
+    /// snarkjs invocation (only used by the `--use-snarkjs` fallback).
     pub snarkjs: String,
+    /// Use the legacy snarkjs shell-out instead of the default in-process Rust
+    /// prover. The default (false) spawns NO Node process.
+    pub use_snarkjs: bool,
     pub wasm: PathBuf,
+    /// Compiled R1CS (gitignored build output), needed by the in-process Rust prover.
+    pub r1cs: PathBuf,
     pub zkey: PathBuf,
     pub vk: PathBuf,
     pub work_dir: Option<PathBuf>,
 }
 
-/// Generate + VERIFY the Groth16 proof for `witness` with snarkjs, cross-check the
-/// public signals, and return the proof in the `groth16-solana` byte layout
-/// (`proof_a` already negated). Fails loudly if snarkjs does not confirm the proof.
+/// Generate + VERIFY the Groth16 proof for `witness`, cross-check the public
+/// signals, and return the proof in the `groth16-solana` byte layout (`proof_a`
+/// already negated). Fails loudly if the proof does not verify.
+///
+/// Default: in-process pure Rust (`ark-circom` + `ark-groth16`), spawning NO Node
+/// process. Fallback (`--use-snarkjs`): shell out to `snarkjs groth16 fullprove`.
 pub fn prove_transact(
     witness: &TransactWitness,
     opts: &TransactProveOpts,
 ) -> Result<groth16::ProofBytes> {
     witness.check_balanced()?;
+    if opts.use_snarkjs {
+        prove_transact_snarkjs(witness, opts)
+    } else {
+        // In-process Rust proving. `prove_rust::prove` computes the witness by
+        // running the compiled transaction.wasm under wasmer, reads the proving key
+        // from transaction_final.zkey, proves + verifies with ark-groth16, and
+        // cross-checks the circuit's 7 public signals against the witness's.
+        crate::prove_rust::prove(
+            &crate::prove_rust::Artifacts {
+                wasm: &opts.wasm,
+                r1cs: &opts.r1cs,
+                zkey: &opts.zkey,
+            },
+            &witness.to_input_json(),
+            &witness.public_inputs(),
+        )
+        .context("in-process Rust Groth16 proving (transaction circuit)")
+    }
+}
 
+/// Legacy fallback: shell out to snarkjs `groth16 fullprove` + `verify` (needs Node).
+fn prove_transact_snarkjs(
+    witness: &TransactWitness,
+    opts: &TransactProveOpts,
+) -> Result<groth16::ProofBytes> {
     let work_dir = match &opts.work_dir {
         Some(d) => d.clone(),
         None => std::env::temp_dir().join(format!(

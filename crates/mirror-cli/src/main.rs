@@ -34,6 +34,7 @@ mod chain;
 mod groth16;
 mod note;
 mod prove;
+mod prove_rust;
 mod tree;
 mod util;
 mod value;
@@ -69,6 +70,7 @@ const DEFAULT_NOTE_DIR: &str = "notes";
 /// Default transaction-circuit artifacts (gitignored build outputs of
 /// `bash circuits/build_transaction.sh`).
 const DEFAULT_TX_WASM: &str = "circuits/transaction_js/transaction.wasm";
+const DEFAULT_TX_R1CS: &str = "circuits/transaction.r1cs";
 const DEFAULT_TX_ZKEY: &str = "circuits/transaction_final.zkey";
 const DEFAULT_TX_VK: &str = "circuits/artifacts/transaction_verification_key.json";
 
@@ -110,22 +112,34 @@ enum Command {
     Scan(ScanArgs),
 }
 
-/// Shared snarkjs + transaction-circuit artifact arguments for the value commands.
+/// Shared transaction-circuit artifact arguments for the value commands. Proving is
+/// in-process pure Rust by default; `--use-snarkjs` selects the Node fallback.
 #[derive(Args)]
 struct TxProveArgs {
     /// Circuit witness generator (gitignored; `bash circuits/build_transaction.sh`).
     #[arg(long, default_value = DEFAULT_TX_WASM)]
     wasm: PathBuf,
+    /// Compiled R1CS (gitignored; `bash circuits/build_transaction.sh`). Used by the
+    /// default in-process Rust prover.
+    #[arg(long, default_value = DEFAULT_TX_R1CS)]
+    r1cs: PathBuf,
     /// Groth16 proving key (gitignored; `bash circuits/build_transaction.sh`).
     #[arg(long, default_value = DEFAULT_TX_ZKEY)]
     zkey: PathBuf,
-    /// Groth16 verification key (committed under circuits/artifacts/).
+    /// Groth16 verification key (committed under circuits/artifacts/). Only used by
+    /// the `--use-snarkjs` fallback.
     #[arg(long, default_value = DEFAULT_TX_VK)]
     vk: PathBuf,
-    /// snarkjs invocation (default `snarkjs`; `node <dir>/cli.cjs` also works).
+    /// Use the legacy snarkjs shell-out (needs Node) instead of the default
+    /// in-process Rust prover. The default path spawns NO Node process.
+    #[arg(long)]
+    use_snarkjs: bool,
+    /// snarkjs invocation (default `snarkjs`; `node <dir>/cli.cjs` also works). Only
+    /// used with `--use-snarkjs`.
     #[arg(long, default_value = "snarkjs")]
     snarkjs: String,
-    /// Directory for input.json/proof.json/public.json (default: a temp dir).
+    /// Directory for input.json/proof.json/public.json (snarkjs path only; default:
+    /// a temp dir).
     #[arg(long)]
     work_dir: Option<PathBuf>,
     /// Also write the emitted Transact bundle (JSON) to this path.
@@ -137,7 +151,9 @@ impl TxProveArgs {
     fn to_opts(&self) -> value::TransactProveOpts {
         value::TransactProveOpts {
             snarkjs: self.snarkjs.clone(),
+            use_snarkjs: self.use_snarkjs,
             wasm: self.wasm.clone(),
+            r1cs: self.r1cs.clone(),
             zkey: self.zkey.clone(),
             vk: self.vk.clone(),
             work_dir: self.work_dir.clone(),
@@ -393,20 +409,31 @@ struct ProveArgs {
     /// Circuit witness generator (gitignored; produced by `bash circuits/build.sh`).
     #[arg(long, default_value = "circuits/membership_js/membership.wasm")]
     wasm: PathBuf,
+    /// Compiled R1CS (gitignored; produced by `bash circuits/build.sh`). Used by the
+    /// default in-process Rust prover.
+    #[arg(long, default_value = "circuits/membership.r1cs")]
+    r1cs: PathBuf,
     /// Groth16 proving key (gitignored; produced by `bash circuits/build.sh`).
     #[arg(long, default_value = "circuits/membership_final.zkey")]
     zkey: PathBuf,
-    /// Groth16 verification key (committed under circuits/artifacts/).
+    /// Groth16 verification key (committed under circuits/artifacts/). Only used by
+    /// the `--use-snarkjs` fallback.
     #[arg(long, default_value = "circuits/artifacts/verification_key.json")]
     vk: PathBuf,
-    /// snarkjs invocation (default `snarkjs`; `node <dir>/cli.cjs` also works).
+    /// Use the legacy snarkjs shell-out (needs Node) instead of the default
+    /// in-process Rust prover. The default path spawns NO Node process.
+    #[arg(long)]
+    use_snarkjs: bool,
+    /// snarkjs invocation (default `snarkjs`; `node <dir>/cli.cjs` also works). Only
+    /// used with `--use-snarkjs`.
     #[arg(long, default_value = "snarkjs")]
     snarkjs: String,
     /// Optional full leaf set (hex, one per line) to rebuild the whole tree and
     /// prove against the CURRENT root instead of the note's frontier snapshot.
     #[arg(long)]
     leaves: Option<PathBuf>,
-    /// Directory for input.json/proof.json/public.json (default: a temp dir).
+    /// Directory for input.json/proof.json/public.json (snarkjs path only; default:
+    /// a temp dir).
     #[arg(long)]
     work_dir: Option<PathBuf>,
     /// Also write the emitted SettleZk bundle (JSON) to this path.
@@ -715,19 +742,26 @@ fn run_deposit_commit(args: DepositCommitArgs) -> Result<()> {
 }
 
 fn run_prove(args: ProveArgs) -> Result<()> {
+    let use_snarkjs = args.use_snarkjs;
     let emit = prove::run(prove::ProveOpts {
         note_path: args.note,
         rpc_url: args.rpc_url,
         wasm: args.wasm,
+        r1cs: args.r1cs,
         zkey: args.zkey,
         vk: args.vk,
         snarkjs: args.snarkjs,
+        use_snarkjs,
         leaves: args.leaves,
         work_dir: args.work_dir,
         out: args.out,
     })?;
 
-    println!("proof generated and VERIFIED by snarkjs.");
+    if use_snarkjs {
+        println!("proof generated and VERIFIED by snarkjs (fallback path).");
+    } else {
+        println!("proof generated and VERIFIED in-process (pure Rust; no Node process).");
+    }
     println!();
     println!("SettleZk instruction (submit from the pool authority / rotating coordinator):");
     println!("  program_id:     {}", emit.program_id);

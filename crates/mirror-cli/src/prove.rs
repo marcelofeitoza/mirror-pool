@@ -8,13 +8,16 @@
 //! 2. Rebuild the Merkle inclusion path off-chain (walk the frontier snapshot the
 //!    note captured at commit time, or rebuild the whole tree from `--leaves`) and
 //!    confirm the resulting root is a root the Pool currently accepts.
-//! 3. Generate the Groth16 proof by shelling out to snarkjs against the built
-//!    `membership.wasm` + `membership_final.zkey`, then VERIFY it with
-//!    `snarkjs groth16 verify` and fail loudly if it does not verify.
+//! 3. Generate the Groth16 proof IN-PROCESS in pure Rust (the default) via
+//!    [`crate::prove_rust`]: `ark-circom` runs the compiled `membership.wasm`
+//!    witness calculator under the `wasmer` VM, reads the proving key from
+//!    `membership_final.zkey`, and `ark-groth16` produces + verifies the proof - no
+//!    Node/snarkjs process is spawned. A `--use-snarkjs` fallback still shells out
+//!    to `snarkjs groth16 fullprove` + `verify` for parity checks.
 //! 4. Serialize the proof + public inputs into the exact `SettleZk` instruction
 //!    data (proof_a pre-negated) and emit it for the relay/coordinator to submit.
 //!
-//! The circuit artifacts (`membership_js/membership.wasm`,
+//! The circuit artifacts (`membership.r1cs`, `membership_js/membership.wasm`,
 //! `membership_final.zkey`) are gitignored build outputs; the user must run
 //! `bash circuits/build.sh` once (after `npm install` in `circuits/`) to produce
 //! them. `prove` never submits `SettleZk`: settlement is paid for and signed by
@@ -40,14 +43,21 @@ pub struct ProveOpts {
     pub note_path: PathBuf,
     pub rpc_url: String,
     pub wasm: PathBuf,
+    /// Compiled R1CS (gitignored build output), needed by the in-process Rust prover.
+    pub r1cs: PathBuf,
     pub zkey: PathBuf,
     pub vk: PathBuf,
     /// snarkjs invocation (default `snarkjs`; e.g. `node <dir>/cli.cjs` also works).
+    /// Only used by the `--use-snarkjs` fallback path.
     pub snarkjs: String,
+    /// Use the legacy snarkjs shell-out instead of the default in-process Rust
+    /// prover. The default (false) spawns NO Node process.
+    pub use_snarkjs: bool,
     /// Optional full leaf set (hex, one per line) to rebuild the whole tree and
     /// prove against the CURRENT root instead of the note's frontier snapshot.
     pub leaves: Option<PathBuf>,
-    /// Where to write input.json / proof.json / public.json (default: a temp dir).
+    /// Where to write input.json / proof.json / public.json (snarkjs path only;
+    /// default: a temp dir).
     pub work_dir: Option<PathBuf>,
     /// Optional path to also write the emitted `SettleZk` JSON to.
     pub out: Option<PathBuf>,
@@ -138,51 +148,29 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
         );
     }
 
-    // (3) Generate + verify the Groth16 proof via snarkjs.
-    let work_dir = match &opts.work_dir {
-        Some(d) => d.clone(),
-        None => std::env::temp_dir().join(format!("mirror-cli-prove-{}", note.commitment_hex)),
+    // (3) Generate + verify the Groth16 proof. Default: in-process pure Rust
+    // (no Node process). Fallback: shell out to snarkjs behind `--use-snarkjs`.
+    let proof_bytes = if opts.use_snarkjs {
+        prove_with_snarkjs(
+            &opts,
+            &path,
+            &nullifier_hash,
+            &action_hash,
+            note.epoch,
+            &secret,
+        )?
+    } else {
+        prove_with_rust(
+            &opts,
+            &path,
+            &nullifier_hash,
+            &action_hash,
+            note.epoch,
+            &secret,
+        )?
     };
-    std::fs::create_dir_all(&work_dir)
-        .with_context(|| format!("creating work dir {}", work_dir.display()))?;
-
-    let input_path = work_dir.join("input.json");
-    write_input_json(
-        &input_path,
-        &path.root,
-        &nullifier_hash,
-        &action_hash,
-        note.epoch,
-        &secret.0,
-        &path,
-    )?;
-
-    let proof_path = work_dir.join("proof.json");
-    let public_path = work_dir.join("public.json");
-    run_fullprove(
-        &opts.snarkjs,
-        &input_path,
-        &opts.wasm,
-        &opts.zkey,
-        &proof_path,
-        &public_path,
-    )?;
-    verify_proof(&opts.snarkjs, &opts.vk, &public_path, &proof_path)?;
-
-    // Cross-check snarkjs's public signals against our computed public inputs.
-    cross_check_public(
-        &public_path,
-        &path.root,
-        &nullifier_hash,
-        &action_hash,
-        note.epoch,
-    )?;
 
     // (4) Serialize into SettleZk instruction data.
-    let proof_json = std::fs::read_to_string(&proof_path)
-        .with_context(|| format!("reading {}", proof_path.display()))?;
-    let proof = SnarkjsProof::parse(&proof_json)?;
-    let proof_bytes = proof.to_bytes()?;
     let data = groth16::settle_zk_data(
         note.epoch,
         amount,
@@ -287,6 +275,41 @@ fn read_leaves(path: &Path) -> Result<Vec<Hash32>> {
     Ok(leaves)
 }
 
+/// The circom `input.json` object for the membership circuit (decimal field
+/// elements), shared by the in-process Rust prover and the snarkjs fallback.
+fn membership_input_json(
+    root: &Hash32,
+    nullifier_hash: &Hash32,
+    action_hash: &Hash32,
+    epoch: u64,
+    secret: &Hash32,
+    merkle_path: &MerklePath,
+) -> serde_json::Value {
+    serde_json::json!({
+        "root": be32_to_decimal(root),
+        "nullifierHash": be32_to_decimal(nullifier_hash),
+        "actionHash": be32_to_decimal(action_hash),
+        "epoch": epoch.to_string(),
+        "secret": be32_to_decimal(secret),
+        "pathElements": merkle_path.elements.iter().map(be32_to_decimal).collect::<Vec<_>>(),
+        "pathIndices": merkle_path.indices.iter().map(|b| b.to_string()).collect::<Vec<_>>(),
+    })
+}
+
+/// The four membership public inputs, in circuit-declaration order
+/// `[root, nullifierHash, actionHash, epoch]`, each 32-byte big-endian. `epoch` is
+/// the big-endian encoding of the u64 (the value the proof commits to).
+fn membership_public_inputs(
+    root: &Hash32,
+    nullifier_hash: &Hash32,
+    action_hash: &Hash32,
+    epoch: u64,
+) -> [Hash32; 4] {
+    let mut epoch_be = [0u8; 32];
+    epoch_be[24..].copy_from_slice(&epoch.to_be_bytes());
+    [*root, *nullifier_hash, *action_hash, epoch_be]
+}
+
 fn write_input_json(
     path: &Path,
     root: &Hash32,
@@ -296,18 +319,96 @@ fn write_input_json(
     secret: &Hash32,
     merkle_path: &MerklePath,
 ) -> Result<()> {
-    let input = serde_json::json!({
-        "root": be32_to_decimal(root),
-        "nullifierHash": be32_to_decimal(nullifier_hash),
-        "actionHash": be32_to_decimal(action_hash),
-        "epoch": epoch.to_string(),
-        "secret": be32_to_decimal(secret),
-        "pathElements": merkle_path.elements.iter().map(be32_to_decimal).collect::<Vec<_>>(),
-        "pathIndices": merkle_path.indices.iter().map(|b| b.to_string()).collect::<Vec<_>>(),
-    });
+    let input = membership_input_json(
+        root,
+        nullifier_hash,
+        action_hash,
+        epoch,
+        secret,
+        merkle_path,
+    );
     std::fs::write(path, serde_json::to_string_pretty(&input)?)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// Default in-process proving path: build the proof with `ark-circom` +
+/// `ark-groth16`, spawning NO Node process.
+fn prove_with_rust(
+    opts: &ProveOpts,
+    path: &MerklePath,
+    nullifier_hash: &Hash32,
+    action_hash: &Hash32,
+    epoch: u64,
+    secret: &mirror_core::Secret,
+) -> Result<groth16::ProofBytes> {
+    let input = membership_input_json(
+        &path.root,
+        nullifier_hash,
+        action_hash,
+        epoch,
+        &secret.0,
+        path,
+    );
+    let expected = membership_public_inputs(&path.root, nullifier_hash, action_hash, epoch);
+    crate::prove_rust::prove(
+        &crate::prove_rust::Artifacts {
+            wasm: &opts.wasm,
+            r1cs: &opts.r1cs,
+            zkey: &opts.zkey,
+        },
+        &input,
+        &expected,
+    )
+    .context("in-process Rust Groth16 proving")
+}
+
+/// Legacy fallback: shell out to snarkjs `groth16 fullprove` + `verify` (needs
+/// Node). Behind `--use-snarkjs`; the default path is `prove_with_rust`.
+fn prove_with_snarkjs(
+    opts: &ProveOpts,
+    path: &MerklePath,
+    nullifier_hash: &Hash32,
+    action_hash: &Hash32,
+    epoch: u64,
+    secret: &mirror_core::Secret,
+) -> Result<groth16::ProofBytes> {
+    let work_dir = match &opts.work_dir {
+        Some(d) => d.clone(),
+        None => std::env::temp_dir().join(format!("mirror-cli-prove-{}", to_hex(&path.root))),
+    };
+    std::fs::create_dir_all(&work_dir)
+        .with_context(|| format!("creating work dir {}", work_dir.display()))?;
+
+    let input_path = work_dir.join("input.json");
+    write_input_json(
+        &input_path,
+        &path.root,
+        nullifier_hash,
+        action_hash,
+        epoch,
+        &secret.0,
+        path,
+    )?;
+
+    let proof_path = work_dir.join("proof.json");
+    let public_path = work_dir.join("public.json");
+    run_fullprove(
+        &opts.snarkjs,
+        &input_path,
+        &opts.wasm,
+        &opts.zkey,
+        &proof_path,
+        &public_path,
+    )?;
+    verify_proof(&opts.snarkjs, &opts.vk, &public_path, &proof_path)?;
+
+    // Cross-check snarkjs's public signals against our computed public inputs.
+    cross_check_public(&public_path, &path.root, nullifier_hash, action_hash, epoch)?;
+
+    let proof_json = std::fs::read_to_string(&proof_path)
+        .with_context(|| format!("reading {}", proof_path.display()))?;
+    SnarkjsProof::parse(&proof_json)?.to_bytes()
 }
 
 /// Split a snarkjs invocation string into `(program, prefix_args)`, so both
@@ -586,5 +687,132 @@ mod tests {
             &action_hash,
         );
         assert_eq!(data.len(), wire::SETTLE_ZK_LEN);
+    }
+
+    /// The committed on-chain verifying key (byte-for-byte the one the program
+    /// embeds in `programs/mirror-pool/src/vk.rs`), included so the test can run the
+    /// EXACT on-chain Groth16 verifier over a Rust-generated proof.
+    mod committed_vk {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/artifacts/vk.rs"
+        ));
+    }
+
+    /// DECISIVE end-to-end check for the in-process (Node-free) prover: generate a
+    /// membership proof entirely in Rust (`ark-circom` + `ark-groth16`, no snarkjs),
+    /// then confirm the emitted `groth16-solana` proof bytes + public inputs are
+    /// accepted by the SAME on-chain `Groth16Verifier` + committed verifying key the
+    /// program runs. `prove_rust::prove` also runs an internal `ark-groth16` verify
+    /// and bails on failure, so reaching the on-chain check means BOTH verifiers
+    /// accepted the Rust proof.
+    ///
+    /// Gated behind MIRROR_PROVE_LIVE=1 + #[ignore] because it needs the gitignored
+    /// r1cs/wasm/zkey (`bash circuits/build.sh`), NOT because it needs Node - this
+    /// path spawns no Node process. Run with:
+    ///   MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored rust_prove
+    #[test]
+    #[ignore = "requires the built r1cs/wasm/zkey (bash circuits/build.sh); set MIRROR_PROVE_LIVE=1"]
+    fn rust_prove_membership_verifies_and_on_chain_verifier_accepts() {
+        use groth16_solana::groth16::Groth16Verifier;
+
+        if std::env::var("MIRROR_PROVE_LIVE").ok().as_deref() != Some("1") {
+            eprintln!("MIRROR_PROVE_LIVE != 1; skipping live Rust prove test");
+            return;
+        }
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        // Reproduce the committed fixture witness (single leaf at index 21 in an
+        // otherwise-empty depth-20 tree), so the public signals also match the
+        // committed proof_fixture.json.
+        let secret = mirror_core::Secret::from_bytes(
+            groth16::to_be32("111122223333444455556666777788889999").unwrap(),
+        );
+        let mut recipient = [0u8; 32];
+        for (i, b) in recipient.iter_mut().enumerate() {
+            *b = (i + 1) as u8;
+        }
+        let amount: u64 = 250_000_000;
+        let epoch: u64 = 7;
+        let action_hash = transfer_action_hash(&recipient, amount);
+        let nullifier_hash = nullifier(&secret, Epoch(epoch)).0;
+        let leaf = commit_with_action_hash(&secret, &action_hash, Epoch(epoch)).0;
+
+        let zeros = tree::zero_ladder(tree::DEPTH);
+        let mut elements = Vec::with_capacity(tree::DEPTH);
+        let mut indices = Vec::with_capacity(tree::DEPTH);
+        for (level, zero) in zeros.iter().enumerate().take(tree::DEPTH) {
+            elements.push(*zero);
+            indices.push(((21u64 >> level) & 1) as u8);
+        }
+        let root = tree::verify_path(&leaf, &elements, &indices);
+        let path = MerklePath {
+            elements,
+            indices,
+            root,
+        };
+
+        // Cross-check the reproduced public signals against the committed fixture.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/artifacts/proof_fixture.json"
+        )))
+        .unwrap();
+        let ps = fixture["publicSignals"].as_array().unwrap();
+        assert_eq!(be32_to_decimal(&path.root), ps[0].as_str().unwrap());
+        assert_eq!(be32_to_decimal(&nullifier_hash), ps[1].as_str().unwrap());
+        assert_eq!(be32_to_decimal(&action_hash), ps[2].as_str().unwrap());
+
+        // Prove entirely in Rust (no Node). `prove_rust::prove` verifies with
+        // ark-groth16 internally and bails on failure.
+        let input = membership_input_json(
+            &path.root,
+            &nullifier_hash,
+            &action_hash,
+            epoch,
+            &secret.0,
+            &path,
+        );
+        let expected = membership_public_inputs(&path.root, &nullifier_hash, &action_hash, epoch);
+        let proof_bytes = crate::prove_rust::prove(
+            &crate::prove_rust::Artifacts {
+                wasm: &repo.join("circuits/membership_js/membership.wasm"),
+                r1cs: &repo.join("circuits/membership.r1cs"),
+                zkey: &repo.join("circuits/membership_final.zkey"),
+            },
+            &input,
+            &expected,
+        )
+        .expect("in-process Rust proving must succeed and ark-verify");
+
+        // The emitted SettleZk data is well-formed.
+        let data = groth16::settle_zk_data(
+            epoch,
+            amount,
+            &proof_bytes,
+            &path.root,
+            &nullifier_hash,
+            &action_hash,
+        );
+        assert_eq!(data.len(), wire::SETTLE_ZK_LEN);
+
+        // DECISIVE: the EXACT on-chain verifier + committed vk accepts the Rust proof.
+        let public_inputs: [[u8; 32]; 4] = expected;
+        let mut verifier = Groth16Verifier::new(
+            &proof_bytes.proof_a,
+            &proof_bytes.proof_b,
+            &proof_bytes.proof_c,
+            &public_inputs,
+            &committed_vk::VERIFYINGKEY,
+        )
+        .expect("verifier construction");
+        verifier
+            .verify()
+            .expect("on-chain groth16-solana verifier must ACCEPT the Rust-generated proof");
     }
 }
