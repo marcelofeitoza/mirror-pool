@@ -807,7 +807,10 @@ async fn main() -> Result<()> {
         alice_spendable && scan_out.contains(&format!("amount={}", args.shield_amount)),
         format!(
             "recovered note {} (spendable={alice_spendable})",
-            alice_note.strip_prefix(&root).unwrap_or(&alice_note).display()
+            alice_note
+                .strip_prefix(&root)
+                .unwrap_or(&alice_note)
+                .display()
         ),
     );
 

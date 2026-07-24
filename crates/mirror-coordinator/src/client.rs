@@ -207,8 +207,7 @@ impl SolanaClient for RpcSolanaClient {
                 Ok(sig) => return Ok((table, sig)),
                 Err(e) => {
                     let msg = format!("{e:#}");
-                    if msg.contains("not a recent slot")
-                        || msg.contains("invalid instruction data")
+                    if msg.contains("not a recent slot") || msg.contains("invalid instruction data")
                     {
                         last_err = Some(e);
                         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -218,8 +217,9 @@ impl SolanaClient for RpcSolanaClient {
                 }
             }
         }
-        Err(last_err
-            .unwrap_or_else(|| anyhow::anyhow!("create_lookup_table exhausted recent-slot retries")))
+        Err(last_err.unwrap_or_else(|| {
+            anyhow::anyhow!("create_lookup_table exhausted recent-slot retries")
+        }))
     }
 
     async fn extend_lookup_table(
