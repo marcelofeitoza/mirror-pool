@@ -3,6 +3,11 @@
 **Tornado Cash for behavior, not funds.** An anonymity set over the *initiators*
 of an action, not over denominations.
 
+> **Design paper:** a skimmable overview of the two-axis composition (who + how
+> much), the effective-k metric, on-chain Groth16 verification, and the public
+> devnet results is at [`paper/mirror-pool.pdf`](paper/mirror-pool.pdf) (source
+> [`paper/mirror-pool.tex`](paper/mirror-pool.tex)).
+
 ## Verify this in 2 minutes
 
 Everything below is live on **public Solana devnet** and resolves in a browser
@@ -228,6 +233,10 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   1) under funding-provenance partitioning; mirror-pool keeps it at 32.
 - [`docs/PROOF.md`](docs/PROOF.md) - the live Surfpool soak: both paths + the
   adversarial cases, with transaction signatures and on-chain assertions.
+- [`paper/mirror-pool.pdf`](paper/mirror-pool.pdf) - the design paper: the
+  who + how-much composition, the effective-k analysis, on-chain verification, and
+  the public devnet results in one skimmable artifact (source
+  [`paper/mirror-pool.tex`](paper/mirror-pool.tex)).
 
 ---
 
