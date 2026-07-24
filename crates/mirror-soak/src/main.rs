@@ -195,6 +195,56 @@ fn airdrop(rpc_url: &str, pubkey: &Pubkey, sol: u64) -> Result<()> {
     Ok(())
 }
 
+/// System-transfer `lamports` from the pre-funded master payer to `to`.
+///
+/// The devnet funding path: a public cluster rate-limits faucet airdrops, so the
+/// run airdrops ONE master payer and fans out to every relay/participant via
+/// ordinary system transfers instead of one airdrop per key.
+fn transfer_from_master(rpc_url: &str, master: &str, to: &Pubkey, lamports: u64) -> Result<()> {
+    let sol = format!(
+        "{}.{:09}",
+        lamports / 1_000_000_000,
+        lamports % 1_000_000_000
+    );
+    let out = Command::new("solana")
+        .args([
+            "transfer",
+            &to.to_string(),
+            &sol,
+            "--keypair",
+            master,
+            "--fee-payer",
+            master,
+            "--url",
+            rpc_url,
+            "--allow-unfunded-recipient",
+            "--commitment",
+            "confirmed",
+        ])
+        .output()
+        .context("spawning `solana transfer`")?;
+    if !out.status.success() {
+        bail!(
+            "solana transfer {sol} -> {to} failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Fund `pubkey`. On a public cluster (when `MIRROR_FUNDING_KEYPAIR` names the
+/// pre-funded master payer) this is a system transfer of `devnet_lamports` from
+/// that master; otherwise it is a local faucet airdrop of `local_sol` whole SOL
+/// (the Surfpool path, unchanged).
+fn fund(rpc_url: &str, pubkey: &Pubkey, local_sol: u64, devnet_lamports: u64) -> Result<()> {
+    if let Ok(master) = std::env::var("MIRROR_FUNDING_KEYPAIR") {
+        transfer_from_master(rpc_url, &master, pubkey, devnet_lamports)
+    } else {
+        airdrop(rpc_url, pubkey, local_sol)
+    }
+}
+
 /// Generate a fresh keypair and persist it (gitignored) so a run is auditable.
 fn new_keypair(dir: &Path, name: &str) -> Result<Keypair> {
     let kp = Keypair::new();
@@ -466,11 +516,14 @@ async fn main() -> Result<()> {
         Some(s) => Pubkey::from_str(s).map_err(|e| anyhow!("invalid --program-id: {e}"))?,
         None => {
             // Derive from the built deploy keypair so a fresh clone is self-consistent.
-            let kp = repo_root()?.join("programs/mirror-pool/target/deploy/mirror_pool-keypair.json");
+            let kp =
+                repo_root()?.join("programs/mirror-pool/target/deploy/mirror_pool-keypair.json");
             let out = Command::new("solana")
                 .args(["address", "-k", &kp.to_string_lossy()])
                 .output()
-                .context("deriving the program id via `solana address -k` (or pass --program-id)")?;
+                .context(
+                    "deriving the program id via `solana address -k` (or pass --program-id)",
+                )?;
             if !out.status.success() {
                 bail!(
                     "could not derive program id from {} (run `cargo build-sbf` first, or pass --program-id): {}",
@@ -513,8 +566,8 @@ async fn main() -> Result<()> {
 
     let relay = new_keypair(&keys_dir, "relay")?; // pool authority + settle relay
     let payer = new_keypair(&keys_dir, "payer")?; // funds the pool rent at init
-    airdrop(&args.rpc_url, &relay.pubkey(), 100)?;
-    airdrop(&args.rpc_url, &payer.pubkey(), 100)?;
+    fund(&args.rpc_url, &relay.pubkey(), 100, 150_000_000)?;
+    fund(&args.rpc_url, &payer.pubkey(), 100, 40_000_000)?;
     let pool = pool_pda(&program_id, &relay.pubkey());
     println!("  relay/authority: {}", relay.pubkey());
     println!("  payer:           {}", payer.pubkey());
@@ -591,15 +644,20 @@ async fn main() -> Result<()> {
         PlainTransfer::sol(sink.pubkey(), SizeBucket::Nano).action_class();
     let bucket = mirror_behaviors::bucket_lamports(SizeBucket::Nano);
 
-    // Align to a fresh window so all four commits land in one shared epoch.
-    let epoch_a = fresh_window(client.as_ref(), w, 28).await?;
+    // Align to a fresh window so all four commits land in one shared epoch. On a
+    // public cluster each commit takes real wall-clock to confirm (a confirmed
+    // send can be several seconds), so require most of the window to remain
+    // before opening the burst; otherwise a later commit can cross the epoch
+    // boundary and be rejected (the program derives the epoch from the clock).
+    let crowd_headroom = ((w * 3) / 4).max(1);
+    let epoch_a = fresh_window(client.as_ref(), w, crowd_headroom).await?;
     println!("  shared epoch: {epoch_a} (window {w} slots)");
 
     let mut crowd_kps: Vec<Arc<Keypair>> = Vec::new();
     let mut crowd_nfs: Vec<Nullifier> = Vec::new();
     for i in 0..4u8 {
         let kp = Arc::new(new_keypair(&keys_dir, &format!("crowd-{i}"))?);
-        airdrop(&args.rpc_url, &kp.pubkey(), 5)?;
+        fund(&args.rpc_url, &kp.pubkey(), 5, 20_000_000)?;
         let secret = Secret::from_bytes([0xC0 + i; 32]);
         let commitment = core_commit(&secret, &crowd_action, Epoch(epoch_a));
         let nf = core_nullifier(&secret, Epoch(epoch_a));
@@ -657,7 +715,7 @@ async fn main() -> Result<()> {
     let mut uf_nfs: Vec<Nullifier> = Vec::new();
     for i in 0..2u8 {
         let kp = Arc::new(new_keypair(&keys_dir, &format!("underfloor-{i}"))?);
-        airdrop(&args.rpc_url, &kp.pubkey(), 5)?;
+        fund(&args.rpc_url, &kp.pubkey(), 5, 20_000_000)?;
         let secret = Secret::from_bytes([0xB0 + i; 32]);
         let commitment = core_commit(&secret, &crowd_action, Epoch(epoch_b));
         let nf = core_nullifier(&secret, Epoch(epoch_b));
@@ -822,7 +880,7 @@ async fn main() -> Result<()> {
     let snarkjs = which("snarkjs").unwrap_or_else(|_| "snarkjs".to_string());
 
     let depositor = new_keypair(&keys_dir, "zk-depositor")?;
-    airdrop(&args.rpc_url, &depositor.pubkey(), 5)?;
+    fund(&args.rpc_url, &depositor.pubkey(), 5, 100_000_000)?;
     let depositor_path = keys_dir.join("zk-depositor.json");
     let recipient = new_keypair(&keys_dir, "zk-recipient")?; // FRESH, zero prior balance
     let recip_before = client
@@ -1011,16 +1069,39 @@ async fn main() -> Result<()> {
     println!("  {} captured transaction signatures", report.sigs.len());
 
     let final_pool = PoolView::decode(&client.get_account(&pool).await?.unwrap().data)?;
-    write_proof_md(
-        &root,
-        &args,
-        &program_id,
-        &pool,
-        &relay.pubkey(),
-        &report,
-        &final_pool,
-    )?;
-    println!("  wrote {}", root.join("docs/PROOF.md").display());
+    // When MIRROR_PROOF_JSON is set (the public-devnet path), emit a machine
+    // readable report and DO NOT touch docs/PROOF.md; the caller stitches the
+    // devnet run into PROOF.md itself so the committed Surfpool proof is
+    // preserved. Otherwise write the Surfpool PROOF.md as before.
+    if let Ok(json_path) = std::env::var("MIRROR_PROOF_JSON") {
+        let meta = serde_json::json!({
+            "suite": "behavioral",
+            "rpc_url": args.rpc_url,
+            "program_id": program_id.to_string(),
+            "pool": pool.to_string(),
+            "relay": relay.pubkey().to_string(),
+            "epoch_slots": args.epoch_slots,
+            "k_floor": args.k_floor,
+            "entry_fee": args.entry_fee,
+            "reward_bps": args.reward_bps,
+            "zk_amount": args.zk_amount,
+            "reward_pool_final": final_pool.reward_pool,
+            "leaves_appended": final_pool.commitment_count,
+        });
+        write_report_json(&json_path, meta, &report)?;
+        println!("  wrote report json {json_path}");
+    } else {
+        write_proof_md(
+            &root,
+            &args,
+            &program_id,
+            &pool,
+            &relay.pubkey(),
+            &report,
+            &final_pool,
+        )?;
+        println!("  wrote {}", root.join("docs/PROOF.md").display());
+    }
 
     if report.all_passed() {
         println!("\nSOAK RESULT: GREEN ({passed}/{total} assertions passed)");
@@ -1094,6 +1175,32 @@ fn first_line(s: &str) -> String {
 /// Deep-copy a keypair (Keypair is not Clone; go via its 64 bytes).
 fn clone_keypair(kp: &Keypair) -> Keypair {
     Keypair::try_from(kp.to_bytes().as_slice()).expect("valid keypair bytes")
+}
+
+/// Emit a machine-readable JSON report (metadata + every assertion + every
+/// captured signature) for the public-devnet path, where the caller assembles
+/// docs/PROOF.md out of band (adding Finalized confirmation + CU per signature).
+fn write_report_json(path: &str, meta: serde_json::Value, report: &Report) -> Result<()> {
+    let checks: Vec<serde_json::Value> = report
+        .checks
+        .iter()
+        .map(|(label, pass, detail)| {
+            serde_json::json!({ "label": label, "pass": pass, "detail": detail })
+        })
+        .collect();
+    let sigs: Vec<serde_json::Value> = report
+        .sigs
+        .iter()
+        .map(|(label, sig)| serde_json::json!({ "label": label, "sig": sig }))
+        .collect();
+    let mut v = meta;
+    v["checks"] = serde_json::Value::Array(checks);
+    v["sigs"] = serde_json::Value::Array(sigs);
+    v["passed"] = serde_json::json!(report.checks.iter().filter(|(_, p, _)| *p).count());
+    v["total"] = serde_json::json!(report.checks.len());
+    std::fs::write(path, serde_json::to_string_pretty(&v)?)
+        .with_context(|| format!("writing report json {path}"))?;
+    Ok(())
 }
 
 /// Write docs/PROOF.md documenting the live run.

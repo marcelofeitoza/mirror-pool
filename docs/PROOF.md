@@ -1,4 +1,360 @@
-# mirror-pool - live Surfpool soak proof
+# mirror-pool - proof of operation
+
+This file has two independent, honestly-labeled proofs of the same program:
+a **public Solana devnet deployment** (top, browser-verifiable on the Solana
+Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
+
+---
+
+# Public devnet deployment (browser-verifiable)
+
+Both soak suites were run against **public Solana devnet**
+(`https://api.devnet.solana.com`) - a real, shared, public cluster. Every
+signature below is a real devnet transaction that resolves on the Solana
+Explorer; anyone can click through and verify it. This is **devnet, not
+mainnet-beta**: it proves the program deploys and every flow executes on a
+live public cluster, exactly as it would on mainnet, without spending
+mainnet SOL.
+
+- program id: `EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`
+- program (Explorer): https://explorer.solana.com/address/EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq?cluster=devnet
+- deploy/upgrade transaction: https://explorer.solana.com/tx/q87TXz1ftYz8eiDUNa5o9PxVQeie1feikDCH3hBeFg92bhYEGrYDTYUpUAMforuLUatifY2fLU89R92sRnwok6f?cluster=devnet
+- cluster: devnet (`https://api.devnet.solana.com`)
+- driving commitment: `confirmed` for submission; every captured signature
+  below was then re-confirmed at the `finalized` commitment before listing.
+
+The program id above is a fresh, bounty-dedicated keypair (kept gitignored
+under `.soak/keys/`). It was deployed and then upgraded in place to the
+committed, vk-consistent build; the SHA-256 of the on-chain program bytes
+equals the SHA-256 of the locally built `mirror_pool.so`, so the deployed
+program is exactly the source in this repo. Both suites below run against
+that same on-chain program.
+
+## Behavioral soak - crowd + ZK settlement (devnet)
+
+Fresh pool per run (fresh relay authority). Config: epoch_slots=128, k_floor=3, entry_fee=1000000 lamports, reward_bps=2500.
+
+- pool PDA: `5ZqjRqhrYHradrMKih8YnejvfwsSLShYbnqXsLqUYWT7` (authority / relay `6FzpfHXu5SKNCpHummh6ZujrRpC6icNxzdtZuYyeew5N`)
+- pool (Explorer): https://explorer.solana.com/address/5ZqjRqhrYHradrMKih8YnejvfwsSLShYbnqXsLqUYWT7?cluster=devnet
+- ZK opt-in escrow amount: 50000000 lamports
+- reward pool accrued at end of run: 1750000 lamports
+- total leaves appended: 7
+
+What was exercised: 4 participants commit the SAME PlainTransfer action into
+one shared epoch, settled by ONE atomic gasless transaction (ComputeBudget +
+SettleEpoch + 4 identical transfers, over a pool ALT); a ZK opt-in escrow is
+settled by a snarkjs-verified Groth16 SettleZk to a fresh recipient; and the
+adversarial cases (under-floor no-settle, duplicate nullifier, re-settle,
+mismatched-recipient, replay) all fail closed on-chain.
+
+### On-chain assertions (17/17)
+
+| result | assertion | detail |
+| --- | --- | --- |
+| PASS | program deployed + executable | EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq |
+| PASS | pool initialized with fixed config | version=1 epoch_slots=128 k_floor=3 entry_fee=1000000 authority=relay |
+| PASS | pool ALT created + extended | alt=EXxNZeipF8QzJu8VEzmvX8Dp6xmGXLFzAEREPiXMizqt (6 shared accounts) |
+| PASS | 4 commits batched into one shared epoch | epoch_id=3739202 commit_count=4 settled=false |
+| PASS | duplicate crowd nullifier rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x3; 5 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program 1 |
+| PASS | crowd epoch marked settled on-chain | epoch_id=3739202 settled=true |
+| PASS | 4 nullifier PDAs created (anti-replay) | 4/4 nullifier PDAs exist and are program-owned |
+| PASS | 4 identical transfers executed atomically | sink credited 40000000 lamports (= 4 x 10000000 bucket) |
+| PASS | re-settle of a settled epoch rejected (EpochAlreadySettled) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x6; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
+| PASS | under-floor epoch rejected on-chain (BelowKFloor) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x2; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
+| PASS | under-floor epoch rolled forward off-chain (coordinator) | coordinator.on_slot returned RolledForward (real_k < k_floor) |
+| PASS | Groth16 membership proof generated + verified (snarkjs) | mirror-cli prove produced a snarkjs-verified SettleZk |
+| PASS | SettleZk authority == pool relay | authority=6FzpfHXu5SKNCpHummh6ZujrRpC6icNxzdtZuYyeew5N |
+| PASS | ZK settle to mismatched recipient rejected (ActionHashMismatch) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0xe; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
+| PASS | escrow landed at the FRESH recipient | recipient credited 50000000 lamports (= escrow 50000000) |
+| PASS | ZK nullifier PDA created (anti-replay) | nullifier PDA 3QaTuACW2EESAfRG6icWCGEY7MJh4qPu33bo6rcPs4pW exists + program-owned |
+| PASS | ZK replay rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x3; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
+
+### Finalized transaction signatures + compute units
+
+| flow | signature (Explorer) | commitment | CU consumed |
+| --- | --- | --- | --- |
+| init_pool | [`38rNeKerPRcFxvBzRgGh3xZjXEgDUwi7vhjfGrYnUKbPcLRFbK7Q3wGyditkZyBF2Xg2pJ8LstYXAWGGfnR4KkfX`](https://explorer.solana.com/tx/38rNeKerPRcFxvBzRgGh3xZjXEgDUwi7vhjfGrYnUKbPcLRFbK7Q3wGyditkZyBF2Xg2pJ8LstYXAWGGfnR4KkfX?cluster=devnet) | Finalized | 21766 |
+| crowd_commit_0 | [`4dzqpL2Mep5RNnbsLKsEgoBo7sx87F8pzWUGstLn9h4WjJ4QQnn9PAhRUDZVoYhU5VnXH8aPq9CSxAPTi2dxAaKy`](https://explorer.solana.com/tx/4dzqpL2Mep5RNnbsLKsEgoBo7sx87F8pzWUGstLn9h4WjJ4QQnn9PAhRUDZVoYhU5VnXH8aPq9CSxAPTi2dxAaKy?cluster=devnet) | Finalized | 41006 |
+| crowd_commit_1 | [`Q4HRHLqvw6rC9CK7UdybVs1Q2RZLTNLvSeh9Ao7nZkLX18EWfYwYy1q1gmC48DtEQUEBoKKuD2sV49e6zovfJ4y`](https://explorer.solana.com/tx/Q4HRHLqvw6rC9CK7UdybVs1Q2RZLTNLvSeh9Ao7nZkLX18EWfYwYy1q1gmC48DtEQUEBoKKuD2sV49e6zovfJ4y?cluster=devnet) | Finalized | 39654 |
+| crowd_commit_2 | [`4imuaAxEK66RxcamUSKBdxDEQjPCV11EuK8jVb9nfDJrxPNZXMCxaryfqfV2SaRn645jNCghUpNgGm3BcHZtQKdA`](https://explorer.solana.com/tx/4imuaAxEK66RxcamUSKBdxDEQjPCV11EuK8jVb9nfDJrxPNZXMCxaryfqfV2SaRn645jNCghUpNgGm3BcHZtQKdA?cluster=devnet) | Finalized | 39654 |
+| crowd_commit_3 | [`3ZjS1ZbVv6fwJdpLvvZoEw13ap1jysUu8hyGyv6FE4nAbjTdvnAbL3vq5T5CnMjwcBYuXjGb6cYCJELmgviRVs8m`](https://explorer.solana.com/tx/3ZjS1ZbVv6fwJdpLvvZoEw13ap1jysUu8hyGyv6FE4nAbjTdvnAbL3vq5T5CnMjwcBYuXjGb6cYCJELmgviRVs8m?cluster=devnet) | Finalized | 39647 |
+| underfloor_commit_0 | [`4Pv116kNm8wucjvcnikRKFGFnvJGVkYUvtnJ2TrKE3PfngRgke5Rn9kXqYNfqL7ZiSxGe8tNfzcRvKumfcAhurr5`](https://explorer.solana.com/tx/4Pv116kNm8wucjvcnikRKFGFnvJGVkYUvtnJ2TrKE3PfngRgke5Rn9kXqYNfqL7ZiSxGe8tNfzcRvKumfcAhurr5?cluster=devnet) | Finalized | 39499 |
+| underfloor_commit_1 | [`3uyHnhXYNR18deP3YZPQGorq2sPDT6XxUWxFKsrA5sXQDPsQYFNRf5jhzqJjutwiuCue7onqbNzb8WUx3sC2rims`](https://explorer.solana.com/tx/3uyHnhXYNR18deP3YZPQGorq2sPDT6XxUWxFKsrA5sXQDPsQYFNRf5jhzqJjutwiuCue7onqbNzb8WUx3sC2rims?cluster=devnet) | Finalized | 38147 |
+| crowd_settle | [`4tcgNnhbZe7YKM26F6SnXW1WctASqVEqQ9W4v4NQ85fDfkYe3eq7YqCr4n7bEogm7U5By17Lkc5Tqa7jmZx693NB`](https://explorer.solana.com/tx/4tcgNnhbZe7YKM26F6SnXW1WctASqVEqQ9W4v4NQ85fDfkYe3eq7YqCr4n7bEogm7U5By17Lkc5Tqa7jmZx693NB?cluster=devnet) | Finalized | 21111 |
+| zk_deposit_commit | [`5sv5hVisBMtRCD4EeopUiQNyATAJXBNY3WPAtU7ERpRHgXmChJTyaz54QqThDknvd5EYkbVhbMtPFad7QEr744C`](https://explorer.solana.com/tx/5sv5hVisBMtRCD4EeopUiQNyATAJXBNY3WPAtU7ERpRHgXmChJTyaz54QqThDknvd5EYkbVhbMtPFad7QEr744C?cluster=devnet) | Finalized | 42447 |
+| zk_settle | [`4t7hLjFQh2ZyfqXQd7SZAHUw1A5nnzDjdAKRtMj9MKDeCr3Twx7twLgtAa6oQmzAZSFsHYEGKcwFwMyuyessThto`](https://explorer.solana.com/tx/4t7hLjFQh2ZyfqXQd7SZAHUw1A5nnzDjdAKRtMj9MKDeCr3Twx7twLgtAa6oQmzAZSFsHYEGKcwFwMyuyessThto?cluster=devnet) | Finalized | 102115 |
+
+## Confidential-value soak - shield / transfer / unshield (devnet)
+
+Fresh pools per run. The 2-in/2-out JoinSplit `Transact` layer, driven by the
+shipped participant CLI (snarkjs Groth16) and the gasless coordinator. A
+transfer is signed ONLY by the relay (hides WHO) and carries `publicAmount ==
+0` (hides HOW MUCH).
+
+- main ValuePool: `3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4` (authority / relay `hfQPKv4EDrUNeEqQjWVC1EKRVaSgFeVRkrkRkCJPG4j`), vault `6S8PHSZ9g9Xd5ea6Vz4iPEa4J59i9hVMGfhUumETg3D2`
+- main pool (Explorer): https://explorer.solana.com/address/3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4?cluster=devnet
+- fixed-denomination ValuePool: `GPqqrTbmyJhskE55Tcy5ZzaRg5UbuA7QWYosQKNgLAi6` (denomination 10000000 lamports)
+- relay fee bound into ext-data: 5000 lamports
+- amounts: shield 50000000 lamports, hidden transfer 20000000 lamports, withdraw 20000000 lamports
+
+### On-chain assertions (25/25)
+
+| result | assertion | detail |
+| --- | --- | --- |
+| PASS | program deployed + executable | EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq |
+| PASS | main ValuePool initialized (authority=relay, fee set, no denom) | vpool=3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4 vault=6S8PHSZ9g9Xd5ea6Vz4iPEa4J59i9hVMGfhUumETg3D2 fee=5000 denom=None cc=0 |
+| PASS | fixed-denom ValuePool initialized (denomination pinned) | vpool=GPqqrTbmyJhskE55Tcy5ZzaRg5UbuA7QWYosQKNgLAi6 vault=8TmSateSoFfSDLsR4EhAHn2gue757z5CkX9ZK6PhUvxk denom=Some(10000000) |
+| PASS | shield proof generated + verified (snarkjs) and emitted | mirror-cli shield produced a snarkjs-verified Transact |
+| PASS | vault credited by the shielded deposit amount | vault delta 50000000 lamports (= shield 50000000) |
+| PASS | value root advanced + both output commitments inserted | commitment_count 0->2, root changed |
+| PASS | both input nullifier PDAs created (anti-replay) | nf0=Ho6imx4KE5oB1obLgcpWXC77MLSKrY2iKLumrHUSsfHJ nf1=A8TF6r3n5kkzkMsSD9PRFCDAYntiQUsLcyQznzJbAssd both program-owned + spent |
+| PASS | shield publicAmount encodes the deposit magnitude (public deposit) | publicAmount=0000000000000000000000000000000000000000000000000000000002faf080 |
+| PASS | shield replay rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x3; 7 log messages:   Program ComputeBudget111111111111111111111111111111 invoke [1]   Program Co |
+| PASS | Alice scan recovered a SPENDABLE note from the enc blobs | recovered note .soak/notes-value/value-09a9aafa280190e439c0b221c5dc80aeb88e422ed99ee523f30900d443c4548d.json (spendable=true) |
+| PASS | transfer carries NO cleartext amount (publicAmount == 0) | publicAmount=0000000000000000000000000000000000000000000000000000000000000000 |
+| PASS | on-chain Transact bytes carry a zeroed publicAmount for the transfer | transact_data[1..33] (publicAmount) is 32 zero bytes |
+| PASS | mutated public input rejected (ProofVerificationFailed) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0xc; 11 log messages:   Program ComputeBudget111111111111111111111111111111 invoke [1]   Program C |
+| PASS | transfer advanced the value root (2 new output commitments) | commitment_count 2->4, root changed |
+| PASS | transfer moved NO public lamports (vault unchanged) | vault 50890880 -> 50890880 |
+| PASS | transfer created new nullifier PDAs (input note spent) | nf0=EsdZh4C3DeZjTmDuPKS6KAzP7tJWuSEfb3Z98HBPkWTR nf1=ZY2CPokAiKiaQssidL4wytT1Lm1PsGVWfhZqoyFHL9V both program-owned + spent |
+| PASS | Bob scan auto-discovered his payment note (recipient-directed) | recovered note .soak/notes-value/value-1cd0563afb84d6c628f1a9f06a97a21f909b67677be5c1afc533887ec560eff7.json (spendable=true) |
+| PASS | fresh recipient credited by the withdrawn amount | recipient GkdBCDGW5zpKo76eZr5z8zRAjZCjhbj94JBNRpdZtixv credited 20000000 lamports (= withdraw 20000000) |
+| PASS | vault debited by exactly the withdrawn amount | vault debited 20000000 lamports |
+| PASS | unshield advanced the value root | commitment_count 4->6, root changed |
+| PASS | unshield created the input nullifier PDA (anti-replay) | nf0=8nJod3We2bRWvyUUDbBsm6S4j7jM1RkX5C1Bkqv89zoA program-owned + spent |
+| PASS | fixed-denom shield of EXACTLY the denomination succeeds | vault2 credited 10000000 lamports (= denomination 10000000) |
+| PASS | on-chain: wrong-denomination deposit rejected (DenominationMismatch) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x17; 7 log messages:   Program ComputeBudget111111111111111111111111111111 invoke [1]   Program C |
+| PASS | CLI fail-fast: wrong-denomination shield refused client-side | Error: this value pool pins a fixed denomination of 10000000 lamports; a public deposit/withdraw must move exactly that amount (got 10000001)  |
+| PASS | main vault balance == net public deposit - net public withdrawal | vault 30890880 == baseline 890880 + (shield 50000000 - withdraw 20000000) = 30890880 |
+
+### Finalized transaction signatures + compute units
+
+| flow | signature (Explorer) | commitment | CU consumed |
+| --- | --- | --- | --- |
+| init_value_pool_main | [`633jbqMtdEQhnAaDQw65x1FVDXM3uhfw3m51cjuSrNDjZxWRinmpTYsJo3MWRtxYV9Jh4UhxLRmhJxZtnL54SDss`](https://explorer.solana.com/tx/633jbqMtdEQhnAaDQw65x1FVDXM3uhfw3m51cjuSrNDjZxWRinmpTYsJo3MWRtxYV9Jh4UhxLRmhJxZtnL54SDss?cluster=devnet) | Finalized | 28964 |
+| init_value_pool_denom | [`38MEi8RMsMyRTHpDbpZzfQdyfRBDJKCgS8D6M33qT9zYTccpK3NnpUqpJguVjWEuic9uhcht6kPgzq8HKC62nDQm`](https://explorer.solana.com/tx/38MEi8RMsMyRTHpDbpZzfQdyfRBDJKCgS8D6M33qT9zYTccpK3NnpUqpJguVjWEuic9uhcht6kPgzq8HKC62nDQm?cluster=devnet) | Finalized | 33503 |
+| shield | [`5imt1JZEVZWrK7CtdsXBHJ4rdN5NxYEqGkXGwT47vddPeMcXzGFLSaxtW4qC7NMXd49nAjpr4GAZKXToTykMsUUf`](https://explorer.solana.com/tx/5imt1JZEVZWrK7CtdsXBHJ4rdN5NxYEqGkXGwT47vddPeMcXzGFLSaxtW4qC7NMXd49nAjpr4GAZKXToTykMsUUf?cluster=devnet) | Finalized | 196837 |
+| transfer | [`2r6mo2YrDtjJP8bnVqRJXaVDgVLkxaAmtKAHvgkwYvWb8rchvd63QinFqbmuj5Gk2Se8M9g9ajcCkC5R6QNprtyv`](https://explorer.solana.com/tx/2r6mo2YrDtjJP8bnVqRJXaVDgVLkxaAmtKAHvgkwYvWb8rchvd63QinFqbmuj5Gk2Se8M9g9ajcCkC5R6QNprtyv?cluster=devnet) | Finalized | 197616 |
+| unshield | [`54pTgcd2jdR2np3iWE3rHkihmdRhxEUKZbtCnoDLnaw9QC61WhqiySjfNnZohjNTwKhaABz7Bpo3gXuNxUKZFRzN`](https://explorer.solana.com/tx/54pTgcd2jdR2np3iWE3rHkihmdRhxEUKZbtCnoDLnaw9QC61WhqiySjfNnZohjNTwKhaABz7Bpo3gXuNxUKZFRzN?cluster=devnet) | Finalized | 202843 |
+| denom_shield_exact | [`3KchDrW8rYNpQ6wzXBVGFPvv8aRc1YtdLxsPdiDrU99VbqPqYUadS3X7WKBpqkHDUDHZeTafWk9YXrqkeURasKVG`](https://explorer.solana.com/tx/3KchDrW8rYNpQ6wzXBVGFPvv8aRc1YtdLxsPdiDrU99VbqPqYUadS3X7WKBpqkHDUDHZeTafWk9YXrqkeURasKVG?cluster=devnet) | Finalized | 197077 |
+
+### Reproduce (devnet)
+
+```sh
+# 1. build
+cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml
+cargo build --workspace
+
+# 2. a fresh program keypair + a single funded master payer (.soak/, gitignored)
+solana-keygen new -o .soak/keys/devnet-program.json
+solana-keygen new -o .soak/keys/devnet-funder.json
+solana airdrop 2 $(solana address -k .soak/keys/devnet-funder.json) --url devnet
+
+# 3. deploy to public devnet
+solana program deploy --url https://api.devnet.solana.com \
+  --keypair .soak/keys/devnet-funder.json \
+  --program-id .soak/keys/devnet-program.json \
+  programs/mirror-pool/target/deploy/mirror_pool.so
+
+# 4. run both soaks against devnet, funding every key by system-transfer
+#    from the one master payer (no per-key airdrops).
+PROG=$(solana address -k .soak/keys/devnet-program.json)
+export MIRROR_FUNDING_KEYPAIR=$PWD/.soak/keys/devnet-funder.json
+MIRROR_PROOF_JSON=$PWD/.soak/behavioral.json cargo run -p mirror-soak -- \
+  --rpc-url https://api.devnet.solana.com --program-id $PROG \
+  --epoch-slots 128 --k-floor 3 --zk-amount 50000000
+MIRROR_PROOF_JSON=$PWD/.soak/confidential.json \
+  cargo run -p mirror-soak --bin mirror-soak-value -- \
+  --rpc-url https://api.devnet.solana.com --program-id $PROG \
+  --shield-amount 50000000 --transfer-amount 20000000 --denomination 10000000
+```
+
+---
+
+# Local Surfpool run (mainnet mirror)
+
+The original run below is against a LOCAL Surfpool validator (a local mainnet
+mirror), kept for completeness. Its signatures are local-validator signatures,
+reproducible by re-running the soak against a fresh Surfpool, and are NOT
+lookups on a public explorer (unlike the devnet section above).
+
+This file has two independent, honestly-labeled proofs of the same program:
+a **public Solana devnet deployment** (top, browser-verifiable on the Solana
+Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
+
+---
+
+# Public devnet deployment (browser-verifiable)
+
+Both soak suites were run against **public Solana devnet**
+(`https://api.devnet.solana.com`) - a real, shared, public cluster. Every
+signature below is a real devnet transaction that resolves on the Solana
+Explorer; anyone can click through and verify it. This is **devnet, not
+mainnet-beta**: it proves the program deploys and every flow executes on a
+live public cluster, exactly as it would on mainnet, without spending
+mainnet SOL.
+
+- program id: `EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`
+- program (Explorer): https://explorer.solana.com/address/EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq?cluster=devnet
+- deploy/upgrade transaction: https://explorer.solana.com/tx/q87TXz1ftYz8eiDUNa5o9PxVQeie1feikDCH3hBeFg92bhYEGrYDTYUpUAMforuLUatifY2fLU89R92sRnwok6f?cluster=devnet
+- cluster: devnet (`https://api.devnet.solana.com`)
+- driving commitment: `confirmed` for submission; every captured signature
+  below was then re-confirmed at the `finalized` commitment before listing.
+
+The program id above is a fresh, bounty-dedicated keypair (kept gitignored
+under `.soak/keys/`). It was deployed and then upgraded in place to the
+committed, vk-consistent build; the SHA-256 of the on-chain program bytes
+equals the SHA-256 of the locally built `mirror_pool.so`, so the deployed
+program is exactly the source in this repo. Both suites below run against
+that same on-chain program.
+
+## Behavioral soak - crowd + ZK settlement (devnet)
+
+Fresh pool per run (fresh relay authority). Config: epoch_slots=128, k_floor=3, entry_fee=1000000 lamports, reward_bps=2500.
+
+- pool PDA: `5ZqjRqhrYHradrMKih8YnejvfwsSLShYbnqXsLqUYWT7` (authority / relay `6FzpfHXu5SKNCpHummh6ZujrRpC6icNxzdtZuYyeew5N`)
+- pool (Explorer): https://explorer.solana.com/address/5ZqjRqhrYHradrMKih8YnejvfwsSLShYbnqXsLqUYWT7?cluster=devnet
+- ZK opt-in escrow amount: 50000000 lamports
+- reward pool accrued at end of run: 1750000 lamports
+- total leaves appended: 7
+
+What was exercised: 4 participants commit the SAME PlainTransfer action into
+one shared epoch, settled by ONE atomic gasless transaction (ComputeBudget +
+SettleEpoch + 4 identical transfers, over a pool ALT); a ZK opt-in escrow is
+settled by a snarkjs-verified Groth16 SettleZk to a fresh recipient; and the
+adversarial cases (under-floor no-settle, duplicate nullifier, re-settle,
+mismatched-recipient, replay) all fail closed on-chain.
+
+### On-chain assertions (17/17)
+
+| result | assertion | detail |
+| --- | --- | --- |
+| PASS | program deployed + executable | EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq |
+| PASS | pool initialized with fixed config | version=1 epoch_slots=128 k_floor=3 entry_fee=1000000 authority=relay |
+| PASS | pool ALT created + extended | alt=EXxNZeipF8QzJu8VEzmvX8Dp6xmGXLFzAEREPiXMizqt (6 shared accounts) |
+| PASS | 4 commits batched into one shared epoch | epoch_id=3739202 commit_count=4 settled=false |
+| PASS | duplicate crowd nullifier rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x3; 5 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program 1 |
+| PASS | crowd epoch marked settled on-chain | epoch_id=3739202 settled=true |
+| PASS | 4 nullifier PDAs created (anti-replay) | 4/4 nullifier PDAs exist and are program-owned |
+| PASS | 4 identical transfers executed atomically | sink credited 40000000 lamports (= 4 x 10000000 bucket) |
+| PASS | re-settle of a settled epoch rejected (EpochAlreadySettled) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x6; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
+| PASS | under-floor epoch rejected on-chain (BelowKFloor) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x2; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
+| PASS | under-floor epoch rolled forward off-chain (coordinator) | coordinator.on_slot returned RolledForward (real_k < k_floor) |
+| PASS | Groth16 membership proof generated + verified (snarkjs) | mirror-cli prove produced a snarkjs-verified SettleZk |
+| PASS | SettleZk authority == pool relay | authority=6FzpfHXu5SKNCpHummh6ZujrRpC6icNxzdtZuYyeew5N |
+| PASS | ZK settle to mismatched recipient rejected (ActionHashMismatch) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0xe; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
+| PASS | escrow landed at the FRESH recipient | recipient credited 50000000 lamports (= escrow 50000000) |
+| PASS | ZK nullifier PDA created (anti-replay) | nullifier PDA 3QaTuACW2EESAfRG6icWCGEY7MJh4qPu33bo6rcPs4pW exists + program-owned |
+| PASS | ZK replay rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x3; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
+
+### Finalized transaction signatures + compute units
+
+| flow | signature (Explorer) | commitment | CU consumed |
+| --- | --- | --- | --- |
+| init_pool | [`38rNeKerPRcFxvBzRgGh3xZjXEgDUwi7vhjfGrYnUKbPcLRFbK7Q3wGyditkZyBF2Xg2pJ8LstYXAWGGfnR4KkfX`](https://explorer.solana.com/tx/38rNeKerPRcFxvBzRgGh3xZjXEgDUwi7vhjfGrYnUKbPcLRFbK7Q3wGyditkZyBF2Xg2pJ8LstYXAWGGfnR4KkfX?cluster=devnet) | Finalized | 21766 |
+| crowd_commit_0 | [`4dzqpL2Mep5RNnbsLKsEgoBo7sx87F8pzWUGstLn9h4WjJ4QQnn9PAhRUDZVoYhU5VnXH8aPq9CSxAPTi2dxAaKy`](https://explorer.solana.com/tx/4dzqpL2Mep5RNnbsLKsEgoBo7sx87F8pzWUGstLn9h4WjJ4QQnn9PAhRUDZVoYhU5VnXH8aPq9CSxAPTi2dxAaKy?cluster=devnet) | Finalized | 41006 |
+| crowd_commit_1 | [`Q4HRHLqvw6rC9CK7UdybVs1Q2RZLTNLvSeh9Ao7nZkLX18EWfYwYy1q1gmC48DtEQUEBoKKuD2sV49e6zovfJ4y`](https://explorer.solana.com/tx/Q4HRHLqvw6rC9CK7UdybVs1Q2RZLTNLvSeh9Ao7nZkLX18EWfYwYy1q1gmC48DtEQUEBoKKuD2sV49e6zovfJ4y?cluster=devnet) | Finalized | 39654 |
+| crowd_commit_2 | [`4imuaAxEK66RxcamUSKBdxDEQjPCV11EuK8jVb9nfDJrxPNZXMCxaryfqfV2SaRn645jNCghUpNgGm3BcHZtQKdA`](https://explorer.solana.com/tx/4imuaAxEK66RxcamUSKBdxDEQjPCV11EuK8jVb9nfDJrxPNZXMCxaryfqfV2SaRn645jNCghUpNgGm3BcHZtQKdA?cluster=devnet) | Finalized | 39654 |
+| crowd_commit_3 | [`3ZjS1ZbVv6fwJdpLvvZoEw13ap1jysUu8hyGyv6FE4nAbjTdvnAbL3vq5T5CnMjwcBYuXjGb6cYCJELmgviRVs8m`](https://explorer.solana.com/tx/3ZjS1ZbVv6fwJdpLvvZoEw13ap1jysUu8hyGyv6FE4nAbjTdvnAbL3vq5T5CnMjwcBYuXjGb6cYCJELmgviRVs8m?cluster=devnet) | Finalized | 39647 |
+| underfloor_commit_0 | [`4Pv116kNm8wucjvcnikRKFGFnvJGVkYUvtnJ2TrKE3PfngRgke5Rn9kXqYNfqL7ZiSxGe8tNfzcRvKumfcAhurr5`](https://explorer.solana.com/tx/4Pv116kNm8wucjvcnikRKFGFnvJGVkYUvtnJ2TrKE3PfngRgke5Rn9kXqYNfqL7ZiSxGe8tNfzcRvKumfcAhurr5?cluster=devnet) | Finalized | 39499 |
+| underfloor_commit_1 | [`3uyHnhXYNR18deP3YZPQGorq2sPDT6XxUWxFKsrA5sXQDPsQYFNRf5jhzqJjutwiuCue7onqbNzb8WUx3sC2rims`](https://explorer.solana.com/tx/3uyHnhXYNR18deP3YZPQGorq2sPDT6XxUWxFKsrA5sXQDPsQYFNRf5jhzqJjutwiuCue7onqbNzb8WUx3sC2rims?cluster=devnet) | Finalized | 38147 |
+| crowd_settle | [`4tcgNnhbZe7YKM26F6SnXW1WctASqVEqQ9W4v4NQ85fDfkYe3eq7YqCr4n7bEogm7U5By17Lkc5Tqa7jmZx693NB`](https://explorer.solana.com/tx/4tcgNnhbZe7YKM26F6SnXW1WctASqVEqQ9W4v4NQ85fDfkYe3eq7YqCr4n7bEogm7U5By17Lkc5Tqa7jmZx693NB?cluster=devnet) | Finalized | 21111 |
+| zk_deposit_commit | [`5sv5hVisBMtRCD4EeopUiQNyATAJXBNY3WPAtU7ERpRHgXmChJTyaz54QqThDknvd5EYkbVhbMtPFad7QEr744C`](https://explorer.solana.com/tx/5sv5hVisBMtRCD4EeopUiQNyATAJXBNY3WPAtU7ERpRHgXmChJTyaz54QqThDknvd5EYkbVhbMtPFad7QEr744C?cluster=devnet) | Finalized | 42447 |
+| zk_settle | [`4t7hLjFQh2ZyfqXQd7SZAHUw1A5nnzDjdAKRtMj9MKDeCr3Twx7twLgtAa6oQmzAZSFsHYEGKcwFwMyuyessThto`](https://explorer.solana.com/tx/4t7hLjFQh2ZyfqXQd7SZAHUw1A5nnzDjdAKRtMj9MKDeCr3Twx7twLgtAa6oQmzAZSFsHYEGKcwFwMyuyessThto?cluster=devnet) | Finalized | 102115 |
+
+## Confidential-value soak - shield / transfer / unshield (devnet)
+
+Fresh pools per run. The 2-in/2-out JoinSplit `Transact` layer, driven by the
+shipped participant CLI (snarkjs Groth16) and the gasless coordinator. A
+transfer is signed ONLY by the relay (hides WHO) and carries `publicAmount ==
+0` (hides HOW MUCH).
+
+- main ValuePool: `3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4` (authority / relay `hfQPKv4EDrUNeEqQjWVC1EKRVaSgFeVRkrkRkCJPG4j`), vault `6S8PHSZ9g9Xd5ea6Vz4iPEa4J59i9hVMGfhUumETg3D2`
+- main pool (Explorer): https://explorer.solana.com/address/3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4?cluster=devnet
+- fixed-denomination ValuePool: `GPqqrTbmyJhskE55Tcy5ZzaRg5UbuA7QWYosQKNgLAi6` (denomination 10000000 lamports)
+- relay fee bound into ext-data: 5000 lamports
+- amounts: shield 50000000 lamports, hidden transfer 20000000 lamports, withdraw 20000000 lamports
+
+### On-chain assertions (25/25)
+
+| result | assertion | detail |
+| --- | --- | --- |
+| PASS | program deployed + executable | EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq |
+| PASS | main ValuePool initialized (authority=relay, fee set, no denom) | vpool=3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4 vault=6S8PHSZ9g9Xd5ea6Vz4iPEa4J59i9hVMGfhUumETg3D2 fee=5000 denom=None cc=0 |
+| PASS | fixed-denom ValuePool initialized (denomination pinned) | vpool=GPqqrTbmyJhskE55Tcy5ZzaRg5UbuA7QWYosQKNgLAi6 vault=8TmSateSoFfSDLsR4EhAHn2gue757z5CkX9ZK6PhUvxk denom=Some(10000000) |
+| PASS | shield proof generated + verified (snarkjs) and emitted | mirror-cli shield produced a snarkjs-verified Transact |
+| PASS | vault credited by the shielded deposit amount | vault delta 50000000 lamports (= shield 50000000) |
+| PASS | value root advanced + both output commitments inserted | commitment_count 0->2, root changed |
+| PASS | both input nullifier PDAs created (anti-replay) | nf0=Ho6imx4KE5oB1obLgcpWXC77MLSKrY2iKLumrHUSsfHJ nf1=A8TF6r3n5kkzkMsSD9PRFCDAYntiQUsLcyQznzJbAssd both program-owned + spent |
+| PASS | shield publicAmount encodes the deposit magnitude (public deposit) | publicAmount=0000000000000000000000000000000000000000000000000000000002faf080 |
+| PASS | shield replay rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x3; 7 log messages:   Program ComputeBudget111111111111111111111111111111 invoke [1]   Program Co |
+| PASS | Alice scan recovered a SPENDABLE note from the enc blobs | recovered note .soak/notes-value/value-09a9aafa280190e439c0b221c5dc80aeb88e422ed99ee523f30900d443c4548d.json (spendable=true) |
+| PASS | transfer carries NO cleartext amount (publicAmount == 0) | publicAmount=0000000000000000000000000000000000000000000000000000000000000000 |
+| PASS | on-chain Transact bytes carry a zeroed publicAmount for the transfer | transact_data[1..33] (publicAmount) is 32 zero bytes |
+| PASS | mutated public input rejected (ProofVerificationFailed) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0xc; 11 log messages:   Program ComputeBudget111111111111111111111111111111 invoke [1]   Program C |
+| PASS | transfer advanced the value root (2 new output commitments) | commitment_count 2->4, root changed |
+| PASS | transfer moved NO public lamports (vault unchanged) | vault 50890880 -> 50890880 |
+| PASS | transfer created new nullifier PDAs (input note spent) | nf0=EsdZh4C3DeZjTmDuPKS6KAzP7tJWuSEfb3Z98HBPkWTR nf1=ZY2CPokAiKiaQssidL4wytT1Lm1PsGVWfhZqoyFHL9V both program-owned + spent |
+| PASS | Bob scan auto-discovered his payment note (recipient-directed) | recovered note .soak/notes-value/value-1cd0563afb84d6c628f1a9f06a97a21f909b67677be5c1afc533887ec560eff7.json (spendable=true) |
+| PASS | fresh recipient credited by the withdrawn amount | recipient GkdBCDGW5zpKo76eZr5z8zRAjZCjhbj94JBNRpdZtixv credited 20000000 lamports (= withdraw 20000000) |
+| PASS | vault debited by exactly the withdrawn amount | vault debited 20000000 lamports |
+| PASS | unshield advanced the value root | commitment_count 4->6, root changed |
+| PASS | unshield created the input nullifier PDA (anti-replay) | nf0=8nJod3We2bRWvyUUDbBsm6S4j7jM1RkX5C1Bkqv89zoA program-owned + spent |
+| PASS | fixed-denom shield of EXACTLY the denomination succeeds | vault2 credited 10000000 lamports (= denomination 10000000) |
+| PASS | on-chain: wrong-denomination deposit rejected (DenominationMismatch) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x17; 7 log messages:   Program ComputeBudget111111111111111111111111111111 invoke [1]   Program C |
+| PASS | CLI fail-fast: wrong-denomination shield refused client-side | Error: this value pool pins a fixed denomination of 10000000 lamports; a public deposit/withdraw must move exactly that amount (got 10000001)  |
+| PASS | main vault balance == net public deposit - net public withdrawal | vault 30890880 == baseline 890880 + (shield 50000000 - withdraw 20000000) = 30890880 |
+
+### Finalized transaction signatures + compute units
+
+| flow | signature (Explorer) | commitment | CU consumed |
+| --- | --- | --- | --- |
+| init_value_pool_main | [`633jbqMtdEQhnAaDQw65x1FVDXM3uhfw3m51cjuSrNDjZxWRinmpTYsJo3MWRtxYV9Jh4UhxLRmhJxZtnL54SDss`](https://explorer.solana.com/tx/633jbqMtdEQhnAaDQw65x1FVDXM3uhfw3m51cjuSrNDjZxWRinmpTYsJo3MWRtxYV9Jh4UhxLRmhJxZtnL54SDss?cluster=devnet) | Finalized | 28964 |
+| init_value_pool_denom | [`38MEi8RMsMyRTHpDbpZzfQdyfRBDJKCgS8D6M33qT9zYTccpK3NnpUqpJguVjWEuic9uhcht6kPgzq8HKC62nDQm`](https://explorer.solana.com/tx/38MEi8RMsMyRTHpDbpZzfQdyfRBDJKCgS8D6M33qT9zYTccpK3NnpUqpJguVjWEuic9uhcht6kPgzq8HKC62nDQm?cluster=devnet) | Finalized | 33503 |
+| shield | [`5imt1JZEVZWrK7CtdsXBHJ4rdN5NxYEqGkXGwT47vddPeMcXzGFLSaxtW4qC7NMXd49nAjpr4GAZKXToTykMsUUf`](https://explorer.solana.com/tx/5imt1JZEVZWrK7CtdsXBHJ4rdN5NxYEqGkXGwT47vddPeMcXzGFLSaxtW4qC7NMXd49nAjpr4GAZKXToTykMsUUf?cluster=devnet) | Finalized | 196837 |
+| transfer | [`2r6mo2YrDtjJP8bnVqRJXaVDgVLkxaAmtKAHvgkwYvWb8rchvd63QinFqbmuj5Gk2Se8M9g9ajcCkC5R6QNprtyv`](https://explorer.solana.com/tx/2r6mo2YrDtjJP8bnVqRJXaVDgVLkxaAmtKAHvgkwYvWb8rchvd63QinFqbmuj5Gk2Se8M9g9ajcCkC5R6QNprtyv?cluster=devnet) | Finalized | 197616 |
+| unshield | [`54pTgcd2jdR2np3iWE3rHkihmdRhxEUKZbtCnoDLnaw9QC61WhqiySjfNnZohjNTwKhaABz7Bpo3gXuNxUKZFRzN`](https://explorer.solana.com/tx/54pTgcd2jdR2np3iWE3rHkihmdRhxEUKZbtCnoDLnaw9QC61WhqiySjfNnZohjNTwKhaABz7Bpo3gXuNxUKZFRzN?cluster=devnet) | Finalized | 202843 |
+| denom_shield_exact | [`3KchDrW8rYNpQ6wzXBVGFPvv8aRc1YtdLxsPdiDrU99VbqPqYUadS3X7WKBpqkHDUDHZeTafWk9YXrqkeURasKVG`](https://explorer.solana.com/tx/3KchDrW8rYNpQ6wzXBVGFPvv8aRc1YtdLxsPdiDrU99VbqPqYUadS3X7WKBpqkHDUDHZeTafWk9YXrqkeURasKVG?cluster=devnet) | Finalized | 197077 |
+
+### Reproduce (devnet)
+
+```sh
+# 1. build
+cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml
+cargo build --workspace
+
+# 2. a fresh program keypair + a single funded master payer (.soak/, gitignored)
+solana-keygen new -o .soak/keys/devnet-program.json
+solana-keygen new -o .soak/keys/devnet-funder.json
+solana airdrop 2 $(solana address -k .soak/keys/devnet-funder.json) --url devnet
+
+# 3. deploy to public devnet
+solana program deploy --url https://api.devnet.solana.com \
+  --keypair .soak/keys/devnet-funder.json \
+  --program-id .soak/keys/devnet-program.json \
+  programs/mirror-pool/target/deploy/mirror_pool.so
+
+# 4. run both soaks against devnet, funding every key by system-transfer
+#    from the one master payer (no per-key airdrops).
+PROG=$(solana address -k .soak/keys/devnet-program.json)
+export MIRROR_FUNDING_KEYPAIR=$PWD/.soak/keys/devnet-funder.json
+MIRROR_PROOF_JSON=$PWD/.soak/behavioral.json cargo run -p mirror-soak -- \
+  --rpc-url https://api.devnet.solana.com --program-id $PROG \
+  --epoch-slots 128 --k-floor 3 --zk-amount 50000000
+MIRROR_PROOF_JSON=$PWD/.soak/confidential.json \
+  cargo run -p mirror-soak --bin mirror-soak-value -- \
+  --rpc-url https://api.devnet.solana.com --program-id $PROG \
+  --shield-amount 50000000 --transfer-amount 20000000 --denomination 10000000
+```
+
+---
+
+# Local Surfpool run (mainnet mirror)
+
+The original run below is against a LOCAL Surfpool validator (a local mainnet
+mirror), kept for completeness. Its signatures are local-validator signatures,
+reproducible by re-running the soak against a fresh Surfpool, and are NOT
+lookups on a public explorer (unlike the devnet section above).
 
 This documents an automated end-to-end run of `mirror-soak` against a LIVE local
 Surfpool validator (a local mainnet mirror at `http://127.0.0.1:8899`), treated as mainnet. It is NOT

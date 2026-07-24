@@ -217,6 +217,54 @@ fn airdrop(rpc_url: &str, pubkey: &Pubkey, sol: u64) -> Result<()> {
     Ok(())
 }
 
+/// System-transfer `lamports` from the pre-funded master payer to `to` (the
+/// devnet funding path; a public cluster rate-limits faucet airdrops, so the run
+/// airdrops ONE master and fans out via ordinary transfers).
+fn transfer_from_master(rpc_url: &str, master: &str, to: &Pubkey, lamports: u64) -> Result<()> {
+    let sol = format!(
+        "{}.{:09}",
+        lamports / 1_000_000_000,
+        lamports % 1_000_000_000
+    );
+    let out = Command::new("solana")
+        .args([
+            "transfer",
+            &to.to_string(),
+            &sol,
+            "--keypair",
+            master,
+            "--fee-payer",
+            master,
+            "--url",
+            rpc_url,
+            "--allow-unfunded-recipient",
+            "--commitment",
+            "confirmed",
+        ])
+        .output()
+        .context("spawning `solana transfer`")?;
+    if !out.status.success() {
+        bail!(
+            "solana transfer {sol} -> {to} failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Fund `pubkey`. On a public cluster (when `MIRROR_FUNDING_KEYPAIR` names the
+/// pre-funded master payer) this is a system transfer of `devnet_lamports`;
+/// otherwise it is a local faucet airdrop of `local_sol` whole SOL (the Surfpool
+/// path, unchanged).
+fn fund(rpc_url: &str, pubkey: &Pubkey, local_sol: u64, devnet_lamports: u64) -> Result<()> {
+    if let Ok(master) = std::env::var("MIRROR_FUNDING_KEYPAIR") {
+        transfer_from_master(rpc_url, &master, pubkey, devnet_lamports)
+    } else {
+        airdrop(rpc_url, pubkey, local_sol)
+    }
+}
+
 fn new_keypair(dir: &Path, name: &str) -> Result<Keypair> {
     let kp = Keypair::new();
     let path = dir.join(format!("{name}.json"));
@@ -496,10 +544,10 @@ async fn main() -> Result<()> {
     let relay2 = new_keypair(&keys_dir, "value-relay2")?; // fixed-denom pool authority
     let payer = new_keypair(&keys_dir, "value-payer")?; // funds init rent
     let depositor = new_keypair(&keys_dir, "value-depositor")?; // funds + co-signs shields
-    airdrop(&args.rpc_url, &relay.pubkey(), 100)?;
-    airdrop(&args.rpc_url, &relay2.pubkey(), 100)?;
-    airdrop(&args.rpc_url, &payer.pubkey(), 100)?;
-    airdrop(&args.rpc_url, &depositor.pubkey(), 10)?;
+    fund(&args.rpc_url, &relay.pubkey(), 100, 60_000_000)?;
+    fund(&args.rpc_url, &relay2.pubkey(), 100, 40_000_000)?;
+    fund(&args.rpc_url, &payer.pubkey(), 100, 40_000_000)?;
+    fund(&args.rpc_url, &depositor.pubkey(), 10, 200_000_000)?;
 
     let payer_path = keys_dir.join("value-payer.json");
     let relay_path = keys_dir.join("value-relay.json");
@@ -759,7 +807,7 @@ async fn main() -> Result<()> {
         alice_spendable && scan_out.contains(&format!("amount={}", args.shield_amount)),
         format!(
             "recovered note {} (spendable={alice_spendable})",
-            alice_note.display()
+            alice_note.strip_prefix(&root).unwrap_or(&alice_note).display()
         ),
     );
 
@@ -914,7 +962,7 @@ async fn main() -> Result<()> {
         bob_spendable && scan_out.contains(&format!("amount={}", args.transfer_amount)),
         format!(
             "recovered note {} (spendable={bob_spendable})",
-            bob_note.display()
+            bob_note.strip_prefix(&root).unwrap_or(&bob_note).display()
         ),
     );
 
@@ -1153,17 +1201,38 @@ async fn main() -> Result<()> {
     println!("  {passed}/{total} on-chain assertions passed");
     println!("  {} captured transaction signatures", report.sigs.len());
 
-    append_proof_md(
-        &root,
-        &args,
-        &program_id,
-        &relay.pubkey(),
-        &vpool,
-        &vault,
-        &vpool2,
-        &report,
-    )?;
-    println!("  updated {}", root.join("docs/PROOF.md").display());
+    // The public-devnet path emits JSON and leaves docs/PROOF.md alone (the
+    // caller stitches the run in, preserving the committed Surfpool proof);
+    // otherwise append the confidential section to PROOF.md as before.
+    if let Ok(json_path) = std::env::var("MIRROR_PROOF_JSON") {
+        let meta = serde_json::json!({
+            "suite": "confidential",
+            "rpc_url": args.rpc_url,
+            "program_id": program_id.to_string(),
+            "relay": relay.pubkey().to_string(),
+            "vpool_main": vpool.to_string(),
+            "vault_main": vault.to_string(),
+            "vpool_denom": vpool2.to_string(),
+            "fee": args.fee,
+            "shield_amount": args.shield_amount,
+            "transfer_amount": args.transfer_amount,
+            "denomination": args.denomination,
+        });
+        write_report_json(&json_path, meta, &report)?;
+        println!("  wrote report json {json_path}");
+    } else {
+        append_proof_md(
+            &root,
+            &args,
+            &program_id,
+            &relay.pubkey(),
+            &vpool,
+            &vault,
+            &vpool2,
+            &report,
+        )?;
+        println!("  updated {}", root.join("docs/PROOF.md").display());
+    }
 
     if report.all_passed() {
         println!("\nCONFIDENTIAL SOAK RESULT: GREEN ({passed}/{total} assertions passed)");
@@ -1248,6 +1317,32 @@ fn build_denom_mismatch_transact(
         accounts,
         tx_profile: TxProfile::default(),
     }
+}
+
+/// Emit a machine-readable JSON report (metadata + every assertion + every
+/// captured signature) for the public-devnet path, where the caller assembles
+/// docs/PROOF.md out of band (adding Finalized confirmation + CU per signature).
+fn write_report_json(path: &str, meta: serde_json::Value, report: &Report) -> Result<()> {
+    let checks: Vec<serde_json::Value> = report
+        .checks
+        .iter()
+        .map(|(label, pass, detail)| {
+            serde_json::json!({ "label": label, "pass": pass, "detail": detail })
+        })
+        .collect();
+    let sigs: Vec<serde_json::Value> = report
+        .sigs
+        .iter()
+        .map(|(label, sig)| serde_json::json!({ "label": label, "sig": sig }))
+        .collect();
+    let mut v = meta;
+    v["checks"] = serde_json::Value::Array(checks);
+    v["sigs"] = serde_json::Value::Array(sigs);
+    v["passed"] = serde_json::json!(report.checks.iter().filter(|(_, p, _)| *p).count());
+    v["total"] = serde_json::json!(report.checks.len());
+    std::fs::write(path, serde_json::to_string_pretty(&v)?)
+        .with_context(|| format!("writing report json {path}"))?;
+    Ok(())
 }
 
 /// Append (idempotently) a "Confidential-value soak" section to docs/PROOF.md,

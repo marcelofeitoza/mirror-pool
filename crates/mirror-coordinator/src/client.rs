@@ -182,16 +182,44 @@ impl SolanaClient for RpcSolanaClient {
         authority: &DynSigner,
         payer: &DynSigner,
     ) -> Result<(Pubkey, Signature)> {
-        // The table address is derived from (authority, recent_slot); the slot
-        // is bound into the create instruction, so both must agree.
-        let recent_slot = self.get_slot().await?;
-        let (ix, table) = solana_address_lookup_table_interface::instruction::create_lookup_table(
-            authority.pubkey(),
-            payer.pubkey(),
-            recent_slot,
-        );
-        let sig = self.send_setup_ix(ix, authority, payer).await?;
-        Ok((table, sig))
+        use solana_commitment_config::CommitmentConfig;
+        // The table address is derived from (authority, recent_slot), and the ALT
+        // program re-checks that `recent_slot` is present in the SlotHashes sysvar
+        // at execution. On a public cluster the processed tip is NOT yet in
+        // SlotHashes when the create tx lands, which the program rejects with
+        // "<slot> is not a recent slot" (InvalidInstructionData). A finalized
+        // (rooted) slot is guaranteed to be in SlotHashes and well within its
+        // 512-slot window, so derive from that and retry on the transient race.
+        let mut last_err: Option<anyhow::Error> = None;
+        for _ in 0..6 {
+            let recent_slot = self
+                .rpc
+                .get_slot_with_commitment(CommitmentConfig::finalized())
+                .await
+                .context("get_slot(finalized)")?;
+            let (ix, table) =
+                solana_address_lookup_table_interface::instruction::create_lookup_table(
+                    authority.pubkey(),
+                    payer.pubkey(),
+                    recent_slot,
+                );
+            match self.send_setup_ix(ix, authority, payer).await {
+                Ok(sig) => return Ok((table, sig)),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if msg.contains("not a recent slot")
+                        || msg.contains("invalid instruction data")
+                    {
+                        last_err = Some(e);
+                        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| anyhow::anyhow!("create_lookup_table exhausted recent-slot retries")))
     }
 
     async fn extend_lookup_table(
