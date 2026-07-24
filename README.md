@@ -3,6 +3,20 @@
 **Tornado Cash for behavior, not funds.** An anonymity set over the *initiators*
 of an action, not over denominations.
 
+## Verify this in 2 minutes
+
+Everything below is live on **public Solana devnet** and resolves in a browser
+(no build required):
+
+- **Program (deployed + executable):** [`EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`](https://explorer.solana.com/address/EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq?cluster=devnet)
+- **Behavioral crowd settle** (N identical actions, one atomic tx, one timestamp): [tx](https://explorer.solana.com/tx/4tcgNnhbZe7YKM26F6SnXW1WctASqVEqQ9W4v4NQ85fDfkYe3eq7YqCr4n7bEogm7U5By17Lkc5Tqa7jmZx693NB?cluster=devnet)
+- **Confidential JoinSplit** (shield / private transfer with `publicAmount == 0` / unshield): see the signatures table in [`docs/PROOF.md`](docs/PROOF.md)
+- **Two live soaks, all assertions on-chain:** behavioral **17/17** + confidential **25/25** ([`docs/PROOF.md`](docs/PROOF.md))
+
+To build and run it yourself: `cargo test --workspace` (host) and
+`cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml` (program); the
+full reproduce recipe is in [`docs/PROOF.md`](docs/PROOF.md).
+
 A mixer hides *how much* moved and *from whom*. mirror-pool hides *who started
 an action that everyone can see happened*. N participants voluntarily pool one
 identical action into a synchronized round; the action executes on-chain in full
@@ -57,14 +71,14 @@ honest against the tree.
 | Component | Path | Status |
 | --- | --- | --- |
 | Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` (circomlib Poseidon, cross-check-proven against the circuit), `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
-| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification. 24 mollusk tests; `build-sbf` green. |
+| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification. 42 mollusk tests; `build-sbf` green; deployed + exercised on public devnet. |
 | ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and executes to a fresh output. A real proof verifies on-chain (fixture test) and live in the soak. |
 | Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. |
 | Gasless coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window batching, `k_floor` gate, rotating fee-payer, and real atomic crowd settlement (ComputeBudget + `SettleEpoch` + N participant behaviors, shared accounts in an ALT). |
 | Participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool` / `commit` / `deposit-commit` / `prove` (rebuilds the path + generates and verifies a Groth16 proof via snarkjs) / `status`. |
 | Pooled behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + pooled-action adapters: PlainTransfer (soak baseline), Jupiter swap, jitoSOL stake. |
 | Anti-Sybil + incentives | `programs/mirror-pool` + `crates/mirror-coordinator` | **Implemented** - entry-fee split into a reward pool, crowd-path dwell `ClaimReward`, honest `real_k` reporting; the ZK-path incentive is designed in [`docs/INCENTIVES.md`](docs/INCENTIVES.md). |
-| Surfpool soak suite | `crates/mirror-soak` | **Implemented** - live end-to-end soak, both behavioral paths + adversarial cases, 17/17 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
+| Soak suite (Surfpool + devnet) | `crates/mirror-soak` | **Implemented** - live end-to-end soak, both behavioral paths + adversarial cases, 17/17 on-chain assertions, on local Surfpool AND public devnet ([`docs/PROOF.md`](docs/PROOF.md)). |
 | Confidential-value circuit | `circuits/` | **Implemented** - 2-in/2-out Tornado-Nova JoinSplit (`transaction.circom`): membership + nullifiers + value conservation + range proofs + extDataHash binding; setup + vk + shield/transfer/unshield fixtures. |
 | Confidential value pool (on-chain) | `programs/mirror-pool` | **Implemented** - `InitValuePool` + `Transact`: own Poseidon value-note accumulator + root history + vault, on-chain Groth16 JoinSplit verify, nullifier PDAs, deposit/withdraw per `publicAmount`, fixed-denomination mode. Amounts never in cleartext except public deposit/withdraw. |
 | Confidential notes + client ops | `crates/mirror-core` + `mirror-cli` + `mirror-coordinator` | **Implemented** - ECIES encrypted notes + `scan` discovery; `value-keygen`/`shield`/`transfer`/`unshield` (snarkjs-prove + emit); gasless `submit_transact` (transfer/unshield relay-only signed = the unlinkability). |
