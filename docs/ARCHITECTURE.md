@@ -684,7 +684,7 @@ mirrors the same check client-side and refuses a doomed Transact before proving.
 `init-value-pool`, `shield`, `transfer`, `unshield`, and `scan`. As with the
 behavioral `prove`, none of the proving commands self-submit: each rebuilds the
 value Merkle path off-chain from the note's captured frontier snapshot, generates
-and verifies a Groth16 proof through snarkjs, cross-checks the public signals, and
+and verifies a Groth16 proof in-process in pure Rust, cross-checks the public signals, and
 *emits* the `Transact` instruction bytes plus account list for the relay.
 `mirror-coordinator::submit_transact` is the gasless submitter: it wraps the emit in
 the same normalized `TxProfile` (identical CU limit and priority fee) as the crowd
