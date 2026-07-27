@@ -62,6 +62,11 @@ use rand_chacha::ChaCha20Rng;
 /// leaves after partitioning by funding provenance and the behavioral channels.
 /// This is the answer to "advertised k != effective k"; see the module docs.
 pub mod effective_k;
+/// The funding leg: how each committer's wallet got its lamports, and what an
+/// observer recovers from the value pool's public boundary crossings. The
+/// MirrorPool provenance classes the effective-k metric uses are DERIVED from
+/// this model, residual leak included.
+pub mod funding;
 
 /// Fixed default seed so every run of the harness reproduces byte-identical
 /// numbers. Never replace this with wall-clock entropy: reviewers must be able

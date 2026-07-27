@@ -40,15 +40,29 @@
 //! exchange plus a long tail down to singletons), which is exactly why the
 //! effective set has a small MEAN and a worst case of 1.
 //!
+//! Under [`Scenario::Baseline`] that partition is read straight off the chain:
+//! the commit wallet was topped up by a public transfer, so the adversary walks
+//! one edge and the class is exact.
+//!
+//! Under [`Scenario::MirrorPool`] the partition is NOT assumed away. It is
+//! DERIVED from the funding mechanism the protocol actually ships
+//! ([`crate::funding`]): the participant funds a fresh commit wallet by
+//! unshielding from the confidential-value pool, so the adversary is left with a
+//! matching problem between the pool's public deposits and its public
+//! withdrawals. That matching is solvable to the extent the funding amounts and
+//! timings line up, and the residual is what this metric measures. Naive
+//! shielded funding (shield what you need, withdraw it immediately) leaks most of
+//! the partition back; a denominated pool with batched funding rounds does not.
+//! Both numbers are published, including the bad one.
+//!
 //! On top of provenance we fold in the same behavioral channels the attack
 //! battery models (timing, amount, wallet fingerprint), each of which further
-//! sharpens `p`. Crucially, a channel only informs the attacker if SETTLEMENT
+//! sharpens `p`. A behavioral channel only informs the attacker if SETTLEMENT
 //! exposed it: mirror-pool's shared-epoch batch gives every action one settle
 //! slot, one bucket amount, and one normalized fee shape, so the timing / amount
 //! / fingerprint channels carry zero variance across the batch and contribute
-//! nothing; and funding via the shielded path breaks the provenance partition
-//! (one indistinguishable class). That is why a naive pool's effective set
-//! collapses while mirror-pool's stays at nominal.
+//! nothing. The funding channel is the one that survives, which is why it gets a
+//! mechanism and a measurement rather than a paragraph.
 //!
 //! # Honesty
 //!
@@ -56,9 +70,11 @@
 //! attack table uses (fixed seed, ChaCha20, no wall-clock, re-derivable by any
 //! reviewer). It is not a measurement of a live pool; the funding-provenance
 //! partition is modeled from a realistic (Zipf) common-funder distribution
-//! rather than read off-chain. It answers the "advertised k != effective k"
-//! concern on the same axis the empirical literature raised it, and states its
-//! assumptions rather than asserting a bare number. See `docs/EFFECTIVE_K.md`.
+//! rather than read off-chain, and the funding trace is modeled from the shipped
+//! mechanism rather than observed. What it is not is circular: the MirrorPool
+//! provenance is computed from the mechanism, so a leaky funding policy produces
+//! a MirrorPool effective-k below nominal, and it does. See
+//! `docs/EFFECTIVE_K.md`.
 
 use std::collections::HashMap;
 
@@ -66,6 +82,7 @@ use mirror_core::KAnon;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
+use crate::funding::{FundingModel, FundingTrace};
 use crate::{EpochBatch, Population, Scenario};
 
 /// RBF bandwidth (slots) for the timing channel: two committers whose public
@@ -136,6 +153,12 @@ pub struct EffectiveK {
 /// Shannon entropy `H(p)` in bits over a weight vector `w` (need not be
 /// normalized; zero and negative weights are ignored). `H = -sum p_i log2 p_i`
 /// with `p_i = w_i / sum(w)`.
+///
+/// Uses the standard `0 log 0 = 0` convention, which also protects against a
+/// subnormal weight whose normalized share underflows to exactly zero: the
+/// funding kernels can legitimately produce weights down around `1e-320` for a
+/// candidate that is possible but wildly implausible, and `0 * -inf` would
+/// otherwise poison the whole entropy with a NaN.
 fn shannon_entropy_bits(weights: &[f64]) -> f64 {
     let total: f64 = weights.iter().filter(|&&w| w > 0.0).sum();
     if total <= 0.0 {
@@ -145,7 +168,9 @@ fn shannon_entropy_bits(weights: &[f64]) -> f64 {
     for &w in weights {
         if w > 0.0 {
             let p = w / total;
-            h -= p * p.log2();
+            if p > 0.0 {
+                h -= p * p.log2();
+            }
         }
     }
     h
@@ -198,20 +223,15 @@ fn funder_count(k: usize) -> usize {
     (k / 4).max(4)
 }
 
-/// Assign each committer in the batch a funding-provenance class id.
+/// Draw each committer's TRUE common funder from a Zipf popularity
+/// (`weight(rank) = 1/(rank+1)`), so a few exchanges fund most participants and
+/// the rest are rare or unique.
 ///
-/// Under [`Scenario::Baseline`] committers draw a common funder from a Zipf
-/// popularity (`weight(rank) = 1/(rank+1)`), so a few exchanges fund most
-/// participants and the rest are rare or unique. Under [`Scenario::MirrorPool`]
-/// funding flows through the shielded path, so the adversary cannot separate
-/// funders: every committer is placed in ONE class (the partition is broken).
-fn assign_provenance(batch: &EpochBatch, scenario: Scenario, seed: u64) -> Vec<usize> {
+/// Scenario-independent on purpose: both worlds describe the same crowd of
+/// people with the same banking habits, and differ only in how those people move
+/// value into their commit wallets.
+fn funder_ids(batch: &EpochBatch, seed: u64, n_funders: usize) -> Vec<usize> {
     let k = batch.profiles.len();
-    if scenario == Scenario::MirrorPool {
-        // Provenance broken: one indistinguishable class.
-        return vec![0usize; k];
-    }
-    let n_funders = funder_count(k);
     let weights: Vec<f64> = (0..n_funders).map(|f| 1.0 / (f as f64 + 1.0)).collect();
     let cum: Vec<f64> = weights
         .iter()
@@ -228,6 +248,80 @@ fn assign_provenance(batch: &EpochBatch, scenario: Scenario, seed: u64) -> Vec<u
             cum.iter().position(|&c| x < c).unwrap_or(n_funders - 1)
         })
         .collect()
+}
+
+/// What the adversary knows about the committers' funding provenance.
+///
+/// This is the one channel that differs structurally between the two scenarios,
+/// and it is the reason the metric is not circular: the MirrorPool variant is
+/// computed from the shipped funding mechanism, not asserted.
+enum Provenance {
+    /// The funding edge is public (an ordinary transfer from the main wallet), so
+    /// provenance is an EXACT partition: committer `i` is in class `funders[i]`.
+    Direct { funders: Vec<usize> },
+    /// Funding crossed the confidential-value pool, so provenance is only as
+    /// sharp as the deposit-to-withdrawal matching the public boundary crossings
+    /// allow. See [`crate::funding`].
+    Shielded(FundingTrace),
+}
+
+impl Provenance {
+    /// Committer `i`'s true funder. A targeted adversary knows this for the
+    /// TARGET (that is what makes the attack targeted); it is never revealed for
+    /// the other candidates.
+    fn funder(&self, i: usize) -> usize {
+        match self {
+            Provenance::Direct { funders } => funders[i],
+            Provenance::Shielded(trace) => trace.funder(i),
+        }
+    }
+
+    /// The adversary's probability that committer `i` was funded by `funder`:
+    /// how much of a provenance decoy `i` is for a target funded by `funder`.
+    fn weight(&self, i: usize, funder: usize) -> f64 {
+        match self {
+            Provenance::Direct { funders } => {
+                if funders[i] == funder {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Provenance::Shielded(trace) => trace.belief(i, funder),
+        }
+    }
+
+    /// The adversary's best single partition of the batch, for reporting the
+    /// largest apparent provenance class. The metric itself never collapses the
+    /// distribution like this.
+    fn map_classes(&self) -> Vec<usize> {
+        match self {
+            Provenance::Direct { funders } => funders.clone(),
+            Provenance::Shielded(trace) => trace.map_classes(),
+        }
+    }
+}
+
+/// Build the provenance view of one epoch under one scenario and funding model.
+fn provenance(
+    batch: &EpochBatch,
+    scenario: Scenario,
+    seed: u64,
+    model: FundingModel,
+) -> Provenance {
+    let k = batch.profiles.len();
+    let n_funders = funder_count(k);
+    let funders = funder_ids(batch, seed, n_funders);
+    match scenario {
+        Scenario::Baseline => Provenance::Direct { funders },
+        Scenario::MirrorPool => Provenance::Shielded(FundingTrace::generate(
+            &funders,
+            n_funders,
+            batch.epoch.0,
+            seed,
+            model,
+        )),
+    }
 }
 
 /// Which behavioral channels SETTLEMENT actually exposed in this epoch, decided
@@ -294,13 +388,25 @@ fn rbf(d: f64) -> f64 {
 
 /// The adversary's posterior weight vector over the `k` committers for a known
 /// target committer `t`: how indistinguishable each committer `i` is from `t`
-/// under the enabled channels. `t` itself always has weight 1 (it matches
-/// itself exactly), so the true initiator is always in support. The effective
-/// set size of `t` is [`shannon_effective_size`] / [`min_entropy_size`] of this
-/// vector.
+/// under the enabled channels. The vector is UNNORMALIZED; only the ratios
+/// matter, and both effective sizes normalize internally.
+///
+/// The true initiator is always in the support, but not always at weight 1. On
+/// the behavioral channels `t` matches itself exactly (`rbf(0) = 1`); on the
+/// provenance channel it carries the adversary's belief that `t` was funded by
+/// `t`'s own funder, which is `1` for a public funding edge and strictly between
+/// 0 and 1 for shielded funding (its own deposit is always a plausible source
+/// for its own withdrawal, so the weight is never zero, but the deposits of
+/// other funders are plausible too). An adversary that ends up ranking some
+/// other committer above the true one is exactly what a working mechanism looks
+/// like; the metric scores the SHAPE of the distribution, not whether the
+/// adversary guessed right.
+///
+/// The effective set size of `t` is [`shannon_effective_size`] /
+/// [`min_entropy_size`] of this vector.
 fn posterior(
     batch: &EpochBatch,
-    provenance: &[usize],
+    provenance: &Provenance,
     t: usize,
     channels: &[Channel],
     activity: &ChannelActivity,
@@ -313,10 +419,13 @@ fn posterior(
     for &ch in channels {
         match ch {
             Channel::FundingProvenance => {
+                // The adversary knows the TARGET's funder and asks of every
+                // committer how likely they are to share it. With a public
+                // funding edge this is the hard 1/0 partition; with shielded
+                // funding it is whatever the deposit-to-withdrawal matching left.
+                let target_funder = provenance.funder(t);
                 for (i, wi) in w.iter_mut().enumerate() {
-                    if provenance[i] != provenance[t] {
-                        *wi = 0.0;
-                    }
+                    *wi *= provenance.weight(i, target_funder);
                 }
             }
             Channel::Timing => {
@@ -365,12 +474,35 @@ fn dominant_class(provenance: &[usize]) -> usize {
 }
 
 /// Compute the effective anonymity accounting for a modeled population under a
-/// set of adversary channels. Iterates every committer of every settled epoch
-/// as a target, builds the attacker's posterior, and aggregates the two
-/// effective sizes plus the worst case and the dominant class size.
+/// set of adversary channels, with MirrorPool funding under
+/// [`FundingModel::default`] (the shipped recommendation - a denominated pool
+/// plus batched funding rounds - against the strongest implemented attacker).
 ///
 /// Deterministic in `(population, channels, seed)`.
 pub fn effective_k(pop: &Population, channels: &[Channel], seed: u64) -> EffectiveK {
+    effective_k_with_funding(pop, channels, seed, FundingModel::default())
+}
+
+/// [`effective_k`] under an explicit funding model (protocol policy plus the
+/// attacker it is evaluated against). Iterates every committer of every settled
+/// epoch as a target, builds the attacker's posterior, and aggregates the two
+/// effective sizes plus the worst case and the dominant class size.
+///
+/// `model` only affects [`Scenario::MirrorPool`]: a Baseline committer funds by
+/// public transfer, so there is neither a policy to choose nor a matching to
+/// solve.
+///
+/// A bare [`crate::funding::FundingPolicy`] converts into a model against the
+/// strongest implemented attacker, which is the deliberate default.
+///
+/// Deterministic in `(population, channels, seed, model)`.
+pub fn effective_k_with_funding(
+    pop: &Population,
+    channels: &[Channel],
+    seed: u64,
+    model: impl Into<FundingModel>,
+) -> EffectiveK {
+    let model = model.into();
     let (cu_scale, fee_scale) = fingerprint_scales(pop);
     let mut sum_shannon = 0.0;
     let mut sum_min = 0.0;
@@ -383,9 +515,9 @@ pub fn effective_k(pop: &Population, channels: &[Channel], seed: u64) -> Effecti
         if batch.profiles.is_empty() {
             continue;
         }
-        let provenance = assign_provenance(batch, pop.scenario, seed);
+        let provenance = provenance(batch, pop.scenario, seed, model);
         let activity = channel_activity(batch);
-        sum_dominant += dominant_class(&provenance) as f64;
+        sum_dominant += dominant_class(&provenance.map_classes()) as f64;
         n_batches += 1;
         for t in 0..batch.profiles.len() {
             let w = posterior(
@@ -421,13 +553,26 @@ pub fn effective_k(pop: &Population, channels: &[Channel], seed: u64) -> Effecti
 
 /// Generate the Baseline and MirrorPool populations for one `k` (from the same
 /// shared actor stream, exactly as the attack table does) and return their
-/// effective-k accounting under `channels`.
+/// effective-k accounting under `channels`, with MirrorPool funding under
+/// [`FundingModel::default`].
 pub fn run_effective_k(
     k: usize,
     n_participants: usize,
     seed: u64,
     channels: &[Channel],
 ) -> (EffectiveK, EffectiveK) {
+    run_effective_k_with_funding(k, n_participants, seed, channels, FundingModel::default())
+}
+
+/// [`run_effective_k`] under an explicit MirrorPool funding model.
+pub fn run_effective_k_with_funding(
+    k: usize,
+    n_participants: usize,
+    seed: u64,
+    channels: &[Channel],
+    model: impl Into<FundingModel>,
+) -> (EffectiveK, EffectiveK) {
+    let model = model.into();
     use crate::PopulationConfig;
     let baseline = Population::generate(&PopulationConfig {
         n_participants,
@@ -442,8 +587,8 @@ pub fn run_effective_k(
         scenario: Scenario::MirrorPool,
     });
     (
-        effective_k(&baseline, channels, seed),
-        effective_k(&mirror, channels, seed),
+        effective_k_with_funding(&baseline, channels, seed, model),
+        effective_k_with_funding(&mirror, channels, seed, model),
     )
 }
 
@@ -525,6 +670,7 @@ pub fn effective_k_under_sybils(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::funding::{FundingModel, FundingPolicy};
     use crate::DEFAULT_SEED;
 
     const TEST_N: usize = 2048;
@@ -581,7 +727,38 @@ mod tests {
         assert_eq!(min_entropy_size(&[0.0, 0.0]), 0.0);
     }
 
+    #[test]
+    fn subnormal_weights_do_not_poison_the_entropy() {
+        // The funding kernels legitimately produce weights near the subnormal
+        // floor for a candidate that is possible but wildly implausible. Their
+        // normalized share can underflow to exactly 0, and `0 * log2(0)` is NaN
+        // unless the `0 log 0 = 0` convention is applied. A NaN here silently
+        // destroys a whole published row, so it is pinned.
+        let w = vec![1.0, 1.0, 1e-320, 5e-324];
+        let sh = shannon_effective_size(&w);
+        let me = min_entropy_size(&w);
+        assert!(sh.is_finite(), "shannon size must stay finite, got {sh}");
+        assert!(
+            me.is_finite(),
+            "min-entropy size must stay finite, got {me}"
+        );
+        assert!(
+            (sh - 2.0).abs() < 1e-9,
+            "two real candidates plus negligible mass is effectively 2, got {sh}"
+        );
+    }
+
     // ---- modeled population effective-k ----
+
+    fn provenance_only(k: usize, policy: FundingPolicy) -> (EffectiveK, EffectiveK) {
+        run_effective_k_with_funding(
+            k,
+            TEST_N,
+            DEFAULT_SEED,
+            &[Channel::FundingProvenance],
+            policy,
+        )
+    }
 
     #[test]
     fn deterministic() {
@@ -591,53 +768,272 @@ mod tests {
     }
 
     #[test]
-    fn provenance_collapses_baseline_but_not_mirrorpool() {
-        // Provenance ALONE: the rival's marquee axis. Baseline effective-k must
-        // be far below nominal (the funding partition shrinks the set), while
-        // MirrorPool keeps it at nominal (the partition is broken).
+    fn baseline_numbers_are_independent_of_the_funding_policy() {
+        // A Baseline committer tops up by public transfer, which is not something
+        // the pool's funding policy can change. Pinned to the published values so
+        // any future change to the funding model that perturbs the Baseline column
+        // (and therefore the published comparison) fails loudly.
+        let expected = [(16usize, 5.98), (32, 7.51), (64, 9.47)];
+        for (k, want) in expected {
+            for policy in [
+                FundingPolicy::pass_through(),
+                FundingPolicy::uniform_rounds(),
+                FundingPolicy::uniform_rounds().with_adoption(0.25),
+            ] {
+                let (base, _) = provenance_only(k, policy);
+                assert!(
+                    (base.shannon_effective_k - want).abs() < 0.005,
+                    "k={k} under {}: Baseline effective-k should be {want:.2}, got {:.2}",
+                    policy.label(),
+                    base.shannon_effective_k
+                );
+                assert!(
+                    base.worst_case_k <= 1.0 + 1e-9,
+                    "k={k}: some committer must have a unique funder (worst case 1)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pass_through_shielded_funding_barely_helps() {
+        // The honest negative result. Shielding the amount you are about to
+        // withdraw and withdrawing it immediately leaves the deposit-withdrawal
+        // matching almost free to solve, so routing through the pool buys single
+        // digit percentages over a public funding edge. This test exists so the
+        // repo can never quietly claim otherwise.
         for k in [16usize, 32, 64] {
-            let (base, mirror) =
-                run_effective_k(k, TEST_N, DEFAULT_SEED, &[Channel::FundingProvenance]);
-            assert_eq!(base.nominal_k, k);
+            let (base, naive) = provenance_only(k, FundingPolicy::pass_through());
             assert!(
-                base.shannon_effective_k < 0.5 * k as f64,
-                "k={k}: provenance must collapse Baseline effective-k well below nominal, got {:.2}",
+                naive.shannon_effective_k >= base.shannon_effective_k,
+                "k={k}: shielded funding must never be WORSE than a public edge"
+            );
+            assert!(
+                naive.shannon_effective_k < 1.15 * base.shannon_effective_k,
+                "k={k}: pass-through funding must stay close to the Baseline leak, got {:.2} vs {:.2}",
+                naive.shannon_effective_k,
                 base.shannon_effective_k
             );
             assert!(
-                base.worst_case_k <= 1.0 + 1e-9,
-                "k={k}: some committer must have a unique funder (worst case 1), got {:.2}",
-                base.worst_case_k
-            );
-            assert!(
-                (mirror.shannon_effective_k - k as f64).abs() < 1e-6,
-                "k={k}: broken provenance must keep MirrorPool at nominal, got {:.2}",
-                mirror.shannon_effective_k
+                naive.shannon_effective_k < 0.4 * k as f64,
+                "k={k}: pass-through funding must stay far below nominal, got {:.2}",
+                naive.shannon_effective_k
             );
         }
     }
 
     #[test]
+    fn each_mitigation_alone_is_insufficient() {
+        // Denomination without batching still leaks through the short causal
+        // window; batching without denomination still leaks through the amount.
+        // Both are better than nothing and both are far from enough.
+        for k in [16usize, 32, 64] {
+            let (_, naive) = provenance_only(k, FundingPolicy::pass_through());
+            let (_, denom) = provenance_only(k, FundingPolicy::denominated_only());
+            let (_, batched) = provenance_only(k, FundingPolicy::batched_only());
+            let (_, both) = provenance_only(k, FundingPolicy::uniform_rounds());
+            for (name, eff) in [("denominated only", denom), ("batched only", batched)] {
+                assert!(
+                    eff.shannon_effective_k > naive.shannon_effective_k,
+                    "k={k}: {name} must beat pass-through funding"
+                );
+                assert!(
+                    eff.shannon_effective_k < 0.55 * k as f64,
+                    "k={k}: {name} must remain well below nominal, got {:.2}",
+                    eff.shannon_effective_k
+                );
+                assert!(
+                    eff.shannon_effective_k < both.shannon_effective_k,
+                    "k={k}: {name} must be weaker than applying both mitigations"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn uniform_rounds_shrink_the_residual_but_do_not_close_it() {
+        // The measured result the docs publish: a denominated pool plus batched
+        // funding rounds retains roughly 90% of nominal, which is a large win over
+        // pass-through funding AND is strictly short of the full set. Both halves
+        // are asserted: the mechanism must work, and the repo must not claim it
+        // works perfectly.
+        for k in [16usize, 32, 64] {
+            let (_, naive) = provenance_only(k, FundingPolicy::pass_through());
+            let (_, default) = provenance_only(k, FundingPolicy::uniform_rounds());
+            assert!(
+                default.shannon_effective_k > 2.0 * naive.shannon_effective_k,
+                "k={k}: uniform rounds must more than double the effective set vs pass-through, \
+                 got {:.2} vs {:.2}",
+                default.shannon_effective_k,
+                naive.shannon_effective_k
+            );
+            let retained = default.shannon_effective_k / k as f64;
+            assert!(
+                (0.85..0.95).contains(&retained),
+                "k={k}: measured retention is {:.3}; if this moved, the published tables in \
+                 docs/EFFECTIVE_K.md and the paper are stale",
+                retained
+            );
+            assert!(
+                default.shannon_effective_k < k as f64,
+                "k={k}: the residual amount/timing channel is real, so effective-k must be \
+                 strictly below nominal"
+            );
+            assert!(
+                default.min_entropy_k < default.shannon_effective_k,
+                "k={k}: the worst-case measure must be strictly more pessimistic"
+            );
+            assert!(
+                default.worst_case_k < 0.4 * k as f64,
+                "k={k}: the most exposed committer is far below the advertised set, got {:.2}",
+                default.worst_case_k
+            );
+        }
+    }
+
+    #[test]
+    fn dwell_monotonically_shrinks_the_residual() {
+        let mut previous = 0.0;
+        for dwell in [0u64, 1, 2, 4, 8] {
+            let (_, eff) = provenance_only(32, FundingPolicy::uniform_rounds_with_dwell(dwell));
+            assert!(
+                eff.shannon_effective_k >= previous - 1e-9,
+                "dwell {dwell}: more dwell must never leak more ({:.2} after {:.2})",
+                eff.shannon_effective_k,
+                previous
+            );
+            previous = eff.shannon_effective_k;
+        }
+        let (_, none) = provenance_only(32, FundingPolicy::uniform_rounds_with_dwell(0));
+        assert!(
+            previous > none.shannon_effective_k + 5.0,
+            "dwell must buy several units of effective-k, got {:.2} -> {:.2}",
+            none.shannon_effective_k,
+            previous
+        );
+    }
+
+    #[test]
+    fn partial_adoption_costs_everyone() {
+        // A committer who tops up directly is fully re-linked, and an adversary
+        // that can place them elsewhere eliminates them as a candidate, so the
+        // adopters lose crowd too. The mechanism's protection is bounded by how
+        // many people use it, and the metric says so.
+        let (_, full) = provenance_only(32, FundingPolicy::uniform_rounds());
+        let mut previous = full.shannon_effective_k;
+        for adoption in [0.9f64, 0.75, 0.5, 0.25] {
+            let (_, eff) =
+                provenance_only(32, FundingPolicy::uniform_rounds().with_adoption(adoption));
+            assert!(
+                eff.shannon_effective_k < previous,
+                "adoption {adoption}: less adoption must lower effective-k ({:.2} after {:.2})",
+                eff.shannon_effective_k,
+                previous
+            );
+            assert!(
+                eff.worst_case_k <= 1.0 + 1e-9,
+                "adoption {adoption}: a committer who topped up directly is fully exposed"
+            );
+            previous = eff.shannon_effective_k;
+        }
+    }
+
+    #[test]
     fn full_channel_gap_baseline_vs_mirrorpool() {
-        // With every channel the naive pool is almost fully deanonymizable while
-        // mirror-pool stays at nominal: the central claim of the metric.
+        // With every channel composed the naive pool is effectively
+        // deanonymizable. mirror-pool's settlement channels carry zero variance,
+        // so its number is set entirely by the funding residual: adding timing,
+        // amount, and fingerprint to the provenance channel changes nothing.
         for k in [16usize, 32, 64] {
             let (base, mirror) = run_effective_k(k, TEST_N, DEFAULT_SEED, &Channel::ALL);
+            let (_, provenance_only_mirror) = provenance_only(k, FundingPolicy::default());
             assert!(
                 base.shannon_effective_k < 0.25 * k as f64,
                 "k={k}: full-channel Baseline effective-k should be a small fraction of nominal, got {:.2}",
                 base.shannon_effective_k
             );
             assert!(
-                (mirror.shannon_effective_k - k as f64).abs() < 1e-6,
-                "k={k}: full-channel MirrorPool effective-k should equal nominal, got {:.2}",
-                mirror.shannon_effective_k
+                (mirror.shannon_effective_k - provenance_only_mirror.shannon_effective_k).abs()
+                    < 1e-9,
+                "k={k}: settlement channels must add nothing under shared-epoch batching"
+            );
+            assert!(
+                mirror.shannon_effective_k > 3.0 * base.shannon_effective_k,
+                "k={k}: mirror-pool must still be far ahead of the naive pool, got {:.2} vs {:.2}",
+                mirror.shannon_effective_k,
+                base.shannon_effective_k
             );
             assert!(
                 mirror.min_entropy_k <= mirror.shannon_effective_k + 1e-9,
                 "min-entropy never exceeds shannon"
             );
         }
+    }
+
+    #[test]
+    fn joint_adversary_never_leaves_more_effective_k() {
+        // The claim every published table depends on: the numbers are scored
+        // against the strongest attacker implemented, so the weaker one must
+        // never look better for the attacker. Measured over the whole reported
+        // grid rather than argued.
+        //
+        // (Per-INSTANCE this is not a theorem; see
+        // `funding::tests::sinkhorn_is_an_approximation_not_a_bound` for a
+        // measured epoch where the joint attacker does slightly worse. The
+        // aggregate is what the tables report and what is asserted here.)
+        for k in [16usize, 32, 64] {
+            for policy in [
+                FundingPolicy::pass_through(),
+                FundingPolicy::denominated_only(),
+                FundingPolicy::batched_only(),
+                FundingPolicy::uniform_rounds(),
+            ] {
+                let (_, independent) = run_effective_k_with_funding(
+                    k,
+                    TEST_N,
+                    DEFAULT_SEED,
+                    &[Channel::FundingProvenance],
+                    FundingModel::independent(policy),
+                );
+                let (_, joint) = run_effective_k_with_funding(
+                    k,
+                    TEST_N,
+                    DEFAULT_SEED,
+                    &[Channel::FundingProvenance],
+                    FundingModel::joint(policy),
+                );
+                assert!(
+                    joint.shannon_effective_k <= independent.shannon_effective_k + 1e-9,
+                    "k={k} {}: the joint attacker left MORE anonymity ({:.2} vs {:.2}), so the \
+                     published tables are quoting the wrong attacker",
+                    policy.label(),
+                    joint.shannon_effective_k,
+                    independent.shannon_effective_k
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn published_default_is_scored_against_the_joint_adversary() {
+        // A bare policy must convert to the STRONGEST attacker, not the weakest:
+        // this is what stops a future refactor from quietly publishing the
+        // flattering column.
+        let (_, from_policy) = run_effective_k_with_funding(
+            32,
+            TEST_N,
+            DEFAULT_SEED,
+            &[Channel::FundingProvenance],
+            FundingPolicy::uniform_rounds(),
+        );
+        let (_, joint) = run_effective_k_with_funding(
+            32,
+            TEST_N,
+            DEFAULT_SEED,
+            &[Channel::FundingProvenance],
+            FundingModel::joint(FundingPolicy::uniform_rounds()),
+        );
+        assert_eq!(from_policy, joint);
     }
 
     #[test]

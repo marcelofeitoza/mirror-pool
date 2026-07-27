@@ -70,7 +70,12 @@ component is implemented and tested, and a live Surfpool soak exercises both
 paths plus the adversarial cases with 17/17 on-chain assertions passing (see
 [`docs/PROOF.md`](docs/PROOF.md)). A separate confidential-value layer (JoinSplit
 shield / private-transfer / unshield, hiding amounts) is also built and
-soak-proven live with 25/25 on-chain assertions. The status table below is kept
+soak-proven live with 25/25 on-chain assertions. That value layer also carries the
+FUNDING leg: a commit wallet is credited by an unshield in a denominated, batched
+funding round instead of by a transfer from a main wallet, which is the one
+mechanism aimed at the strongest real-world deanonymizer (common funding source).
+That path is implemented and unit-tested but not yet in the live soaks, and the
+residual it leaves is measured rather than assumed. The status table below is kept
 honest against the tree.
 
 | Component | Path | Status |
@@ -78,9 +83,10 @@ honest against the tree.
 | Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` (circomlib Poseidon, cross-check-proven against the circuit), `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
 | On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification. 42 mollusk tests; `build-sbf` green; deployed + exercised on public devnet. |
 | ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and executes to a fresh output. A real proof verifies on-chain (fixture test) and live in the soak. |
-| Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. Also prints an information-theoretic effective-k table (Serjantov-Danezis `2^H(p)` + min-entropy) under funding-provenance partitioning; see [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md). |
+| Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. Also prints an information-theoretic effective-k table (Serjantov-Danezis `2^H(p)` + min-entropy) whose mirror-pool provenance classes are DERIVED from the shipped funding mechanism, with funding-policy, adversary-strength, dwell and adoption ablations; see [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md). |
+| Funding-provenance path | `crates/mirror-cli` + `crates/mirror-coordinator` | **Implemented, not yet soaked** - `fund-commit` funds a FRESH commit wallet by unshielding from the value pool (vault is the sender, relay the only signer, denomination enforced), and `funding::FundingRounds` batches those withdrawals to a round boundary with a minimum-round floor and an arrival-independent release order. Covered by unit tests (including that a released withdrawal is relay-only signed and a thin round never reaches the chain) but NOT by the live soaks, which predate it. The residual it leaves (public boundary amounts and slots) is measured, not assumed. |
 | Gasless coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window batching, `k_floor` gate, rotating fee-payer, and real atomic crowd settlement (ComputeBudget + `SettleEpoch` + N participant behaviors, shared accounts in an ALT). |
-| Participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool` / `commit` / `deposit-commit` / `prove` (rebuilds the path + generates and verifies a Groth16 proof in-process in pure Rust via ark-circom/ark-groth16, no Node; `--use-snarkjs` is an optional legacy fallback) / `status`. |
+| Participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool` / `commit` / `deposit-commit` / `prove` (rebuilds the path + generates and verifies a Groth16 proof in-process in pure Rust via ark-circom/ark-groth16, no Node; `--use-snarkjs` is an optional legacy fallback) / `fund-commit` / `status`. |
 | Pooled behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + pooled-action adapters: PlainTransfer (soak baseline), Jupiter swap, jitoSOL stake. |
 | Anti-Sybil + incentives | `programs/mirror-pool` + `crates/mirror-coordinator` | **Implemented** - entry-fee split into a reward pool, crowd-path dwell `ClaimReward`, honest `real_k` reporting; the ZK-path incentive is designed in [`docs/INCENTIVES.md`](docs/INCENTIVES.md). |
 | Soak suite (Surfpool + devnet) | `crates/mirror-soak` | **Implemented** - live end-to-end soak, both behavioral paths + adversarial cases, 17/17 on-chain assertions, on local Surfpool AND public devnet ([`docs/PROOF.md`](docs/PROOF.md)). |
@@ -145,7 +151,7 @@ mirror-pool/
   crates/
     mirror-core          # shared types + wire format + tests    [implemented]
     mirror-coordinator   # off-chain gasless batch coordinator    [implemented]
-    mirror-cli           # participant CLI (commit/prove/status)  [implemented]
+    mirror-cli           # participant CLI (commit/prove/fund/status)[implemented]
     mirror-harness       # adversarial evaluation harness         [implemented]
     mirror-behaviors     # Behavior trait + pooled-action adapters[implemented]
     mirror-soak          # live Surfpool end-to-end soak suite    [implemented]
@@ -157,6 +163,7 @@ mirror-pool/
     THREAT_MODEL.md      # attacker model + which attacks each path defeats
     ARCHITECTURE.md      # the two settlement paths + on-chain design in depth
     ROADMAP.md           # what is built and what is future work
+    EFFECTIVE_K.md       # advertised k vs effective k + the funding-provenance measurement
     INCENTIVES.md        # entry-fee split, dwell reward, ZK-path incentive design
     PROOF.md             # live Surfpool soak results + tx signatures
     CEREMONY.md          # multi-party trusted-setup ceremony: contribute + verify
@@ -194,6 +201,15 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   limit, priority fee, tx version, account ordering, and ALT are normalized to
   one pool-wide standard so per-round transactions are not separable by their
   wallet-software settings.
+- **Common funding source, the dominant real-world anchor - reduced, and
+  measured.** `fund-commit` funds a fresh commit wallet by unshielding from the
+  value pool, released in denominated batched funding rounds, so no public edge
+  links a main wallet to the wallet that commits. This is the one defense with a
+  published residual instead of a clean close: the boundary amounts and slots stay
+  public, which leaves an observer a deposit-to-withdrawal matching problem worth
+  about 10% of nominal k in our model, and much more than that if the pool is
+  free-amount or adoption is low. Numbers, ablations and limits in
+  [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md).
 
 **What mirror-pool does NOT do (explicit non-goals)**
 
@@ -240,7 +256,9 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
 - [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md) - the information-theoretic effective
   anonymity-set size (Serjantov-Danezis `2^H(p)` + min-entropy): advertised k is
   not effective k. A naive pool advertising k=32 has effective k ~7.5 (worst-case
-  1) under funding-provenance partitioning; mirror-pool keeps it at 32.
+  1) under funding-provenance partitioning; mirror-pool's shielded funding rounds
+  measure 28.80 (90.0% of nominal), with the residual 10% published rather than
+  rounded away, and 7.66 if you use the same pool naively.
 - [`docs/CEREMONY.md`](docs/CEREMONY.md) - the multi-party Groth16 phase-2
   trusted-setup ceremony: how to contribute, how to verify somebody else's, what the
   beacon is for, how the independent-contributor count refuses to count self-runs,

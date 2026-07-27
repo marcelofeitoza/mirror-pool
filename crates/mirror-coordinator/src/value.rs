@@ -38,6 +38,7 @@ use crate::crowd::compute_budget_instructions;
 
 /// One confidential `Transact` to submit: the emitted instruction data + accounts
 /// plus the pool-wide normalized tx shape.
+#[derive(Debug)]
 pub struct ValueTransactRequest {
     /// The mirror-pool program id.
     pub program_id: Pubkey,

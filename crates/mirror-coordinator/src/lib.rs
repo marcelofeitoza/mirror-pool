@@ -51,12 +51,19 @@ pub use crowd::{
     CrowdSettleRequest, RpcSettleSubmitter, SettleContext, SettleParticipant,
     PLAIN_TRANSFER_MAX_PER_TX,
 };
+pub use funding::{
+    FundingRequest, FundingRoundConfig, FundingRounds, RoundOutcome, DEFAULT_MIN_ROUND_SIZE,
+    DEFAULT_ROUND_SLOTS,
+};
 pub use value::{build_transact_message, submit_transact, ValueTransactRequest};
 
 /// The RPC boundary (real + mockable) the crowd-path submitter builds on.
 pub mod client;
 /// The crowd path: composing and submitting one atomic settlement transaction.
 pub mod crowd;
+/// Funding rounds: batching the shielded withdrawals that fund fresh commit
+/// wallets, so no funding edge links a main wallet to a commit wallet.
+pub mod funding;
 /// The gasless confidential submit path: building + signing + sending a Transact.
 pub mod value;
 

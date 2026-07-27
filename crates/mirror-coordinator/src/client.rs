@@ -249,6 +249,11 @@ pub(crate) struct MockSolanaClient {
     pub slot: u64,
     pub table: Pubkey,
     pub sent: std::sync::Mutex<Vec<VersionedTransaction>>,
+    /// When set, `send_and_confirm_transaction` fails once this many
+    /// transactions have already been accepted. Lets a test exercise the
+    /// partial-failure path (an RPC that dies halfway through a batch) instead
+    /// of only the happy path.
+    pub fail_after: Option<usize>,
 }
 
 #[cfg(test)]
@@ -260,6 +265,15 @@ impl MockSolanaClient {
             slot: 123,
             table: Pubkey::new_from_array([0xA1; 32]),
             sent: std::sync::Mutex::new(Vec::new()),
+            fail_after: None,
+        }
+    }
+
+    /// A client that accepts `n` transactions and then fails every send.
+    pub fn failing_after(n: usize) -> Self {
+        Self {
+            fail_after: Some(n),
+            ..Self::new()
         }
     }
 
@@ -280,8 +294,12 @@ impl SolanaClient for MockSolanaClient {
     }
 
     async fn send_and_confirm_transaction(&self, tx: &VersionedTransaction) -> Result<Signature> {
+        let mut sent = self.sent.lock().unwrap();
+        if self.fail_after.is_some_and(|n| sent.len() >= n) {
+            anyhow::bail!("mock RPC failure after {} transactions", sent.len());
+        }
         let sig = tx.signatures.first().copied().unwrap_or_default();
-        self.sent.lock().unwrap().push(tx.clone());
+        sent.push(tx.clone());
         Ok(sig)
     }
 

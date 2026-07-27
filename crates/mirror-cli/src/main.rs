@@ -23,15 +23,25 @@
 //!    bucketed, never free-form: public studies show variable amounts leak a
 //!    large fraction of anonymity to amount-matching alone.
 //!
+//! A fifth property lives on the FUNDING leg rather than the settlement leg:
+//! `fund-commit` withdraws from the confidential-value pool into a fresh commit
+//! wallet, so the public graph carries no edge from the participant's main wallet
+//! to the wallet they commit from. That edge is the common-funding-source anchor,
+//! the dominant real-world deanonymizer; what the mechanism does and does not
+//! hide is spelled out in [`crate::funding`] and measured in
+//! `docs/EFFECTIVE_K.md`.
+//!
 //! Subcommands: `init-pool` (admin: create + fix a pool's config), `commit`
 //! (crowd path: post a commitment binding secret+action+epoch), `deposit-commit`
 //! (ZK opt-in: escrow lamports + post a commitment binding secret+recipient+amount),
 //! `prove` (ZK opt-in: rebuild the Merkle path, generate + verify a Groth16
-//! membership proof, and emit the `SettleZk` instruction), and `status` (inspect
-//! the pool + current epoch on-chain).
+//! membership proof, and emit the `SettleZk` instruction), `fund-commit` (funding:
+//! unshield into a fresh commit wallet), and `status` (inspect the pool + current
+//! epoch on-chain).
 
 mod ceremony;
 mod chain;
+mod funding;
 mod groth16;
 mod note;
 mod prove;
@@ -109,6 +119,9 @@ enum Command {
     Transfer(TransferArgs),
     /// (confidential value) Withdraw a note to a public recipient; prove + emit Transact.
     Unshield(UnshieldArgs),
+    /// (funding) Fund a FRESH commit wallet by unshielding, so no funding edge
+    /// links your main wallet to the wallet you commit from.
+    FundCommit(FundCommitArgs),
     /// Multi-party Groth16 phase-2 trusted-setup ceremony: start, contribute,
     /// beacon, verify, export the verifying key.
     #[command(subcommand_help_heading = "Trusted setup")]
@@ -276,6 +289,46 @@ struct UnshieldArgs {
     /// Lamports to withdraw to the recipient; the remainder returns to self.
     #[arg(long)]
     amount: u64,
+    /// Directory to save note records into (gitignored).
+    #[arg(long, default_value = DEFAULT_NOTE_DIR)]
+    note_dir: PathBuf,
+    #[command(flatten)]
+    prove: TxProveArgs,
+}
+
+/// `fund-commit`: the funding leg of the protocol. Withdraws from the shielded
+/// value pool into a FRESH commit wallet, so the public graph never carries an
+/// edge from the participant's main wallet to the wallet they commit from. The
+/// residual (deposit/withdrawal amounts and slots are public) is handled by the
+/// pool's fixed denomination plus the coordinator's funding rounds; see
+/// `crate::funding` and `docs/EFFECTIVE_K.md`.
+#[derive(Args)]
+struct FundCommitArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// The ValuePool PDA (base58) to withdraw from. Prefer a DENOMINATED pool:
+    /// a uniform withdrawal amount is what makes deposit-to-withdrawal matching hard.
+    #[arg(long)]
+    pool: String,
+    /// The spendable input note record (from `scan`) that funds the withdrawal.
+    #[arg(long)]
+    note: PathBuf,
+    /// Where to write the FRESH commit-wallet keypair (refuses to overwrite).
+    #[arg(long, default_value = "notes/commit-wallet.json")]
+    out_keypair: PathBuf,
+    /// Reuse an existing commit-wallet keypair instead of generating a fresh one.
+    /// A fresh wallet per commit is the default for a reason: reusing one links
+    /// your epochs to each other.
+    #[arg(long, conflicts_with = "out_keypair")]
+    commit_wallet: Option<PathBuf>,
+    /// Lamports to withdraw. Optional (and pinned) when the pool is denominated;
+    /// required when it is not.
+    #[arg(long)]
+    amount: Option<u64>,
     /// Directory to save note records into (gitignored).
     #[arg(long, default_value = DEFAULT_NOTE_DIR)]
     note_dir: PathBuf,
@@ -552,6 +605,7 @@ fn main() -> Result<()> {
         Command::Shield(args) => run_shield(args),
         Command::Transfer(args) => run_transfer(args),
         Command::Unshield(args) => run_unshield(args),
+        Command::FundCommit(args) => run_fund_commit(args),
         Command::Scan(args) => run_scan(args),
         Command::Ceremony(args) => ceremony::run(args),
     }
@@ -922,7 +976,7 @@ fn run_shield(args: ShieldArgs) -> Result<()> {
         prove: args.prove.to_opts(),
         out: args.prove.out.clone(),
     })?;
-    print_transact_emit(&emit)?;
+    print_transact_emit(&emit, args.prove.use_snarkjs)?;
     Ok(())
 }
 
@@ -947,7 +1001,7 @@ fn run_transfer(args: TransferArgs) -> Result<()> {
         prove: args.prove.to_opts(),
         out: args.prove.out.clone(),
     })?;
-    print_transact_emit(&emit)?;
+    print_transact_emit(&emit, args.prove.use_snarkjs)?;
     Ok(())
 }
 
@@ -967,7 +1021,66 @@ fn run_unshield(args: UnshieldArgs) -> Result<()> {
         prove: args.prove.to_opts(),
         out: args.prove.out.clone(),
     })?;
-    print_transact_emit(&emit)?;
+    print_transact_emit(&emit, args.prove.use_snarkjs)?;
+    Ok(())
+}
+
+fn run_fund_commit(args: FundCommitArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let value_pool = parse_pubkey(&args.pool, "pool")?;
+
+    // The pool's denomination decides the withdrawal amount: under a denominated
+    // pool every funding withdrawal is the same number, which is what makes the
+    // deposit-to-withdrawal matching hard. Read it from chain rather than trusting
+    // a flag.
+    let chain = Chain::new(args.rpc_url.clone());
+    let vpool = chain
+        .value_pool_state(&value_pool)
+        .context("reading the value pool")?;
+    let amount = funding::resolve_funding_amount(vpool.denomination, args.amount)?;
+
+    let (commit_wallet, keypair_path, fresh) = match &args.commit_wallet {
+        Some(path) => (funding::load_commit_wallet(path)?, path.clone(), false),
+        None => (
+            funding::create_commit_wallet(&args.out_keypair)?,
+            args.out_keypair.clone(),
+            true,
+        ),
+    };
+    let recipient = commit_wallet.pubkey();
+
+    let emit = value::run_unshield(value::UnshieldOpts {
+        rpc_url: args.rpc_url,
+        program_id,
+        value_pool,
+        note: args.note,
+        recipient,
+        amount,
+        note_dir: args.note_dir,
+        prove: args.prove.to_opts(),
+        out: args.prove.out.clone(),
+    })?;
+
+    println!("commit wallet:  {}", funding::address(&commit_wallet));
+    println!(
+        "keypair:        {} ({})",
+        keypair_path.display(),
+        if fresh { "freshly generated" } else { "reused" }
+    );
+    println!("funding amount: {amount} lamports");
+    match vpool.denomination {
+        Some(d) => println!("denomination:   {d} lamports (enforced on-chain)"),
+        None => println!("denomination:   none (free-amount pool)"),
+    }
+    println!();
+    print_transact_emit(&emit, args.prove.use_snarkjs)?;
+    println!();
+    println!("funding notes:");
+    for note in funding::funding_notes(vpool.denomination.is_some()) {
+        println!("  - {note}");
+    }
+    println!();
+    println!("next: `mirror-cli commit --keypair {}` (or `deposit-commit`) from the funded wallet, once the coordinator's funding round has released this withdrawal.", keypair_path.display());
     Ok(())
 }
 
@@ -1011,8 +1124,12 @@ fn run_scan(args: ScanArgs) -> Result<()> {
 }
 
 /// Print the emitted Transact bundle: a human summary then the machine-readable JSON.
-fn print_transact_emit(emit: &value::TransactEmit) -> Result<()> {
-    println!("proof generated and VERIFIED by snarkjs.");
+fn print_transact_emit(emit: &value::TransactEmit, use_snarkjs: bool) -> Result<()> {
+    if use_snarkjs {
+        println!("proof generated and VERIFIED by snarkjs (fallback path).");
+    } else {
+        println!("proof generated and VERIFIED in-process (pure Rust; no Node process).");
+    }
     println!();
     let submitter = if emit.shield_requires_depositor_signature {
         "the relay authority (fee payer + signer) AND the depositor (co-signs + funds the deposit)"

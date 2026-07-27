@@ -60,11 +60,14 @@ report a falsifiable anonymity metric rather than a nominal count: an adversaria
 harness measures attacker advantage over the $1/k$ guess, and an
 information-theoretic effective-$k$ model (Serjantov-Danezis $2^{H(p)}$ plus
 min-entropy) shows that a naive pool advertising $k=32$ delivers an effective set
-of about $7.5$ (worst case $1$) under funding-provenance partitioning while
-mirror-pool holds the full $32$. Everything is deployed and browser-verifiable on
+of about $7.5$ (worst case $1$) under funding-provenance partitioning. We close
+that channel with a mechanism rather than an assumption - commit wallets are
+funded by unshielding from the value pool in denominated, batched funding rounds
+- and then measure what the mechanism leaves: $28.80$ of $32$ ($90.0\%$), with the
+missing $10\%$ published as a residual amount/timing leak rather than rounded away. Everything is deployed and browser-verifiable on
 public devnet (program \code{Eez\-Wd\-Frm\-HtR2\-PCuuc\-Uruvkgy\-B9HW3\-w2Ksk\-ZNeY\-mX\-szBq}),
 with two live soaks passing $17/17$ behavioral and $25/25$ confidential on-chain
-assertions, backed by $110$ host tests and $42$ on-chain program tests.
+assertions, backed by $205$ host tests and $42$ on-chain program tests.
 \end{abstract}
 
 \section{Introduction}
@@ -99,6 +102,12 @@ creep: a deployment that runs both hides who acted and how much moved at once.
         JoinSplit (\code{shield} / \code{transfer} / \code{unshield}) with value
         conservation, range proofs, \code{extDataHash} binding, and ECIES notes,
         composed with the behavioral guarantee to hide both axes.
+  \item \textbf{A funding-provenance mechanism, and its measured residual}: the
+        commit wallet is funded by unshielding from the value pool in
+        denominated, batched funding rounds, so no public edge links a main
+        wallet to a commit wallet; the effective-$k$ model derives the resulting
+        anonymity from that mechanism instead of assuming it, and publishes the
+        leak that survives.
   \item \textbf{A falsifiable anonymity story}: an adversarial A/B harness that
         \emph{measures} FIFO/amount/fingerprint/gas-payer attacker advantage,
         plus an information-theoretic effective-$k$ model on the
@@ -249,6 +258,7 @@ Amount matching & Fixed size buckets baked into the type system: \code{SizeBucke
 Wallet fingerprinting & The coordinator submits every epoch with one pool-wide profile (identical CU limit, priority fee, tx version, account ordering, one shared ALT). There is no per-participant transaction to fingerprint. \\
 Self-paid gas & Settlement is gasless for participants; a \emph{rotating} fee-payer set with independent funding histories signs and funds it, so no acting wallet self-attributes and no single relay becomes a consolidation cluster node. \\
 Copy-trading / shadowing & Before settlement the only thing on the wire is a commitment hash; at settlement $N$ identical actions execute at once with no per-actor signal, so there is no individual to isolate and shadow. \\
+Common funding source & The commit wallet is funded by \emph{unshielding} from the confidential-value pool (\code{fund-commit}), released in denominated, batched funding rounds with a minimum-size floor: the vault is the on-chain sender and the relay the only signer, so no public edge links a main wallet to a commit wallet. This is the one defense with a \emph{measured residual} rather than a clean close (Section~\ref{sec:anon}): the boundary amounts and slots stay public, leaving a matching problem worth $10\%$ of nominal $k$. \\
 \bottomrule
 \end{tabular}
 \caption{Each defense maps to a concrete mechanism in the codebase, and each is
@@ -449,38 +459,88 @@ classes and someone with a unique funder is alone in their class (worst case $1$
 On top of provenance we fold in the same timing, amount, and fingerprint channels
 the attack battery models.
 
+\paragraph{The mechanism, not an assumption.} mirror-pool answers this channel on
+the funding leg: the participant funds a \emph{fresh} commit wallet by unshielding
+from the confidential-value pool (\code{mirror-cli fund-commit}), and the
+coordinator releases those withdrawals in batched \emph{funding rounds}
+(\code{mirror\_coordinator::funding}). The on-chain sender is the pool vault and
+the relay is the only signature, so the main-wallet-to-commit-wallet edge is never
+written. What survives is \emph{not} nothing: \code{publicAmount} is public on both
+boundary crossings, so an observer sees the deposits and the withdrawals and is
+left with a \textbf{matching problem}. Our effective-$k$ model derives the
+MirrorPool provenance classes from exactly that matching, which is what makes the
+result a measurement rather than a restatement of the design intent.
+
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{@{}lrrr@{}}
+\begin{tabular}{@{}lrrrr@{}}
 \toprule
-\textbf{nominal $k$} & \textbf{Baseline $2^{H(p)}$} & \textbf{Baseline worst-case} & \textbf{MirrorPool $2^{H(p)}$} \\
+\textbf{scenario / funding policy} & \textbf{$k$} & \textbf{$2^{H(p)}$} & \textbf{min-ent.} & \textbf{retained} \\
 \midrule
-\multicolumn{4}{@{}l}{\emph{(a) funding-provenance channel alone (the marquee axis)}}\\
-16 & 5.98 & 1 & 16.00 \\
-32 & 7.51 & 1 & 32.00 \\
-64 & 9.47 & 1 & 64.00 \\
+\multicolumn{5}{@{}l}{\emph{(a) funding-provenance channel alone (the marquee axis)}}\\
+Baseline: public funding edge      & 32 & 7.51  & 7.51  & 23.5\% \\
+MirrorPool: pass-through funding   & 32 & 7.66  & 7.51  & 23.9\% \\
+MirrorPool: denominated only       & 32 & 10.19 & 7.65  & 31.8\% \\
+MirrorPool: batched rounds only    & 32 & 10.93 & 7.66  & 34.2\% \\
+MirrorPool: denominated $+$ rounds & 32 & \textbf{28.80} & 21.00 & \textbf{90.0\%} \\
 \addlinespace
-\multicolumn{4}{@{}l}{\emph{(b) all channels (provenance $+$ timing $+$ amount $+$ fingerprint)}}\\
-16 & 1.01 & 1.00 & 16.00 \\
-32 & 1.02 & 1.01 & 32.00 \\
-64 & 1.01 & 1.00 & 64.00 \\
+Baseline: public funding edge      & 16 & 5.98  & 5.98  & 37.4\% \\
+MirrorPool: denominated $+$ rounds & 16 & 14.30 & 10.77 & 89.4\% \\
+Baseline: public funding edge      & 64 & 9.47  & 9.47  & 14.8\% \\
+MirrorPool: denominated $+$ rounds & 64 & 56.85 & 41.17 & 88.8\% \\
+\addlinespace
+\multicolumn{5}{@{}l}{\emph{(b) all channels (provenance $+$ timing $+$ amount $+$ fingerprint)}}\\
+Baseline: public funding edge      & 16 & 1.01 & 1.00 & 6.3\% \\
+Baseline: public funding edge      & 32 & 1.02 & 1.01 & 3.2\% \\
+Baseline: public funding edge      & 64 & 1.01 & 1.00 & 1.6\% \\
+MirrorPool: denominated $+$ rounds & 32 & 28.80 & 21.00 & 90.0\% \\
 \bottomrule
 \end{tabular}
 \caption{A naive pool advertising $k=32$ delivers an effective set of about
 $\mathbf{7.5}$ (worst case $\mathbf{1}$) under funding-provenance partitioning,
-and about $\mathbf{1.0}$ once every channel composes. mirror-pool holds the full
-nominal set at every $k$.}
+and about $\mathbf{1.0}$ once every channel composes. Routing the funding leg
+through the value pool and then behaving naively (pass-through) buys almost
+nothing ($7.66$); denominated, batched funding rounds reach
+$\mathbf{28.80}$ of $32$. The missing $\mathbf{10.0\%}$ is the residual
+amount/timing channel of the public boundary crossings, and the worst-placed
+committer sits at $3.00$, not $32$. MirrorPool's all-channel rows equal its
+provenance-only rows because settlement exposes no per-actor timing, amount, or
+fee shape.}
 \end{table}
 
-\paragraph{Why mirror-pool holds effective-$k$ near nominal.} A behavioral channel
+\paragraph{Why the settlement channels contribute nothing.} A behavioral channel
 informs the adversary only if settlement actually exposed it. mirror-pool settles
 one shared-epoch batch: every action carries one settle slot, one bucket amount,
 and one normalized fee shape, so the timing, amount, and fingerprint channels
-carry \emph{zero variance} across the batch and contribute nothing. Funding via
-the shielded path breaks the provenance partition (one indistinguishable class).
-Both mechanisms together are why a naive pool's effective set collapses while
-mirror-pool's stays at nominal.
+carry \emph{zero variance} across the batch and contribute nothing. Funding is
+therefore the only channel left, which is why it gets a mechanism, an ablation,
+and a published residual instead of a paragraph.
+
+\paragraph{The residual, ablated.} Each mitigation alone is insufficient:
+denomination alone still leaves a narrow causal window (only the few deposits that
+could have funded a given withdrawal are candidates) and batching alone still
+leaves the amount, which identifies the deposit directly; both land near a third
+of nominal at $k=32$. Dwell (how many rounds a participant may sit shielded)
+trades latency for anonymity: $0/1/2/4/8$ rounds measure
+$24.25 / 27.43 / 28.80 / 30.01 / 30.88$, i.e. diminishing returns past the default
+of $2$. Adoption bounds everything: at $90\%/75\%/50\%/25\%$ adoption the same
+configuration measures $24.65 / 20.07 / 13.56 / 9.33$, and as soon as one
+committer tops up directly the worst case returns to $1.00$. A protocol that
+advertises funding privacy while most of its traffic tops up from main wallets is
+advertising a number it does not have.
+
+\paragraph{How hard is the attacker?} The matching can be scored two ways, and we
+publish both. The weaker attacker normalizes each withdrawal's candidate deposits
+independently; the stronger one solves the whole assignment (each deposit funds one
+withdrawal), approximated by Sinkhorn scaling because exact matching marginals are
+permanents and $\#P$-hard. Every number above is the \emph{stronger} attacker's.
+The gap is largest where the causal window is narrowest (denominated-only at
+$k{=}64$: $19.57 \to 17.33$) and small under the shipped default
+($28.87 \to 28.80$ at $k{=}32$). We note honestly that Sinkhorn is an
+approximation, not a bound: in one measured epoch it puts slightly \emph{less} mass
+on the truth than the independent reading, and the repository pins that instance in
+a test so the claim stays "measured stronger on this grid", not "provably stronger".
 
 \paragraph{Sybil dominance closes the ``excluded $=0$'' gap.} When $75\%$ of the
 nominal set is attacker-owned decoy traffic, an adversary that owns the decoys
@@ -492,10 +552,14 @@ an inflated nominal set buys no anonymity against anyone who can identify the
 decoys.
 
 These effective-$k$ numbers are a \emph{model} (deterministic synthetic
-populations, a modeled Zipf common-funder distribution), honestly labeled as such;
-an on-chain settlement-trace loader that computes effective-$k$ over real funding
-provenance is a named roadmap extension. The value is the structural claim on the
-same axis the empirical literature raised it.
+populations, a modeled Zipf common-funder distribution, a modeled funding trace),
+honestly labeled as such; an on-chain settlement-trace loader that computes
+effective-$k$ over real funding provenance is a named roadmap extension. What is
+\emph{measured} is every number in the tables, and in particular that the
+mechanism's own residual is nonzero: the repository pins a test asserting the
+default policy lands strictly below nominal, so this project cannot drift back
+into reporting a perfect score. \code{docs/EFFECTIVE\_K.md} separates measured
+from modelled line by line, including the omissions that favour us.
 
 \paragraph{Anti-Sybil economy.} The metric is only as strong as its Sybil
 assumptions, so mirror-pool prices identity: each commit carries a fixed,
@@ -713,10 +777,10 @@ about 197K to 203K CU.}
 \end{table}
 
 \paragraph{Test suite.} Beyond the two live soaks, the repository ships
-\textbf{110 host tests} (\code{cargo test --workspace}, covering the Poseidon
+\textbf{205 host tests} (\code{cargo test --workspace}, covering the Poseidon
 scheme cross-check against the circuit, the wire layout, \code{KAnon} accounting,
-the coordinator batching and $k$-floor logic, ECIES notes, and the effective-$k$
-pure functions) and \textbf{42 on-chain program tests} (mollusk integration tests
+the coordinator batching, $k$-floor and funding-round logic, ECIES notes, the
+trusted-setup ceremony, and the effective-$k$ and funding-model functions) and \textbf{42 on-chain program tests} (mollusk integration tests
 plus in-crate unit tests). \code{cargo build-sbf} is green and \code{cargo check
 --workspace} passes.
 
@@ -747,8 +811,23 @@ leaks and what we do not claim.
         participants you personally believe are independent, and at most
         \code{real\_k}.
   \item \textbf{Effective-$k$ is a model.} The numbers come from deterministic
-        synthetic populations and a modeled Zipf common-funder distribution, not a
-        live pool. A live-provenance loader is a named roadmap item.
+        synthetic populations, a modeled Zipf common-funder distribution, and a
+        modeled funding trace, not a live pool. A live-provenance loader is a named
+        roadmap item.
+  \item \textbf{The funding path is unit-tested, not soaked.} The unshield it is
+        built on is soak-proven on devnet ($25/25$), but the \code{fund-commit}
+        plus funding-round orchestration on top of it is covered by host tests
+        only; the two live soaks predate it. A funding-round soak is named future
+        work, not an implied result.
+  \item \textbf{Funding provenance is reduced, not closed.} The funding mechanism
+        turns a public edge into a matching problem, and the measurement says how
+        much of that matching survives: $90.0\%$ of nominal at $k{=}32$ under
+        denominated batched rounds, so a $10.0\%$ residual, dropping to $23.9\%$ of
+        nominal if participants pass value straight through a free-amount pool and
+        to $42.4\%$ at $50\%$ adoption. The mechanism also does not hide that a
+        wallet deposited into the value pool, and a participant whose deposit is
+        itself the first hop out of a KYC'd exchange is still identified as a pool
+        user.
   \item \textbf{The crowd path is behavioral, not cryptographic.} On the crowd
         path the participant signs their own action, so it stays attributable to
         that wallet, and the coordinator learns the participant-to-intent mapping
@@ -865,7 +944,9 @@ cargo run -p mirror-harness -{}-release
 \end{quote}
 Prints the Baseline-vs-MirrorPool advantage table (Section~\ref{sec:anon}, FIFO
 $+77.54 \to -0.29$pp at $k{=}16$) and the effective-$k$ tables (funding-provenance
-alone: $k{=}32 \to 7.51$ Baseline vs $32.00$ MirrorPool; all channels; and the
+alone: $k{=}32 \to 7.51$ for a public funding edge, $7.66$ for pass-through
+shielded funding, $28.80$ for denominated batched rounds; the funding-policy and
+adversary-strength ablations; the dwell and adoption sweeps; and the
 Sybil-dominance case collapsing to \code{real\_k}). Deterministic (seed
 \code{0x4d4952524f52}), so any reviewer re-derives them bit-for-bit.
 

@@ -45,9 +45,13 @@ on real mixers and Solana clustering, not a strawman. Full detail is in
 
 Design responses, one line each: shared-epoch batch settlement defeats FIFO; fixed
 size buckets defeat amount matching; a normalized, rotating gasless coordinator
-defeats fingerprinting and gas-payer reuse; a fixed uniform action shape removes
-the copy-trade signal; honest k-accounting keeps the reported number truthful; and
-the ZK opt-in path adds a cryptographic membership proof so who-initiated is
+defeats fingerprinting and gas-payer reuse; denominated, batched funding rounds
+that credit a fresh commit wallet out of the value pool remove the
+main-wallet-to-commit-wallet edge that common-funding clustering keys on (with the
+residual measured in `EFFECTIVE_K.md`, not assumed away); a fixed uniform action
+shape removes the copy-trade signal; honest k-accounting keeps the reported number
+truthful; and the ZK opt-in path adds a cryptographic membership proof so
+who-initiated is
 hidden even from the relay.
 
 ---
@@ -307,6 +311,9 @@ settlement trace.
 | Fixed-denomination mode (amount k-anonymity, `DenominationMismatch`) | Built |
 | Gasless confidential submit (`submit_transact`, relay-only signer) | Built |
 | Confidential CLI (`value-keygen`/`shield`/`transfer`/`unshield`/`scan`) | Built |
+| Funding-provenance path: `fund-commit` (fresh commit wallet funded by unshield) + coordinator funding rounds (denomination, batching, minimum-round floor) | Built |
+| Effective-k derived from the funding mechanism, with its residual measured and published | Built |
+| Joint deposit-to-withdrawal matching inference in the harness adversary | Built |
 | Swap/stake-from-pool via CPI on the ZK path | Future |
 | ZK-path anonymity-mining reward (dwell/age proof) | Future |
 | A production ceremony actually RUN with external contributors, and the program redeployed with its key | Future |
@@ -324,7 +331,11 @@ defeats fingerprint and amount-match attacks with a gasless rotating coordinator
 fixed size buckets; the ZK opt-in path adds cryptographic who-initiated
 unlinkability with an on-chain Groth16 membership proof; and the confidential-value
 layer adds a Tornado-Nova 2-in/2-out JoinSplit that hides amounts (soak-proven end
-to end), so a deployment can hide both who initiated and how much moved. The
+to end), so a deployment can hide both who initiated and how much moved. That same
+value pool carries the funding leg: a commit wallet is credited by an unshield in a
+denominated, batched funding round rather than by a transfer from a main wallet,
+which removes the common-funding edge and leaves a residual the harness measures
+(90.0% of nominal effective-k at k=32) instead of assuming. The
 remaining work is CPI-executed pooled actions, an anonymous ZK-path reward, actually
 running the (already built) trusted-setup ceremony with external contributors and
 redeploying with its key, confidential deposits, an n-in/n-out JoinSplit,

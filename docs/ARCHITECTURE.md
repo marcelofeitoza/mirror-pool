@@ -752,6 +752,40 @@ unlinkability), while a shield additionally co-signs the depositor, who authoriz
 and funds their own deposit. A Transact uses no Address Lookup Table because its
 per-settlement nullifier PDAs change every time, so all its accounts stay static.
 
+### 9.8 Funding rounds: the commit wallet's lamports
+
+The value layer also carries the FUNDING leg of the behavioral protocol, which is
+where the strongest real-world identity anchor lives. A participant who tops up
+their fresh commit wallet from their main wallet writes that edge into the public
+graph, and the common-funding-source heuristic walks it backwards; no amount of
+shared-epoch batching at settlement repairs it.
+
+`mirror-cli fund-commit` funds a fresh commit wallet by **unshielding** into it:
+it generates the keypair (refusing to clobber an existing one), reads the value
+pool's `denomination` from chain, refuses any other amount client-side (the program
+would reject it as `DenominationMismatch` anyway), proves the unshield, and emits
+the `Transact`. On-chain the sender is the vault PDA and the only signature is the
+relay's, so the participant's main wallet appears on no transaction in the path.
+
+`mirror_coordinator::funding::FundingRounds` releases those withdrawals in rounds:
+
+- `accept(slot, request)` validates that the request really is a withdrawal (a
+  deposit or an internal transfer is refused before it can burn a relay signature)
+  and that it moves exactly the denomination, then batches it into the round
+  `slot / round_slots`.
+- `on_slot(slot, ...)` releases every round whose window has closed, submitting its
+  withdrawals in `release_order` (a deterministic permutation derived from the round
+  number and each commit wallet, never the arrival order).
+- A round below `min_round_size` rolls FORWARD instead of releasing, exactly like an
+  epoch below `k_floor`: a round of one withdrawal is a direct shield-to-unshield
+  link no matter how good the cryptography is.
+
+The residual is stated rather than hidden: `publicAmount` is public on both
+crossings, so an observer sees the deposits and the withdrawals and is left with a
+matching problem. `crates/mirror-harness` measures how much of that matching
+survives (`docs/EFFECTIVE_K.md`); under denominated batched rounds it is about 10%
+of nominal `k`, and under naive pass-through use of the same pool it is most of it.
+
 ---
 
 ## 10. Component status
@@ -764,8 +798,9 @@ per-settlement nullifier PDAs change every time, so all its accounts stay static
 | multi-party phase-2 trusted-setup ceremony | `crates/mirror-ceremony` | **Implemented** - public phase-1 import + provenance reader, delta re-randomization, Schnorr PoK bound to contributor and transcript, SHA-256 transcript chain, reproducible verification (PoK + pairing same-ratio + batched query-scaling), self-run-refusing independent-contributor count, snarkjs/`groth16-solana` verifying-key export; driven by `mirror-cli ceremony ...`. NOT yet run for production: the deployed keys are still dev-setup keys |
 | gasless batch coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window scheduler, real-k floor gate, rotating fee-payer, normalized `TxProfile`, atomic crowd-tx composition (N+1 signer, ALT, `plan_settlements`), mockable RPC boundary |
 | pooled-action behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + `PlainTransfer` (soak baseline), Jupiter swap, jitoSOL stake adapters; bucketed amounts |
-| participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`status`/`ceremony`; prove rebuilds the path, proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback, `--proving-key` proves under a ceremony key), emits `SettleZk` |
-| adversarial harness | `crates/mirror-harness` | **Implemented** - FIFO, amount, gas-payer, and wallet-fingerprint attacks measuring attacker advantage over 1/k, Baseline vs mirror-pool; FIFO advantage collapses to about 0 under shared-epoch batching |
+| participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`fund-commit`/`status`/`ceremony`; prove rebuilds the path, proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback, `--proving-key` proves under a ceremony key), emits `SettleZk` |
+| adversarial harness | `crates/mirror-harness` | **Implemented** - FIFO, amount, gas-payer, and wallet-fingerprint attacks measuring attacker advantage over 1/k, Baseline vs mirror-pool; FIFO advantage collapses to about 0 under shared-epoch batching; plus the effective-k metric whose funding-provenance classes are derived from the shipped funding mechanism (`funding.rs`) with policy, adversary-strength, dwell and adoption ablations |
+| funding rounds (funding-provenance path) | `crates/mirror-coordinator` + `crates/mirror-cli` | **Implemented, not yet soaked** - `fund-commit` (fresh commit wallet funded by unshield, denomination enforced client-side, relay-only signature) + `FundingRounds` (round batching, minimum-round floor with roll-forward, arrival-independent release order); unit-tested against the mock RPC boundary, but the live soaks in `docs/PROOF.md` predate it and do not exercise it; residual measured in `docs/EFFECTIVE_K.md` |
 | anti-Sybil entry fee + dwell reward | `programs/mirror-pool` + `docs/INCENTIVES.md` | **Implemented** (crowd path) - entry-fee split, reward pool, dwell accrual, drain-safe `ClaimReward`; ZK-path reward is designed, not implemented |
 | confidential-value program (ValuePool + Transact) | `programs/mirror-pool` | **Implemented** - `InitValuePool`/`Transact`; separate ValuePool value-note accumulator + 32-root ring + vault PDA; on-chain 2-in/2-out JoinSplit Groth16 (alt_bn128), value nullifier PDAs, `publicAmount` lamport moves, fixed-denomination enforcement (`DenominationMismatch`) |
 | confidential JoinSplit circuit + setup + verifying key | `circuits/` | **Implemented** - depth-20 2-in/2-out Tornado-Nova transaction circuit (7 public inputs), dev/test Groth16 setup, committed shield/transfer/unshield fixtures + vendored `transaction_vk.rs` |
