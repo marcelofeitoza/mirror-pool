@@ -14,6 +14,10 @@ description = "Participant CLI for mirror-pool: init a pool, commit an action in
 
 [dependencies]
 mirror-core.workspace = true
+# The multi-party Groth16 phase-2 trusted-setup ceremony. The `ceremony`
+# subcommands are a thin CLI over this crate; the ceremony math, the Schnorr proofs
+# of knowledge, the SHA-256 transcript chain and the verifier all live there.
+mirror-ceremony.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -69,8 +73,9 @@ solana-commitment-config = "3"
 # Surfpool mainnet mirror at http://127.0.0.1:8899 by default.
 solana-rpc-client = "4"
 
-[dev-dependencies]
-# The SAME on-chain Groth16 verifier the program embeds (programs/mirror-pool), used
+# The SAME on-chain Groth16 verifier the program embeds (programs/mirror-pool). Used
 # in tests to prove the Rust-generated SettleZk proof bytes are accepted by the exact
-# verifier + committed verifying key the program runs, not merely by ark-groth16.
+# verifier + committed verifying key the program runs, and by
+# `ceremony prove-check`, so a reviewer can run the real on-chain verifier over a
+# proof made under a ceremony-produced key without writing any code.
 groth16-solana = "0.2.0"

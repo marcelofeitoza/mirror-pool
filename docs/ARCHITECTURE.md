@@ -484,9 +484,11 @@ Verification is 4 public inputs in the fixed order and runs in under about 200K
 compute units, comfortably inside a transaction's CU budget alongside the
 settlement work. The circuit (`circuits/membership.circom`, depth 20, 11522 R1CS
 constraints) enforces leaf recomputation, Merkle inclusion, and the nullifier
-relation. Its trusted setup is a reproducible development/test setup (the phase-2
-entropy is public), not a secure ceremony; a real multi-party ceremony is roadmap
-work (`docs/ROADMAP.md`).
+relation. The verifying key that is committed and deployed comes from a reproducible
+development/test setup (the phase-2 entropy is a hard-coded public string), not from
+a secure ceremony. A real multi-party phase-2 ceremony is implemented and runnable
+(Section 8.5, `docs/CEREMONY.md`); it has not been run for production, so this
+caveat stands until a ceremony output is exported and the program is redeployed.
 
 ---
 
@@ -511,6 +513,60 @@ work (`docs/ROADMAP.md`).
 - **Signers are never in the ALT.** Solana forbids loading a signer through a
   lookup table, so participant wallets and the rotating fee-payer are always static
   keys; only shared non-signer accounts are looked up.
+
+---
+
+## 8.5 Trusted-setup ceremony (`crates/mirror-ceremony`)
+
+Groth16 buys small, cheap on-chain verification at the cost of a per-circuit
+structured reference string whose sampling secrets ("toxic waste") must be destroyed.
+`crates/mirror-ceremony` implements a distributable multi-party **phase-2** ceremony
+for that, in pure Rust, for both circuits. Full guide: `docs/CEREMONY.md`.
+
+- **Phase 1 is imported, not generated.** `ceremony start` takes a public
+  powers-of-tau file and records its SHA-256, curve, power and contribution count
+  into the transcript; `ceremony inspect-ptau` reads the contributor names out of the
+  file's own section 7 so they can be compared against the published list. A file
+  with fewer than two contributions is refused unless explicitly overridden.
+- **The initial phase-2 key is reproducible.** It is the output of
+  `snarkjs groth16 setup <r1cs> <ptau>`, which is deterministic, so the start of the
+  chain can be re-derived from public inputs rather than trusted. `ark_circom::read_zkey`
+  imports it; that is the only snarkjs-produced input to the ceremony.
+- **A contribution moves only `delta`.** `delta_g1` and `delta_g2` are multiplied by
+  a fresh secret `s`; `h_query` and `l_query` are multiplied by `s^-1`. Everything
+  else (`alpha_g1`, `beta_g1`, `beta_g2`, `gamma_g2`, `gamma_abc_g1`, `a_query`,
+  `b_g1_query`, `b_g2_query`) is byte-identical from the initial key to the final
+  key. In the exported verifying key, only `vk_delta_2` differs.
+- **Each contribution proves knowledge of its ratio.** A Schnorr proof over the base
+  `delta_g1` of the previous key, with a Fiat-Shamir challenge bound to the running
+  transcript hash, the contribution index and the contributor identifier - so a proof
+  cannot be replayed at another position or re-attributed to another operator.
+- **The chain is SHA-256 over a canonical serialization** (domain tag, fixed-width
+  values raw, variable-length values length-prefixed). The final chain hash is the
+  value a coordinator publishes.
+- **Verification is reproducible by anyone** holding the transcript, the initial key
+  and the final key: chain links, entry hashes, every proof of knowledge, a pairing
+  same-ratio check per step, beacon recomputation, endpoint digests, untouched-part
+  equality, and a batched pairing check that the query vectors were divided by the
+  accumulated ratio. Tampered deltas, forged or replayed proofs, reordered chains and
+  truncated chains are each rejected, each with a test.
+- **The reported number is an independent-contributor count**, not a contribution
+  count. Contributions sharing an identity, a machine fingerprint or a
+  proof-of-knowledge nonce are merged; deterministic and beacon steps are never
+  counted. It is a heuristic against accidental self-inflation, explicitly not a
+  Sybil defence.
+- **Keys travel in a `.mpk` container** around arkworks' canonical uncompressed
+  `ProvingKey<Bn254>` serialization (arkworks has no zkey writer). Verifying keys are
+  exported in both the snarkjs `verification_key.json` shape and the
+  `groth16-solana` byte layout the program embeds. Proving under a ceremony key goes
+  through `mirror-cli prove --proving-key` or `ceremony prove-check`.
+
+`ceremony prove-check` closes the loop: it proves the membership circuit under a
+ceremony-produced key and runs the exact on-chain `groth16-solana` verifier over the
+result against the ceremony-exported verifying key.
+
+**Status.** The machinery is built and tested; no production ceremony has been run,
+so the committed and deployed verifying keys are still dev-setup keys.
 
 ---
 
@@ -645,9 +701,11 @@ proof with `groth16-solana` via the alt_bn128 pairing syscalls against the vendo
 ```
 
 `proof_a` is emitted pre-negated so the program needs no runtime ark
-serialization. The circuit's trusted setup is the same reproducible development/test
-setup as the membership circuit (its phase-2 entropy is public), so it MUST NOT
-secure real value; a production ceremony is roadmap work (`docs/ROADMAP.md`).
+serialization. The deployed verifying key comes from the same reproducible
+development/test setup as the membership circuit (its phase-2 entropy is a public
+string), so it MUST NOT secure real value. The multi-party ceremony in Section 8.5
+supports this circuit as an independent second transcript; running it and redeploying
+is what closes the caveat.
 
 ### 9.5 Encrypted notes and discovery
 
@@ -703,9 +761,10 @@ per-settlement nullifier PDAs change every time, so all its accounts stay static
 | shared types + wire format + Poseidon + tests | `crates/mirror-core` | **Implemented** - `commit`/`nullifier`/`transfer_action_hash`, `ActionClass`/`SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon`, `wire`; circomlib-Poseidon; fixture cross-check against the circuit |
 | on-chain program (both settle paths) | `programs/mirror-pool` | **Implemented** - `InitPool`/`Commit`/`SettleEpoch`/`CommitDeposit`/`SettleZk`/`ClaimReward`; frontier accumulator + 32-root ring; Epoch/Nullifier/Dwell PDAs; on-chain k-floor, double-settle prevention, per-nullifier anti-replay; on-chain Groth16 (alt_bn128) |
 | membership circuit + setup + verifying key | `circuits/` | **Implemented** - depth-20 Poseidon membership circuit, dev/test Groth16 setup, committed proof fixture + vendored `vk.rs` |
+| multi-party phase-2 trusted-setup ceremony | `crates/mirror-ceremony` | **Implemented** - public phase-1 import + provenance reader, delta re-randomization, Schnorr PoK bound to contributor and transcript, SHA-256 transcript chain, reproducible verification (PoK + pairing same-ratio + batched query-scaling), self-run-refusing independent-contributor count, snarkjs/`groth16-solana` verifying-key export; driven by `mirror-cli ceremony ...`. NOT yet run for production: the deployed keys are still dev-setup keys |
 | gasless batch coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window scheduler, real-k floor gate, rotating fee-payer, normalized `TxProfile`, atomic crowd-tx composition (N+1 signer, ALT, `plan_settlements`), mockable RPC boundary |
 | pooled-action behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + `PlainTransfer` (soak baseline), Jupiter swap, jitoSOL stake adapters; bucketed amounts |
-| participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`status`; prove rebuilds the path, proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback), emits `SettleZk` |
+| participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`status`/`ceremony`; prove rebuilds the path, proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback, `--proving-key` proves under a ceremony key), emits `SettleZk` |
 | adversarial harness | `crates/mirror-harness` | **Implemented** - FIFO, amount, gas-payer, and wallet-fingerprint attacks measuring attacker advantage over 1/k, Baseline vs mirror-pool; FIFO advantage collapses to about 0 under shared-epoch batching |
 | anti-Sybil entry fee + dwell reward | `programs/mirror-pool` + `docs/INCENTIVES.md` | **Implemented** (crowd path) - entry-fee split, reward pool, dwell accrual, drain-safe `ClaimReward`; ZK-path reward is designed, not implemented |
 | confidential-value program (ValuePool + Transact) | `programs/mirror-pool` | **Implemented** - `InitValuePool`/`Transact`; separate ValuePool value-note accumulator + 32-root ring + vault PDA; on-chain 2-in/2-out JoinSplit Groth16 (alt_bn128), value nullifier PDAs, `publicAmount` lamport moves, fixed-denomination enforcement (`DenominationMismatch`) |

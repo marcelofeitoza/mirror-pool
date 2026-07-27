@@ -34,7 +34,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use ark_bn254::{Bn254, Fr};
 use ark_circom::{read_zkey, CircomBuilder, CircomConfig, CircomReduction};
 use ark_ff::{BigInteger, PrimeField};
-use ark_groth16::{Groth16, Proof};
+use ark_groth16::{Groth16, Proof, ProvingKey};
 use ark_snark::SNARK;
 use num_bigint::{BigInt, BigUint};
 use serde_json::Value;
@@ -70,11 +70,56 @@ pub struct Artifacts<'a> {
 /// emitted proof would commit to different inputs than the program checks, so this
 /// fails loudly rather than emitting a proof that cannot land.
 pub fn prove(art: &Artifacts, input: &Value, expected_public: &[Hash32]) -> Result<ProofBytes> {
-    for (p, what) in [
-        (art.wasm, "circuit wasm"),
-        (art.r1cs, "circuit r1cs"),
-        (art.zkey, "proving key (zkey)"),
-    ] {
+    if !art.zkey.exists() {
+        bail!(
+            "proving key (zkey) not found at {}: run `bash circuits/build.sh` once to produce the \
+             gitignored r1cs/wasm/zkey build artifacts",
+            art.zkey.display()
+        );
+    }
+    // Proving key from the committed zkey (the on-chain vk was exported from it).
+    let mut file = File::open(art.zkey)
+        .with_context(|| format!("opening proving key {}", art.zkey.display()))?;
+    let (pk, _matrices) = read_zkey(&mut file)
+        .map_err(|e| anyhow!("reading proving key from {}: {e}", art.zkey.display()))?;
+    prove_with_key(art.wasm, art.r1cs, &pk, input, expected_public)
+}
+
+/// The same proof, but with the proving key supplied directly instead of read from
+/// a `.zkey`.
+///
+/// This is what lets a CEREMONY-produced key be used to prove: `mirror-ceremony`
+/// hands back an [`ark_groth16::ProvingKey`], and the resulting proof is verified
+/// here against that key's own verifying key - which is the key a deployment would
+/// embed on chain.
+pub fn prove_with_key(
+    wasm: &Path,
+    r1cs: &Path,
+    pk: &ProvingKey<Bn254>,
+    input: &Value,
+    expected_public: &[Hash32],
+) -> Result<ProofBytes> {
+    Ok(prove_with_key_full(wasm, r1cs, pk, input, expected_public)?.bytes)
+}
+
+/// A generated proof in both shapes a caller might need: the `groth16-solana` byte
+/// layout the on-chain verifier consumes, and the snarkjs `proof.json` shape, so
+/// the same proof can be handed to `snarkjs groth16 verify` as an independent
+/// cross-check.
+pub struct RustProof {
+    pub bytes: ProofBytes,
+    pub snarkjs: SnarkjsProof,
+}
+
+/// As [`prove_with_key`], returning both encodings of the proof.
+pub fn prove_with_key_full(
+    wasm: &Path,
+    r1cs: &Path,
+    pk: &ProvingKey<Bn254>,
+    input: &Value,
+    expected_public: &[Hash32],
+) -> Result<RustProof> {
+    for (p, what) in [(wasm, "circuit wasm"), (r1cs, "circuit r1cs")] {
         if !p.exists() {
             bail!(
                 "{what} not found at {}: run `bash circuits/build.sh` once to produce the \
@@ -95,7 +140,7 @@ pub fn prove(art: &Artifacts, input: &Value, expected_public: &[Hash32]) -> Resu
     let _rt_guard = rt.enter();
 
     // Load the circuit (wasm witness calculator + r1cs) and feed the typed inputs.
-    let cfg = CircomConfig::<Fr>::new(art.wasm, art.r1cs)
+    let cfg = CircomConfig::<Fr>::new(wasm, r1cs)
         .map_err(|e| anyhow!("loading circuit artifacts (wasm + r1cs): {e}"))?;
     let mut builder = CircomBuilder::new(cfg);
     push_inputs(&mut builder, input)?;
@@ -113,19 +158,14 @@ pub fn prove(art: &Artifacts, input: &Value, expected_public: &[Hash32]) -> Resu
     // the instruction data.
     cross_check_public(&public_inputs, expected_public)?;
 
-    // Proving key from the committed zkey (the on-chain vk was exported from it).
-    let mut file = File::open(art.zkey)
-        .with_context(|| format!("opening proving key {}", art.zkey.display()))?;
-    let (pk, _matrices) = read_zkey(&mut file)
-        .map_err(|e| anyhow!("reading proving key from {}: {e}", art.zkey.display()))?;
-
     // Prove with the snarkjs-compatible QAP reduction.
     let mut rng = rand::rngs::OsRng;
-    let proof = Groth16::<Bn254, CircomReduction>::prove(&pk, circom, &mut rng)
+    let proof = Groth16::<Bn254, CircomReduction>::prove(pk, circom, &mut rng)
         .map_err(|e| anyhow!("groth16 prove failed: {e}"))?;
 
-    // Verify in-process against the zkey's verifying key (== the committed on-chain
-    // vk). Fail loudly if it does not verify, exactly as the snarkjs path did.
+    // Verify in-process against this key's own verifying key (for the committed
+    // zkey that is the on-chain vk; for a ceremony key it is the vk a deployment
+    // would embed). Fail loudly if it does not verify.
     let pvk = Groth16::<Bn254>::process_vk(&pk.vk).map_err(|e| anyhow!("process_vk: {e}"))?;
     let verified = Groth16::<Bn254>::verify_with_processed_vk(&pvk, &public_inputs, &proof)
         .map_err(|e| anyhow!("groth16 verify: {e}"))?;
@@ -133,7 +173,9 @@ pub fn prove(art: &Artifacts, input: &Value, expected_public: &[Hash32]) -> Resu
         bail!("Rust-generated Groth16 proof did NOT verify against the committed verifying key");
     }
 
-    ark_proof_to_bytes(&proof)
+    let snarkjs = ark_proof_to_snarkjs(&proof);
+    let bytes = snarkjs.to_bytes()?;
+    Ok(RustProof { bytes, snarkjs })
 }
 
 /// Push every field of a circom `input.json` object into the builder. Values are
@@ -193,13 +235,13 @@ fn cross_check_public(actual: &[Fr], expected: &[Hash32]) -> Result<()> {
     Ok(())
 }
 
-/// Convert an `ark-groth16` proof into the `groth16-solana` byte layout by feeding
-/// its affine coordinates through the audited [`SnarkjsProof::to_bytes`] conversion
-/// (which negates `proof_a` and orders G2 imaginary-part-first). Building the same
-/// `SnarkjsProof` shape snarkjs emits keeps ONE serializer for both proving paths.
-fn ark_proof_to_bytes(proof: &Proof<Bn254>) -> Result<ProofBytes> {
+/// Convert an `ark-groth16` proof into the `SnarkjsProof` shape snarkjs emits, which
+/// is also what [`SnarkjsProof::to_bytes`] (the audited conversion that negates
+/// `proof_a` and orders G2 imaginary-part-first) consumes - so there is ONE
+/// serializer for both proving paths.
+fn ark_proof_to_snarkjs(proof: &Proof<Bn254>) -> SnarkjsProof {
     let (a, b, c) = (&proof.a, &proof.b, &proof.c);
-    let snark = SnarkjsProof {
+    SnarkjsProof {
         // pi_a / pi_c: affine G1 = [x, y, 1].
         pi_a: vec![field_dec(&a.x), field_dec(&a.y), "1".to_string()],
         pi_c: vec![field_dec(&c.x), field_dec(&c.y), "1".to_string()],
@@ -210,8 +252,7 @@ fn ark_proof_to_bytes(proof: &Proof<Bn254>) -> Result<ProofBytes> {
             vec![field_dec(&b.y.c0), field_dec(&b.y.c1)],
             vec!["1".to_string(), "0".to_string()],
         ],
-    };
-    snark.to_bytes()
+    }
 }
 
 /// A canonical BN254 field element as a decimal string (the form `SnarkjsProof`

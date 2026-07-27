@@ -346,11 +346,21 @@ extends beyond the behavioral "not for funds" theme.
   a wallet interacted with the pool. Fixed-denomination mode narrows every public
   crossing to one uniform amount (`DenominationMismatch` otherwise), which gives
   amount k-anonymity at the boundary but does not make the magnitude private.
-- **Trusted setup is development/test.** The JoinSplit circuit's Groth16 setup uses
-  public phase-2 entropy (reproducible by design), so its toxic waste is public. It
-  MUST NOT secure real value until a real multi-party ceremony is run
-  (`docs/ROADMAP.md`); this is a soundness caveat, not a confidentiality one, but it
-  is disclosed here rather than buried.
+- **The DEPLOYED trusted setup is development/test.** The JoinSplit verifying key
+  that is committed and deployed came from the dev setup in
+  `circuits/build_transaction.sh`, whose phase-2 entropy is a hard-coded public
+  string, so its toxic waste is public. It MUST NOT secure real value until a real
+  ceremony output is exported and the program is redeployed with it. This is a
+  soundness caveat, not a confidentiality one, but it is disclosed here rather than
+  buried.
+
+  A real multi-party phase-2 ceremony now **exists** and is runnable
+  (`crates/mirror-ceremony`, `mirror-cli ceremony ...`, documented in
+  `docs/CEREMONY.md`): delta re-randomization with a Schnorr proof of knowledge
+  bound to each contributor, a SHA-256 transcript chain, pairing same-ratio
+  verification anyone can reproduce, and a conservative independent-contributor
+  count that refuses to count self-runs. Running it and redeploying is what closes
+  this caveat; until then the caveat stands exactly as written.
 
 ---
 
@@ -432,7 +442,7 @@ Stated bluntly, because a privacy tool that is vague about its non-goals is a tr
    in the wrong tool. The **optional confidential-value layer** is the exception and
    is scoped precisely in Section 4: it hides amounts *inside* the pool, but the
    shield-in and unshield-out magnitudes and the pool TVL stay public, and its
-   trusted setup is dev/test. Turning it on is a deliberate choice to add amount
+   deployed trusted setup is dev/test. Turning it on is a deliberate choice to add amount
    privacy on top of the behavioral guarantee, not a claim that the behavioral paths
    hide funds.
 2. **We do not defend the destination history of external payees.** If a pooled
@@ -570,7 +580,9 @@ because a threat model that only enumerates its wins is untrustworthy.
     the public boundary is not: a shield exposes the deposited amount and depositor,
     an unshield exposes the withdrawn amount and recipient, and the vault's TVL is a
     public on-chain balance. Fixed-denomination mode makes those crossings uniform
-    but not private. Its trusted setup is dev/test (a soundness caveat, Section 4),
+    but not private. Its DEPLOYED trusted setup is dev/test (a soundness caveat,
+    Section 4; the ceremony that fixes it exists and is documented in
+    `docs/CEREMONY.md`, but its output is not what is deployed),
     and, as with the ZK path, a user who sweeps an unshield output into a wallet
     clusterable to their deposit wallet re-links themselves. This residual exists
     only for deployments that opt into the layer.

@@ -92,6 +92,28 @@ program. The on-chain `SettleZk` verifies proofs with `groth16-solana` via the
 alt_bn128 syscalls. A fixture cross-check test proves the host Poseidon, the
 on-chain syscall Poseidon, and the circuit agree byte-for-byte.
 
+### The trusted-setup ceremony (`crates/mirror-ceremony`)
+
+A distributable multi-party Groth16 **phase-2** ceremony, in pure Rust, for both
+circuits: import a PUBLIC phase-1 powers-of-tau (the file's own contributor list is
+read back out of it), re-randomize `delta` per contribution with a Schnorr proof of
+knowledge bound to the contributor identifier and the running transcript hash, chain
+the whole thing with SHA-256 over a canonical serialization, and verify it with
+pairing same-ratio checks anyone can reproduce. Verification rejects a tampered
+delta, a forged or replayed proof of knowledge, a reordered chain and a truncated
+chain, each with its own test. The reported number is an **independent-contributor**
+count that refuses to count self-runs, deterministic contributions or beacons, and
+that documents precisely what it cannot detect.
+
+Driven from `mirror-cli ceremony start | contribute | beacon | verify | export-vk |
+inspect-ptau | prove-check`. `prove-check` is the decisive one: it proves the
+membership circuit under a ceremony-produced key and runs the EXACT on-chain
+`groth16-solana` verifier over the result against the ceremony-exported verifying
+key. Full guide in `docs/CEREMONY.md`.
+
+**What is not yet done:** no production ceremony has been *run*. The committed and
+deployed verifying keys still come from the insecure dev setup.
+
 ### The coordinator (`crates/mirror-coordinator`)
 
 The off-chain gasless coordinator: a slot-window batch scheduler, the real-k floor
@@ -197,14 +219,17 @@ knowledge "I am a member whose dwell is at least T, here is a fresh reward-epoch
 nullifier" and pay out to a fresh address. Shipping it is gated on a second circuit
 and its trusted setup.
 
-### A real multi-party trusted-setup ceremony
+### Running the ceremony for production and redeploying with its key
 
-Both Groth16 setups (the behavioral membership circuit and the confidential-value
-JoinSplit circuit) are reproducible development/test setups: their phase-2 entropy
-is public by design, which makes the toxic waste public, so they must not secure
-real value. A production deployment needs a real multi-party (phase-2) ceremony per
-circuit, with independent contributors and a pre-committed beacon. This is
-setup/operational work; the circuits and on-chain verifiers do not change.
+The ceremony itself is **built** (see "The trusted-setup ceremony" above and
+`docs/CEREMONY.md`). What remains is operational: recruit contributors who are
+independent of the project and of each other, run the chain for both circuits with a
+publicly pre-committed beacon, publish the transcripts and the ceremony hashes, then
+export the verifying keys and redeploy the program with them.
+
+Until that is done the committed and deployed verifying keys are still the dev-setup
+keys, whose toxic waste is public by construction. The circuits and the on-chain
+verifiers do not change; only the embedded verifying key does.
 
 ### Confidential deposits (hide even the shield amount)
 
@@ -275,6 +300,7 @@ settlement trace.
 | Adversarial harness (FIFO/amount/gas-payer/fingerprint, real k) | Built |
 | Anti-Sybil entry fee + crowd-path dwell reward | Built |
 | Membership circuit + dev/test trusted setup + vendored verifying key | Built |
+| Multi-party phase-2 ceremony: delta re-randomization, Schnorr PoK, SHA-256 transcript, reproducible verify, self-run-refusing contributor count | Built |
 | Confidential-value layer: ValuePool + 2-in/2-out JoinSplit `Transact` (shield/transfer/unshield) | Built |
 | Confidential JoinSplit circuit + dev/test setup + vendored verifying key | Built |
 | Value notes + encrypted-note discovery (ECIES, viewing key, `scan`) | Built |
@@ -283,7 +309,7 @@ settlement trace.
 | Confidential CLI (`value-keygen`/`shield`/`transfer`/`unshield`/`scan`) | Built |
 | Swap/stake-from-pool via CPI on the ZK path | Future |
 | ZK-path anonymity-mining reward (dwell/age proof) | Future |
-| Multi-party production trusted-setup ceremony (both circuits) | Future |
+| A production ceremony actually RUN with external contributors, and the program redeployed with its key | Future |
 | Multi-transaction atomic settlement for large epochs | Future |
 | Confidential deposits (hide even the shield/unshield magnitude) | Future |
 | n-in / n-out JoinSplit beyond 2-in / 2-out | Future |
@@ -299,7 +325,8 @@ fixed size buckets; the ZK opt-in path adds cryptographic who-initiated
 unlinkability with an on-chain Groth16 membership proof; and the confidential-value
 layer adds a Tornado-Nova 2-in/2-out JoinSplit that hides amounts (soak-proven end
 to end), so a deployment can hide both who initiated and how much moved. The
-remaining work is CPI-executed pooled actions, an anonymous ZK-path reward, a
-production trusted-setup ceremony, confidential deposits, an n-in/n-out JoinSplit,
+remaining work is CPI-executed pooled actions, an anonymous ZK-path reward, actually
+running the (already built) trusted-setup ceremony with external contributors and
+redeploying with its key, confidential deposits, an n-in/n-out JoinSplit,
 confidential swap/stake, and scaling, all extensions of shipped patterns rather than
 new claims.

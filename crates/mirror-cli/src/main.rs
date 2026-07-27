@@ -30,6 +30,7 @@
 //! membership proof, and emit the `SettleZk` instruction), and `status` (inspect
 //! the pool + current epoch on-chain).
 
+mod ceremony;
 mod chain;
 mod groth16;
 mod note;
@@ -108,6 +109,10 @@ enum Command {
     Transfer(TransferArgs),
     /// (confidential value) Withdraw a note to a public recipient; prove + emit Transact.
     Unshield(UnshieldArgs),
+    /// Multi-party Groth16 phase-2 trusted-setup ceremony: start, contribute,
+    /// beacon, verify, export the verifying key.
+    #[command(subcommand_help_heading = "Trusted setup")]
+    Ceremony(ceremony::CeremonyArgs),
     /// (confidential value) Trial-decrypt enc blobs and save recovered spendable notes.
     Scan(ScanArgs),
 }
@@ -416,6 +421,11 @@ struct ProveArgs {
     /// Groth16 proving key (gitignored; produced by `bash circuits/build.sh`).
     #[arg(long, default_value = "circuits/membership_final.zkey")]
     zkey: PathBuf,
+    /// Prove under a CEREMONY-produced key (`key_NNNN.mpk`) instead of `--zkey`.
+    /// The program must embed the matching verifying key
+    /// (`mirror-cli ceremony export-vk --out-rust`) for the proof to land.
+    #[arg(long, conflicts_with = "use_snarkjs")]
+    proving_key: Option<PathBuf>,
     /// Groth16 verification key (committed under circuits/artifacts/). Only used by
     /// the `--use-snarkjs` fallback.
     #[arg(long, default_value = "circuits/artifacts/verification_key.json")]
@@ -543,6 +553,7 @@ fn main() -> Result<()> {
         Command::Transfer(args) => run_transfer(args),
         Command::Unshield(args) => run_unshield(args),
         Command::Scan(args) => run_scan(args),
+        Command::Ceremony(args) => ceremony::run(args),
     }
 }
 
@@ -749,6 +760,7 @@ fn run_prove(args: ProveArgs) -> Result<()> {
         wasm: args.wasm,
         r1cs: args.r1cs,
         zkey: args.zkey,
+        proving_key: args.proving_key,
         vk: args.vk,
         snarkjs: args.snarkjs,
         use_snarkjs,

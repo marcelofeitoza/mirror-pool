@@ -46,6 +46,12 @@ pub struct ProveOpts {
     /// Compiled R1CS (gitignored build output), needed by the in-process Rust prover.
     pub r1cs: PathBuf,
     pub zkey: PathBuf,
+    /// A ceremony-produced proving key (`key_NNNN.mpk` from `ceremony contribute`).
+    /// When set it REPLACES `zkey` as the source of the proving key, so a proof can
+    /// be produced under a multi-party trusted setup instead of the dev setup. The
+    /// program must be running the matching verifying key
+    /// (`ceremony export-vk --out-rust`) or the proof will not land.
+    pub proving_key: Option<PathBuf>,
     pub vk: PathBuf,
     /// snarkjs invocation (default `snarkjs`; e.g. `node <dir>/cli.cjs` also works).
     /// Only used by the `--use-snarkjs` fallback path.
@@ -277,7 +283,7 @@ fn read_leaves(path: &Path) -> Result<Vec<Hash32>> {
 
 /// The circom `input.json` object for the membership circuit (decimal field
 /// elements), shared by the in-process Rust prover and the snarkjs fallback.
-fn membership_input_json(
+pub(crate) fn membership_input_json(
     root: &Hash32,
     nullifier_hash: &Hash32,
     action_hash: &Hash32,
@@ -299,7 +305,7 @@ fn membership_input_json(
 /// The four membership public inputs, in circuit-declaration order
 /// `[root, nullifierHash, actionHash, epoch]`, each 32-byte big-endian. `epoch` is
 /// the big-endian encoding of the u64 (the value the proof commits to).
-fn membership_public_inputs(
+pub(crate) fn membership_public_inputs(
     root: &Hash32,
     nullifier_hash: &Hash32,
     action_hash: &Hash32,
@@ -351,6 +357,14 @@ fn prove_with_rust(
         path,
     );
     let expected = membership_public_inputs(&path.root, nullifier_hash, action_hash, epoch);
+    if let Some(mpk) = &opts.proving_key {
+        let key = mirror_ceremony::key::CeremonyKey::load(mpk)
+            .with_context(|| format!("loading ceremony proving key {}", mpk.display()))?;
+        return crate::prove_rust::prove_with_key(
+            &opts.wasm, &opts.r1cs, &key.pk, &input, &expected,
+        )
+        .context("in-process Rust Groth16 proving under a ceremony key");
+    }
     crate::prove_rust::prove(
         &crate::prove_rust::Artifacts {
             wasm: &opts.wasm,
@@ -814,5 +828,197 @@ mod tests {
         verifier
             .verify()
             .expect("on-chain groth16-solana verifier must ACCEPT the Rust-generated proof");
+    }
+
+    /// THE decisive ceremony test: run a real multi-contribution phase-2 ceremony
+    /// over the membership circuit's phase-1-derived initial key, then prove the
+    /// membership circuit under the CEREMONY-produced proving key and confirm the
+    /// EXACT on-chain `groth16-solana` verifier accepts that proof against the
+    /// CEREMONY-exported verifying key.
+    ///
+    /// It also asserts the ceremony key is genuinely different from the committed
+    /// dev key (only `delta` moves, which is exactly what phase 2 re-randomizes),
+    /// so the check cannot pass by accidentally using the old key.
+    ///
+    /// Gated behind MIRROR_PROVE_LIVE=1 + #[ignore] because it needs the gitignored
+    /// build artifacts: the r1cs, the wasm, the public powers-of-tau, and the
+    /// initial zkey from `snarkjs groth16 setup`. Run with:
+    ///   MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored ceremony_key
+    #[test]
+    #[ignore = "requires the built r1cs/wasm/ptau/initial zkey (bash circuits/build.sh); set MIRROR_PROVE_LIVE=1"]
+    fn ceremony_key_proves_and_on_chain_verifier_accepts() {
+        use groth16_solana::groth16::{Groth16Verifier, Groth16Verifyingkey};
+        use mirror_ceremony::contribute::Entropy;
+        use mirror_ceremony::session::{Session, StartOptions};
+        use mirror_ceremony::vk_export;
+
+        if std::env::var("MIRROR_PROVE_LIVE").ok().as_deref() != Some("1") {
+            eprintln!("MIRROR_PROVE_LIVE != 1; skipping live ceremony test");
+            return;
+        }
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let r1cs = repo.join("circuits/membership.r1cs");
+        let ptau = repo.join("circuits/pot16_final.ptau");
+        let initial_zkey = repo.join("circuits/membership_0000.zkey");
+        for p in [&r1cs, &ptau, &initial_zkey] {
+            if !p.exists() {
+                eprintln!("missing {}; skipping", p.display());
+                return;
+            }
+        }
+
+        // A scratch ceremony directory, so this exercises the real on-disk flow a
+        // contributor follows rather than an in-memory shortcut.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("mirror-ceremony-e2e-{nanos}"));
+
+        let mut session = Session::start(StartOptions {
+            dir: &dir,
+            circuit: "membership",
+            r1cs: &r1cs,
+            ptau: &ptau,
+            initial_zkey: &initial_zkey,
+        })
+        .expect("opening the ceremony");
+
+        // Two contributions plus a closing beacon. Deterministic seeds keep the test
+        // reproducible; the ceremony records that and refuses to count them.
+        session
+            .contribute("test-contributor-a", &Entropy::Deterministic("a".into()))
+            .expect("first contribution");
+        session
+            .contribute("test-contributor-b", &Entropy::Deterministic("b".into()))
+            .expect("second contribution");
+        session
+            .beacon("test-coordinator", b"mirror-pool test beacon", 8)
+            .expect("beacon");
+
+        let report = session.verify().expect("the ceremony must verify");
+        assert_eq!(report.steps, 3);
+        assert_eq!(report.beacon_steps, 1);
+        assert_eq!(
+            report.independence.independent_contributors, 0,
+            "deterministic test contributions must never be counted as independent"
+        );
+
+        let key = session.load_head_key().expect("loading the ceremony key");
+        let initial = session.load_initial_key().expect("loading the initial key");
+        assert_ne!(
+            key.delta_g2(),
+            initial.delta_g2(),
+            "the ceremony must have moved delta"
+        );
+
+        // Reproduce the fixture witness (single leaf at index 21).
+        let secret = mirror_core::Secret::from_bytes(
+            groth16::to_be32("111122223333444455556666777788889999").unwrap(),
+        );
+        let mut recipient = [0u8; 32];
+        for (i, b) in recipient.iter_mut().enumerate() {
+            *b = (i + 1) as u8;
+        }
+        let amount: u64 = 250_000_000;
+        let epoch: u64 = 7;
+        let action_hash = transfer_action_hash(&recipient, amount);
+        let nullifier_hash = nullifier(&secret, Epoch(epoch)).0;
+        let leaf = commit_with_action_hash(&secret, &action_hash, Epoch(epoch)).0;
+        let zeros = tree::zero_ladder(tree::DEPTH);
+        let mut elements = Vec::with_capacity(tree::DEPTH);
+        let mut indices = Vec::with_capacity(tree::DEPTH);
+        for (level, zero) in zeros.iter().enumerate().take(tree::DEPTH) {
+            elements.push(*zero);
+            indices.push(((21u64 >> level) & 1) as u8);
+        }
+        let root = tree::verify_path(&leaf, &elements, &indices);
+        let path = MerklePath {
+            elements,
+            indices,
+            root,
+        };
+
+        let input = membership_input_json(
+            &path.root,
+            &nullifier_hash,
+            &action_hash,
+            epoch,
+            &secret.0,
+            &path,
+        );
+        let expected = membership_public_inputs(&path.root, &nullifier_hash, &action_hash, epoch);
+        let proof_bytes = crate::prove_rust::prove_with_key(
+            &repo.join("circuits/membership_js/membership.wasm"),
+            &r1cs,
+            &key.pk,
+            &input,
+            &expected,
+        )
+        .expect("proving under the ceremony key must succeed and ark-verify");
+
+        // The ceremony key is NOT the committed dev key: a proof under it must be
+        // rejected by the committed verifying key.
+        let mut stale = Groth16Verifier::new(
+            &proof_bytes.proof_a,
+            &proof_bytes.proof_b,
+            &proof_bytes.proof_c,
+            &expected,
+            &committed_vk::VERIFYINGKEY,
+        )
+        .expect("verifier construction");
+        assert!(
+            stale.verify().is_err(),
+            "a ceremony-key proof must NOT verify under the old dev verifying key"
+        );
+
+        // DECISIVE: the EXACT on-chain verifier accepts it under the ceremony vk.
+        let exported = vk_export::solana_bytes(&key.pk.vk);
+        let ic: &'static [[u8; 64]] = Box::leak(exported.ic.clone().into_boxed_slice());
+        let ceremony_vk = Groth16Verifyingkey {
+            nr_pubinputs: exported.nr_pubinputs,
+            vk_alpha_g1: exported.alpha_g1,
+            vk_beta_g2: exported.beta_g2,
+            vk_gamme_g2: exported.gamma_g2,
+            vk_delta_g2: exported.delta_g2,
+            vk_ic: ic,
+        };
+        // Only delta moved: everything else comes from phase 1 and the circuit.
+        assert_eq!(
+            ceremony_vk.vk_alpha_g1,
+            committed_vk::VERIFYINGKEY.vk_alpha_g1
+        );
+        assert_eq!(
+            ceremony_vk.vk_beta_g2,
+            committed_vk::VERIFYINGKEY.vk_beta_g2
+        );
+        assert_eq!(
+            ceremony_vk.vk_gamme_g2,
+            committed_vk::VERIFYINGKEY.vk_gamme_g2
+        );
+        assert_eq!(ceremony_vk.vk_ic, committed_vk::VERIFYINGKEY.vk_ic);
+        assert_ne!(
+            ceremony_vk.vk_delta_g2,
+            committed_vk::VERIFYINGKEY.vk_delta_g2
+        );
+
+        let mut verifier = Groth16Verifier::new(
+            &proof_bytes.proof_a,
+            &proof_bytes.proof_b,
+            &proof_bytes.proof_c,
+            &expected,
+            &ceremony_vk,
+        )
+        .expect("verifier construction");
+        verifier.verify().expect(
+            "on-chain groth16-solana verifier must ACCEPT a proof made under the ceremony key",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

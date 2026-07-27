@@ -88,13 +88,16 @@ honest against the tree.
 | Confidential value pool (on-chain) | `programs/mirror-pool` | **Implemented** - `InitValuePool` + `Transact`: own Poseidon value-note accumulator + root history + vault, on-chain Groth16 JoinSplit verify, nullifier PDAs, deposit/withdraw per `publicAmount`, fixed-denomination mode. Amounts never in cleartext except public deposit/withdraw. |
 | Confidential notes + client ops | `crates/mirror-core` + `mirror-cli` + `mirror-coordinator` | **Implemented** - ECIES encrypted notes + `scan` discovery; `value-keygen`/`shield`/`transfer`/`unshield` (pure-Rust ark-groth16 prove + emit, no Node); gasless `submit_transact` (transfer/unshield relay-only signed = the unlinkability). |
 | Confidential soak | `crates/mirror-soak` | **Implemented** - live shield -> hidden-amount transfer -> unshield + fixed-denom + adversarial, 25/25 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
+| Trusted-setup ceremony | `crates/mirror-ceremony` + `mirror-cli ceremony` | **Implemented** - distributable multi-party Groth16 phase-2 ceremony for both circuits: public phase-1 import + provenance reader, delta re-randomization, Schnorr proof of knowledge bound to the contributor id and the running transcript hash, SHA-256 transcript chain, reproducible verification (rejects tampered deltas, forged/replayed proofs, reordered and truncated chains - each tested), and an independent-contributor count that refuses to count self-runs. `ceremony prove-check` proves the membership circuit under a ceremony key and the on-chain `groth16-solana` verifier accepts it. **No production ceremony has been run: the deployed keys are still dev-setup keys.** See [`docs/CEREMONY.md`](docs/CEREMONY.md). |
 
 "Implemented" means the component's core logic is complete and tested. The host
 workspace tests, 42 on-chain mollusk tests, `build-sbf`, and the two live Surfpool
 soaks (behavioral 17/17 + confidential 25/25 on-chain assertions) are all green.
 See the roadmap for future work (swap/stake-from-pool via CPI, confidential
-deposits, the ZK-path anonymity-mining incentive, and production multi-party
-trusted-setup ceremonies; the current setups are dev/test).
+deposits, and the ZK-path anonymity-mining incentive). The multi-party phase-2
+trusted-setup ceremony is built and tested; what remains there is *running* one
+with external contributors and redeploying with its key, because the currently
+committed and deployed verifying keys are still dev-setup keys.
 
 ---
 
@@ -146,6 +149,7 @@ mirror-pool/
     mirror-harness       # adversarial evaluation harness         [implemented]
     mirror-behaviors     # Behavior trait + pooled-action adapters[implemented]
     mirror-soak          # live Surfpool end-to-end soak suite    [implemented]
+    mirror-ceremony      # multi-party Groth16 phase-2 ceremony   [implemented]
   circuits/              # Poseidon membership circuit + Groth16 setup [implemented]
   programs/
     mirror-pool          # on-chain Pinocchio program (SBF)       [implemented]
@@ -155,6 +159,7 @@ mirror-pool/
     ROADMAP.md           # what is built and what is future work
     INCENTIVES.md        # entry-fee split, dwell reward, ZK-path incentive design
     PROOF.md             # live Surfpool soak results + tx signatures
+    CEREMONY.md          # multi-party trusted-setup ceremony: contribute + verify
   Cargo.toml             # host workspace manifest
   Makefile               # fmt / clippy / test / build-sbf / harness / soak
   LICENSE                # MIT
@@ -205,11 +210,16 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   anonymity to anyone who clusters the operator; they are excluded from
   `real_k`. A pool with real `k=1` provides no anonymity regardless of nominal
   size.
-- **The trusted setups are dev/test, not a real ceremony.** Both Groth16
-  circuits (membership and the confidential JoinSplit) use a single-contributor
-  dev setup. The committed verifying keys and fixtures verify and the on-chain
-  program embeds them, but a production multi-party ceremony is future work
-  (`docs/ROADMAP.md`).
+- **The DEPLOYED trusted setups are dev/test, not the output of a real
+  ceremony.** Both committed verifying keys (membership and the confidential
+  JoinSplit) came from a single-contributor dev setup whose phase-2 entropy is a
+  hard-coded public string, so their toxic waste is public. The keys and fixtures
+  verify and the on-chain program embeds them, but they must not secure real
+  value. A real multi-party phase-2 ceremony **is implemented and runnable**
+  ([`docs/CEREMONY.md`](docs/CEREMONY.md)); running one with external contributors
+  and redeploying with its key is what closes this, and that has not been done.
+  A `k`-contributor ceremony is 1-of-N honest: safe if *at least one* contributor
+  destroyed their scalar, not if `k` did.
 - **It is not a Sybil oracle.** Real k-anonymity assumes participants are
   economically distinct. The per-identity entry-fee cost raises the price of
   flooding a round, but Sybil resistance is not a solved property.
@@ -231,6 +241,10 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   anonymity-set size (Serjantov-Danezis `2^H(p)` + min-entropy): advertised k is
   not effective k. A naive pool advertising k=32 has effective k ~7.5 (worst-case
   1) under funding-provenance partitioning; mirror-pool keeps it at 32.
+- [`docs/CEREMONY.md`](docs/CEREMONY.md) - the multi-party Groth16 phase-2
+  trusted-setup ceremony: how to contribute, how to verify somebody else's, what the
+  beacon is for, how the independent-contributor count refuses to count self-runs,
+  and exactly what 1-of-N honest does and does not give you.
 - [`docs/PROOF.md`](docs/PROOF.md) - the live Surfpool soak: both paths + the
   adversarial cases, with transaction signatures and on-chain assertions.
 - [`paper/mirror-pool.pdf`](paper/mirror-pool.pdf) - the design paper: the

@@ -394,3 +394,177 @@ cargo run -p mirror-soak --bin mirror-soak-value -- \
 
 Every run creates fresh pools (fresh relay authorities) and fresh wallets, so the run
 is self-contained and repeatable; the signatures above are from this run.
+
+---
+
+# Trusted-setup ceremony - local demonstration run
+
+Recorded 2026-07-27 on the membership circuit, plus an independent second run on the
+transaction circuit. This is a **demonstration that the ceremony machinery works end
+to end**, NOT a production ceremony: every contribution came from one machine, so the
+tool reports one independent contributor, and the resulting key has not been deployed.
+The committed verifying keys are still the dev-setup keys.
+
+## What the ceremony was anchored to
+
+| item | value | reproducible? |
+| --- | --- | --- |
+| phase 1 | `pot16_final.ptau`, sha256 `1c401abb57c9ce531370f3015c3e75c0892e0f32b8b1e94ace0f6682d9695922` | yes - a public file |
+| phase-1 provenance | 55 contributions, power `2^16`, ceremony power `2^28`, named contributors | yes - `ceremony inspect-ptau` reads them out of the file |
+| circuit | `circuits/membership.r1cs`, sha256 `8ed379951ad0b7371b4ac53fc373b64c36ac26552802ff165dad7af4977bd0a2` | yes, for a given circom version |
+| initial phase-2 key | sha256 `8c6b6c48195a4e116322cace04ec7619a9b158137bb98df37d9f78e651b15697` | **yes** - `snarkjs groth16 setup` is deterministic |
+
+The determinism of `snarkjs groth16 setup` was checked directly: running it twice on
+the same r1cs and ptau produced byte-identical zkeys
+(sha256 `57f5131bdff513f685b39323d44471821a431447b6fb749f81d5bef4bbea0afe`), matching
+the `membership_0000.zkey` the build script emits. That is what lets a verifier
+re-derive the start of the chain instead of trusting it.
+
+## The chain
+
+| step | contributor | kind | entropy | new key digest (first 16) | chain hash (first 16) |
+| --- | --- | --- | --- | --- | --- |
+| 0 | `alice@example.org` | entropy | OS + user string | `414f795f75c5ff4b` | `8ff46869ef510769` |
+| 1 | `bob@example.net` | entropy | OS + user string | `cb0ea53ae67191e0` | `8016f34130823f58` |
+| 2 | `carol@example.com` | entropy | OS + user string | `abe3e0fc98be6186` | `c9ca47e5f91bae10` |
+| 3 | `coordinator` | beacon (`2^16` SHA-256 iterations) | public | `6757820d23f5a2a3` | `de97230bcf01a164` |
+
+Final ceremony hash: `de97230bcf01a164b05121112bae0fad43a781c3cc328fadb280217609046dea`.
+
+Contribution digests are **not** reproducible by a third party: the scalars come from
+OS randomness, which is the point. What a third party reproduces is the *verification*.
+
+## What verification reported
+
+`mirror-cli ceremony verify --dir ... --r1cs ... --initial-zkey ...`:
+
+```
+r1cs circuits/membership.r1cs matches the transcript.
+initial key re-derived from circuits/membership_0000.zkey matches the transcript.
+CEREMONY VERIFIED
+  steps:                   4
+  of which beacons:        1
+  final transcript hash:   de97230bcf01a164b05121112bae0fad43a781c3cc328fadb280217609046dea
+  phase-1 contributions:   55
+
+INDEPENDENT CONTRIBUTORS: 1
+  from 4 step(s): 3 with secret entropy, 0 deterministic, 1 beacon
+  [counted] alice@example.org (steps 0, 1, 2, 3)
+        merged: 0 and 1: same machine fingerprint
+        ...
+WARNINGS
+  - 1 beacon step(s) present; a beacon removes last-mover grinding but adds no
+    secrecy, so it is NOT counted as an independent contributor
+  - only 1 independent contributor: safety rests entirely on that one party having
+    destroyed their scalar
+  - contributions 0 and 1 are 2s apart, which is fast for an out-of-band handoff
+```
+
+**Three distinct self-asserted identities, one machine, reported as one contributor.**
+That is the self-run refusal doing its job on a real run, and it is why the headline
+number in this section is 1 and not 3.
+
+## The end-to-end check
+
+`mirror-cli ceremony prove-check` verified the ceremony, generated a membership proof
+under the ceremony-produced proving key (in process, pure Rust), and ran the **exact
+on-chain `groth16-solana` verifier** the program runs over that proof against the
+ceremony-exported verifying key:
+
+```
+PASS: the on-chain groth16-solana verifier accepts a proof made under the
+      ceremony-produced proving key, checked against the ceremony-exported
+      verifying key. The ceremony output is a working Groth16 key.
+```
+
+Independent cross-checks on the same proof:
+
+```
+$ snarkjs groth16 verify <ceremony vk> public.json proof.json
+[INFO]  snarkJS: OK!
+
+$ snarkjs groth16 verify circuits/artifacts/verification_key.json public.json proof.json
+[ERROR] snarkJS: Invalid proof
+```
+
+The second line is the important one: the proof is rejected under the OLD dev
+verifying key, so the check cannot have passed by accidentally exercising the old key.
+
+Comparing the exported verifying key against the committed dev key field by field:
+
+| field | same as dev key? |
+| --- | --- |
+| `vk_alpha_1` | yes |
+| `vk_beta_2` | yes |
+| `vk_gamma_2` | yes |
+| `IC` (all entries) | yes |
+| `vk_delta_2` | **no** |
+
+Only `delta` moved. That is exactly what a phase-2 ceremony is defined to do.
+
+## Second circuit, independent transcript
+
+The transaction (JoinSplit) circuit was run as a separate ceremony over the same
+public phase 1:
+
+| item | value |
+| --- | --- |
+| r1cs sha256 | `908988ec0ee6626b7d8fd39892e12166b5ec75ef1a3a259b64bdc1a6c8990063` |
+| initial key digest | `3f7eb98b3a72011d21e4af5b45eff1402007688c07770973a8dec4a6816e8beb` |
+| steps | 2 entropy contributions |
+| final key digest | `7433ed19a86984aaae4e7bec0829a8a5b3f01b2076242121864e8a708bba3c72` |
+| final ceremony hash | `d5a657e936f30f375d2e0b2b4242f85953763acb6900831233e8cd93602f91ea` |
+| verify | `CEREMONY VERIFIED`, 1 independent contributor (same-machine merge) |
+
+`prove-check` deliberately refuses this ceremony: it builds a membership witness, and
+constructing a full 2-in/2-out JoinSplit witness is out of its scope. That circuit's
+ceremony is verified and exportable, but its end-to-end proof check is not automated.
+
+## Timings (optimized build, Apple silicon)
+
+| operation | membership (11522 constraints) | transaction (27278 constraints) |
+| --- | --- | --- |
+| `ceremony start` (read zkey, write key) | 1.5 s | 1.8 s |
+| `ceremony contribute` | 2.0 s | 3.9 s |
+| `ceremony verify` (whole chain) | 0.8 s | 0.3 s |
+| `ceremony prove-check` (verify + prove + on-chain verify) | 0.4 s | n/a |
+
+Key files are 4.7 MB (membership) and 11 MB (transaction). Transcripts are ~7 KB.
+
+Build note, unrelated to the ceremony: on the toolchain used here (Rust 1.92 with
+Apple's `ld`), a `--release` link of any binary that pulls in `solana-rpc-client`
+fails during LTO with a bitcode-version mismatch inside
+`spl-token-confidential-transfer-proof-*`. This affects `mirror-cli` and
+`mirror-coordinator` equally and predates this work; `CARGO_PROFILE_RELEASE_LTO=false`
+works around it, and the timings above were measured with that. Debug builds, and
+every gate (`cargo check` / `fmt` / `clippy` / `test`), are unaffected.
+
+## Reproduce
+
+```sh
+D=ceremony/membership
+mirror-cli ceremony inspect-ptau --ptau circuits/pot16_final.ptau
+snarkjs groth16 setup circuits/membership.r1cs circuits/pot16_final.ptau \
+  circuits/membership_0000.zkey
+mirror-cli ceremony start --circuit membership --dir "$D" \
+  --r1cs circuits/membership.r1cs --ptau circuits/pot16_final.ptau \
+  --initial-zkey circuits/membership_0000.zkey
+mirror-cli ceremony contribute --dir "$D" --id "alice@example.org"
+mirror-cli ceremony contribute --dir "$D" --id "bob@example.net"
+mirror-cli ceremony beacon --dir "$D" --id coordinator \
+  --source-hex <pre-committed public value> --iterations-exp 16
+mirror-cli ceremony verify --dir "$D" \
+  --r1cs circuits/membership.r1cs --initial-zkey circuits/membership_0000.zkey
+mirror-cli ceremony prove-check --dir "$D" --out-dir /tmp/cproof
+snarkjs groth16 verify /tmp/cproof/verification_key.json \
+  /tmp/cproof/public.json /tmp/cproof/proof.json
+```
+
+The same flow also runs as a test:
+
+```sh
+MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored ceremony_key
+```
+
+Your digests from step 0 onward will differ from the table above (different entropy);
+the phase-1 digest, the r1cs digest and the initial-key digest will not.

@@ -19,7 +19,7 @@
 
 use anyhow::{bail, Context, Result};
 use num_bigint::BigUint;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use mirror_core::{wire, Hash32};
 
@@ -75,8 +75,10 @@ fn biguint_to_be32(n: &BigUint) -> Result<Hash32> {
     Ok(out)
 }
 
-/// A snarkjs `proof.json`.
-#[derive(Deserialize)]
+/// A snarkjs `proof.json`. Serializable as well as deserializable, so a proof
+/// generated in Rust can be written back out in the shape `snarkjs groth16 verify`
+/// reads.
+#[derive(Deserialize, Serialize)]
 pub struct SnarkjsProof {
     pub pi_a: Vec<String>,
     pub pi_b: Vec<Vec<String>>,

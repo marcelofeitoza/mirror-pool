@@ -1,0 +1,43 @@
+# mirror-ceremony: a distributable multi-party Groth16 phase-2 trusted-setup
+# ceremony for the mirror-pool circuits.
+#
+# Pure Rust. Reads the phase-1-derived initial proving key (a snarkjs `.zkey`
+# produced deterministically from the public powers-of-tau), re-randomizes delta
+# per contribution, proves knowledge of each delta ratio with a Schnorr PoK bound
+# to the contributor id and the running transcript hash, chains the whole thing
+# with SHA-256, and verifies the result with pairing same-ratio checks.
+[package]
+name = "mirror-ceremony"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Multi-party Groth16 phase-2 trusted-setup ceremony for mirror-pool: delta re-randomization, Schnorr proofs of knowledge, SHA-256 transcript chaining, and independently reproducible verification."
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rand.workspace = true
+
+# arkworks 0.5, pinned to the SAME major the rest of the repo links (mirror-core's
+# light-poseidon 0.4 -> ark-bn254/ark-ff 0.5, mirror-cli's ark-circom 0.5), so the
+# `Fr` / `Fq` / `G1Affine` types are ONE type set repo-wide and a ceremony-produced
+# proving key can be handed straight to mirror-cli's in-process prover.
+ark-bn254 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-groth16 = "0.5"
+ark-serialize = "0.5"
+# `ark_circom::read_zkey` imports the snarkjs `.zkey` that `snarkjs groth16 setup`
+# derives (deterministically) from the circuit r1cs + a PUBLIC powers-of-tau. That
+# is the ONLY snarkjs-produced input to the ceremony; everything after it is Rust.
+ark-circom = "0.5"
+
+# No dev-dependencies: the crate's own tests run over a synthetic proving key and
+# need nothing beyond the dependencies above. The end-to-end test that proves a real
+# circuit under a ceremony key and runs the on-chain `groth16-solana` verifier over
+# the result lives in `mirror-cli`, which already has the circuit artifacts wired up
+# (`ceremony_key_proves_and_on_chain_verifier_accepts`).

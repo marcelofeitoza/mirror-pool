@@ -7,7 +7,7 @@ Cargo.lock.bak
 *.so
 programs/*/target
 
-# Local keypairs / secrets — never commit
+# Local keypairs / secrets - never commit
 *.json.key
 *-keypair.json
 wallets/
@@ -19,7 +19,7 @@ wallets/
 *.db-journal
 notes/
 
-# Soak-suite runtime state: logs, generated keypairs, notes, proof emits — never
+# Soak-suite runtime state: logs, generated keypairs, notes, proof emits - never
 # commit secrets. docs/PROOF.md (the committed run record) lives outside this.
 .soak/
 .surfpool/
@@ -27,6 +27,13 @@ notes/
 # OS / editor
 .DS_Store
 *.swp
+
+# Trusted-setup ceremony working directories. The transcript is small and meant to
+# be published, but the proving keys next to it are multi-megabyte build artifacts,
+# so a whole ceremony directory stays out of git. Publish transcript.json (and the
+# final transcript hash) separately.
+ceremony/
+*.mpk
 
 # Circuits: build outputs and large binaries (never commit ptau/zkey/wasm)
 circuits/node_modules/

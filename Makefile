@@ -8,7 +8,7 @@
 SURFPOOL_RPC ?= http://127.0.0.1:8899
 PROGRAM_MANIFEST := programs/mirror-pool/Cargo.toml
 
-.PHONY: all fmt fmt-check clippy test build build-sbf harness soak check clean
+.PHONY: all fmt fmt-check clippy test build build-sbf harness soak ceremony-test check clean
 
 all: fmt-check clippy test build-sbf
 
@@ -31,6 +31,14 @@ build:
 # On-chain program (standalone crate, built for SBF).
 build-sbf:
 	cargo build-sbf --manifest-path $(PROGRAM_MANIFEST)
+
+# The decisive trusted-setup check: run a real multi-contribution phase-2 ceremony
+# over the membership circuit, prove under the ceremony-produced key, and verify with
+# the on-chain groth16-solana verifier. Needs the gitignored circuit build artifacts
+# (bash circuits/build.sh) plus the powers-of-tau and the initial zkey. See
+# docs/CEREMONY.md.
+ceremony-test:
+	MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored ceremony_key --nocapture
 
 # Run the adversarial evaluation harness (prints the attacker-advantage table).
 harness:

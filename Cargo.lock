@@ -3026,6 +3026,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirror-ceremony"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ark-bn254 0.5.0",
+ "ark-circom",
+ "ark-ec 0.5.0",
+ "ark-ff 0.5.0",
+ "ark-groth16",
+ "ark-serialize 0.5.0",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "mirror-cli"
 version = "0.1.0"
 dependencies = [
@@ -3037,6 +3055,7 @@ dependencies = [
  "ark-snark",
  "clap",
  "groth16-solana",
+ "mirror-ceremony",
  "mirror-core",
  "num-bigint",
  "rand 0.8.7",

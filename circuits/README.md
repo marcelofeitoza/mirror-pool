@@ -113,13 +113,61 @@ snarkjs groth16 verify artifacts/verification_key.json <(node -e \
 # -> [INFO] snarkJS: OK!
 ```
 
-## Dev-setup caveat
+## Dev-setup caveat, and the real ceremony
 
-The trusted setup produced by `build.sh` is a DEVELOPMENT and TEST setup only.
-The phase-2 contribution uses a hard-coded entropy string so the build is
-reproducible, which by definition makes the toxic waste public. It is NOT a
-secure ceremony and MUST NOT be used to secure real value. A real multi-party
-trusted setup ceremony is a separate deliverable.
+The trusted setup produced by `build.sh` (and by `build_transaction.sh`) is a
+DEVELOPMENT and TEST setup only. Its phase-2 contribution uses a hard-coded
+entropy string so the build is reproducible, which by definition makes the toxic
+waste public. It is NOT a secure ceremony and MUST NOT be used to secure real
+value.
+
+**The verifying keys committed in `artifacts/` and embedded in the deployed
+program came from that dev setup. That remains true until a real ceremony output
+is exported and the program is redeployed with it.**
+
+A real multi-party **phase-2 ceremony is implemented** in
+`crates/mirror-ceremony`, driven from `mirror-cli ceremony ...`, and documented in
+[`../docs/CEREMONY.md`](../docs/CEREMONY.md). It imports a public phase-1
+powers-of-tau, re-randomizes `delta` per contribution with a Schnorr proof of
+knowledge bound to the contributor, chains the transcript with SHA-256, verifies
+the whole chain with pairing same-ratio checks anyone can reproduce, and reports a
+conservative independent-contributor count that refuses to count self-runs. The
+short version, per circuit:
+
+```sh
+# phase 1: a PUBLIC powers-of-tau. Check what is in it first.
+mirror-cli ceremony inspect-ptau --ptau <public>.ptau
+
+# the initial phase-2 key is deterministic, so anyone can re-derive it
+snarkjs groth16 setup membership.r1cs <public>.ptau membership_0000.zkey
+
+mirror-cli ceremony start --circuit membership --dir ceremony/membership \
+  --r1cs membership.r1cs --ptau <public>.ptau --initial-zkey membership_0000.zkey
+mirror-cli ceremony contribute --dir ceremony/membership --id "alice@example.org"
+# ... more contributors, each on their own machine ...
+mirror-cli ceremony beacon --dir ceremony/membership --id coordinator \
+  --source-hex <pre-committed public value> --iterations-exp 20
+mirror-cli ceremony verify --dir ceremony/membership \
+  --r1cs membership.r1cs --initial-zkey membership_0000.zkey
+mirror-cli ceremony export-vk --dir ceremony/membership \
+  --out-json artifacts/verification_key.json --out-rust ../programs/mirror-pool/src/vk.rs
+```
+
+A `k`-contributor ceremony is safe if **at least one** contributor destroyed their
+scalar (1-of-N honest), not if `k` of them did. See the guide for what that does
+and does not buy you.
+
+`pot16_final.ptau`, the phase-1 file the committed dev artifacts were built from,
+records **55 contributions from named contributors at ceremony power 2^28** - the
+signature of a public perpetual-powers-of-tau file rather than a self-generated one.
+Its SHA-256 is
+`1c401abb57c9ce531370f3015c3e75c0892e0f32b8b1e94ace0f6682d9695922`, and
+`mirror-cli ceremony inspect-ptau --ptau pot16_final.ptau` prints the digest and
+every contributor name so you can compare them against the published record for the
+file you believe you have. The dev-setup weakness is therefore entirely in phase 2,
+not phase 1. (`build.sh` will fall back to generating its own single-contribution
+phase 1 if the file is missing; that fallback is for offline development only and
+is even weaker.)
 
 ## Artifacts
 

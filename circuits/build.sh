@@ -9,7 +9,13 @@
 # across rebuilds; trust here rests on the committed verifying key + proof fixtures
 # verifying (they do) and the on-chain program embedding that committed key, not on
 # rebuild determinism. It is NOT a secure ceremony and MUST NOT be used to secure
-# real value. A real multi-party trusted setup ceremony is a separate deliverable.
+# real value.
+#
+# A real multi-party phase-2 ceremony IS implemented: see docs/CEREMONY.md and
+# `mirror-cli ceremony start | contribute | beacon | verify | export-vk`. To produce
+# a key that is not this one, run the ceremony over the DETERMINISTIC initial key
+# (`snarkjs groth16 setup <r1cs> <public>.ptau <circuit>_0000.zkey`, which this
+# script also produces in step 3) and export its verifying key over artifacts/.
 #
 # NOTE: re-running this OVERWRITES circuits/artifacts/* with a fresh vk + fixtures
 # that will NOT match the committed on-chain vk. Run `git checkout -- circuits/artifacts`
@@ -41,8 +47,11 @@ echo "==> [2/5] Ensuring phase-1 powers of tau ($PTAU)"
 if [ -f "$PTAU" ]; then
   echo "    Using existing $PTAU (universal, circuit-independent SRS)."
 else
-  echo "    $PTAU not found; generating a reproducible 2^${DEPTH_POWER} phase-1."
-  echo "    (This is slow; a universal ptau can also be dropped in as $PTAU.)"
+  echo "    WARNING: $PTAU not found. Generating a SINGLE-CONTRIBUTION phase-1 from"
+  echo "    a fixed entropy string. This is for offline development ONLY: a real"
+  echo "    deployment must use a PUBLIC perpetual powers-of-tau file dropped in as"
+  echo "    $PTAU (inspect it with \`mirror-cli ceremony inspect-ptau\`)."
+  echo "    (This is also slow.)"
   snarkjs powersoftau new bn128 "$DEPTH_POWER" pot_0000.ptau -v
   snarkjs powersoftau contribute pot_0000.ptau pot_0001.ptau \
     --name="mirror-pool dev phase1" -v -e="$ENTROPY-phase1"

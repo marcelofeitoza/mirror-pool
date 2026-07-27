@@ -386,8 +386,9 @@ value analog of fixed size buckets, giving amount k-anonymity at the boundary.
 This layer is an intentional composition, not scope creep. Its guarantee is
 stated precisely: it hides in-pool amounts and, for internal transfers and
 unshields, the initiator; it does \emph{not} hide the public shield-in and
-unshield-out magnitudes or the pool TVL (a public on-chain balance), and its
-trusted setup is dev/test (Section~\ref{sec:limits}).
+unshield-out magnitudes or the pool TVL (a public on-chain balance), and the
+verifying key it is deployed with came from a dev/test setup
+(Section~\ref{sec:limits}).
 
 \section{Anonymity analysis}
 \label{sec:anon}
@@ -554,6 +555,75 @@ generic over a submitter seam, so the identical privacy-critical batching and
 floor logic runs against an in-memory submitter in tests and the real submitter in
 production, with no validator needed to test the decisions that matter.
 
+\section{Trusted setup: a verifiable multi-party ceremony}
+\label{sec:ceremony}
+
+Groth16's price for small, cheap on-chain verification is a per-circuit structured
+reference string whose sampling secrets (``toxic waste'') must be destroyed. We
+implement a distributable multi-party \textbf{phase-2} ceremony for both circuits
+(\code{crates/mirror-ceremony}, driven from \code{mirror-cli ceremony}), in pure
+Rust over the same arkworks stack the prover uses.
+
+\paragraph{Phase 1 is imported, not generated.} \code{ceremony start} takes a public
+perpetual powers-of-tau file and records its SHA-256, curve, power, and contribution
+count in the transcript; \code{ceremony inspect-ptau} parses the file's own
+contributions section and prints every contributor's self-declared name, so the list
+can be compared against the published record rather than asserted in prose. A file
+with fewer than two contributions is refused unless explicitly overridden. The
+initial phase-2 key is the output of \code{snarkjs groth16 setup}, which is
+deterministic: the same R1CS and the same powers-of-tau reproduce it byte for byte,
+so the start of the chain is re-derivable from public inputs.
+
+\paragraph{A contribution moves only $\delta$.} With a fresh secret scalar $s$,
+$\delta_{G_1}$ and $\delta_{G_2}$ are multiplied by $s$ and the $\delta$-divided
+query vectors $h$ and $l$ by $s^{-1}$; every other element of the key is unchanged.
+The final $\delta$ is the product of all contributions, giving the standard
+\textbf{1-of-N honest} property: the setup is safe if \emph{at least one} contributor
+destroyed their scalar. Each contribution carries a Schnorr proof of knowledge of $s$
+with respect to the previous key's $\delta_{G_1}$, whose Fiat--Shamir challenge is
+bound to the running transcript hash, the contribution index, and the contributor
+identifier; without extractable knowledge of the ratio, a contributor could publish a
+point derived from an earlier step and cancel an honest contributor's randomness.
+Entries are chained with SHA-256 over a canonical, length-prefixed serialization.
+
+\paragraph{Verification is reproducible by anyone.} Given the transcript, the initial
+key, and the final key, \code{ceremony verify} recomputes the whole chain and checks
+the hash links, every entry hash, every proof of knowledge, a pairing same-ratio
+check $e(\delta_{G_1}^{prev}, \delta_{G_2}^{new}) = e(\delta_{G_1}^{new},
+\delta_{G_2}^{prev})$ per step, exact recomputation of beacon steps from their
+published source, the endpoint digests, byte-equality of every $\delta$-independent
+part of the key, and a batched pairing check that $h$ and $l$ were divided by exactly
+the accumulated ratio. It rejects a tampered delta, a forged or replayed proof of
+knowledge, a reordered chain, and a truncated chain; each rejection has a test,
+including the sophisticated variants where the adversary re-hashes the entire chain
+after tampering so only the algebra can object. Truncating \emph{both} the transcript
+and the key is a legitimately shorter ceremony that the algebra cannot reject, which
+is precisely why the final transcript hash is the value a coordinator publishes.
+
+\paragraph{Counting contributors honestly.} The tool reports an
+\emph{independent-contributor} count, not a contribution count. Contributions sharing
+an identity, a machine fingerprint, or a proof-of-knowledge nonce are merged;
+deterministic (fixed-seed) and beacon steps are never counted at all, because their
+scalars are reproducible by anyone. On a run where three self-asserted identities
+contributed from one machine, the tool reports \textbf{1 independent contributor from
+4 steps}, not 4. We state its limits explicitly: identifiers and fingerprints are
+self-asserted, so this is a guard against accidental self-inflation and
+\emph{not} a Sybil defence; it can also under-count when environments look alike,
+which is the safe direction.
+
+\paragraph{End-to-end.} \code{ceremony prove-check} runs a ceremony, generates a real
+membership proof under the ceremony-produced proving key, and verifies it with the
+\emph{exact} on-chain \code{groth16-solana} verifier against the ceremony-exported
+verifying key. In the exported key only \code{vk\_delta\_2} differs from the dev key,
+as phase-2 theory predicts, and a ceremony-key proof is correspondingly rejected by
+the old dev verifying key. \code{snarkjs groth16 verify} accepts the same proof under
+the exported \code{verification\_key.json}.
+
+\paragraph{What has not been done.} No production ceremony has been \emph{run}. The
+committed and deployed verifying keys still come from the insecure dev setup, and
+that remains true until a ceremony is run with external contributors and the program
+is redeployed with its key (Section~\ref{sec:limits}).
+
 \section{Evaluation: public devnet deployment}
 \label{sec:eval}
 
@@ -657,12 +727,15 @@ A privacy tool that is vague about its non-goals is a trap. We list what still
 leaks and what we do not claim.
 
 \begin{itemize}[leftmargin=1.4em,itemsep=0.15em]
-  \item \textbf{Dev/test trusted setup.} Both Groth16 circuits (membership and the
-        JoinSplit) use a single-contributor, reproducible dev setup whose phase-2
-        entropy is public. The committed verifying keys verify and the program
-        embeds them, but the layer MUST NOT secure real value until a real
-        multi-party ceremony is run. This is a soundness caveat, disclosed here
-        rather than buried.
+  \item \textbf{The DEPLOYED trusted setup is dev/test.} Both committed verifying
+        keys (membership and the JoinSplit) came from a single-contributor,
+        reproducible dev setup whose phase-2 entropy is a hard-coded public string,
+        so their toxic waste is public. The keys verify and the program embeds them,
+        but the system MUST NOT secure real value until a real ceremony output is
+        exported and the program is redeployed with it. A multi-party phase-2
+        ceremony is implemented and runnable (Section~\ref{sec:ceremony}); running
+        one with external contributors is operational work that has not been done.
+        This is a soundness caveat, disclosed here rather than buried.
   \item \textbf{Devnet, not mainnet.} The deployment proves execution on a live
         public cluster; it is not a mainnet-beta production deployment, and the
         system is not audited. Do not rely on it to protect real activity.
@@ -716,7 +789,8 @@ and composing an amount-privacy primitive with a behavior-privacy one is exactly
 the ``who + how much'' point.
 
 \paragraph{An honest tradeoff: transparent setups.} mirror-pool uses Groth16,
-which needs a per-circuit trusted setup (currently dev/test). Approaches built on
+which needs a per-circuit trusted setup (Section~\ref{sec:ceremony}; the deployed
+keys are still from the dev setup). Approaches built on
 STARKs or other transparent, post-quantum setups (for example Bulletproofs-style
 range proofs or STARK-based systems) avoid a trusted setup entirely, at the cost
 of larger proofs or higher verifier work. That is a real tradeoff, not a strict
@@ -753,11 +827,37 @@ cargo build --workspace\\
 cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml
 \end{quote}
 
-\paragraph{Tests (110 host, 42 program).}
+\paragraph{Tests (177 host, of which 7 are environment-gated; 42 program).}
 \begin{quote}\footnotesize\ttfamily
 cargo test --workspace\\
 cargo test --manifest-path programs/mirror-pool/Cargo.toml
 \end{quote}
+The 7 gated tests need build artifacts that are not committed (the compiled
+circuits, the powers-of-tau, the proving keys); they are \code{\#[ignore]}d and
+additionally require \code{MIRROR\_PROVE\_LIVE=1}.
+
+\paragraph{Trusted-setup ceremony (Section~\ref{sec:ceremony}).}
+\begin{quote}\footnotesize\ttfamily
+D=ceremony/membership\\
+mirror-cli ceremony inspect-ptau -{}-ptau circuits/pot16\_final.ptau\\
+snarkjs groth16 setup circuits/membership.r1cs \textbackslash\\
+\ \ circuits/pot16\_final.ptau circuits/membership\_0000.zkey\\
+mirror-cli ceremony start -{}-circuit membership -{}-dir \$D \textbackslash\\
+\ \ -{}-r1cs circuits/membership.r1cs -{}-ptau circuits/pot16\_final.ptau \textbackslash\\
+\ \ -{}-initial-zkey circuits/membership\_0000.zkey\\
+mirror-cli ceremony contribute -{}-dir \$D -{}-id "alice@example.org"\\
+mirror-cli ceremony contribute -{}-dir \$D -{}-id "bob@example.net"\\
+mirror-cli ceremony beacon -{}-dir \$D -{}-id coordinator \textbackslash\\
+\ \ -{}-source-hex \emph{<pre-committed value>} -{}-iterations-exp 16\\
+mirror-cli ceremony verify -{}-dir \$D \textbackslash\\
+\ \ -{}-r1cs circuits/membership.r1cs -{}-initial-zkey circuits/membership\_0000.zkey\\
+mirror-cli ceremony prove-check -{}-dir \$D -{}-out-dir /tmp/cproof
+\end{quote}
+The last command proves the membership circuit under the ceremony-produced key and
+runs the on-chain \code{groth16-solana} verifier over the result; with
+\code{-{}-out-dir} the same proof can be re-checked with \code{snarkjs groth16
+verify}. The full guide, including what the independent-contributor count can and
+cannot detect, is in \code{docs/CEREMONY.md}.
 
 \paragraph{Adversarial harness (the attack table and the effective-$k$ table).}
 \begin{quote}\footnotesize\ttfamily
@@ -796,8 +896,9 @@ the two representative transactions on the Solana Explorer:
 are in \code{docs/THREAT\_MODEL.md}; the two settlement paths and the account
 model in \code{docs/ARCHITECTURE.md}; the effective-$k$ metric and its honest
 limits in \code{docs/EFFECTIVE\_K.md}; the incentive economy in
-\code{docs/INCENTIVES.md}; and the live results, signatures, and CU per flow in
-\code{docs/PROOF.md}.
+\code{docs/INCENTIVES.md}; the trusted-setup ceremony, how to contribute to one and
+how to verify somebody else's, in \code{docs/CEREMONY.md}; and the live results,
+signatures, and CU per flow in \code{docs/PROOF.md}.
 
 \begin{thebibliography}{9}
 \small
