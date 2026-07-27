@@ -39,6 +39,7 @@
 //! unshield into a fresh commit wallet), and `status` (inspect the pool + current
 //! epoch on-chain).
 
+mod association;
 mod ceremony;
 mod chain;
 mod funding;
@@ -85,6 +86,13 @@ const DEFAULT_TX_R1CS: &str = "circuits/transaction.r1cs";
 const DEFAULT_TX_ZKEY: &str = "circuits/transaction_final.zkey";
 const DEFAULT_TX_VK: &str = "circuits/artifacts/transaction_verification_key.json";
 
+/// Default association-circuit artifacts (gitignored build outputs of
+/// `bash circuits/build_association.sh`).
+const DEFAULT_ASSOC_WASM: &str = "circuits/association_js/association.wasm";
+const DEFAULT_ASSOC_R1CS: &str = "circuits/association.r1cs";
+const DEFAULT_ASSOC_ZKEY: &str = "circuits/association_final.zkey";
+const DEFAULT_ASSOC_VK: &str = "circuits/artifacts/association_verification_key.json";
+
 #[derive(Parser)]
 #[command(
     name = "mirror-cli",
@@ -107,6 +115,13 @@ enum Command {
     DepositCommit(DepositCommitArgs),
     /// (ZK opt-in) Rebuild the Merkle path, prove membership, and emit SettleZk.
     Prove(ProveArgs),
+    /// (ZK opt-in, OPTIONAL) Prove membership AND inclusion in a curator's
+    /// association set, then emit SettleZkAssociated. Purely additive: plain
+    /// `prove` still works and no curator can block it.
+    ProveAssociated(ProveAssociatedArgs),
+    /// (curator) Association-set tooling: build a curated root, emit the update.
+    #[command(subcommand_help_heading = "Association sets")]
+    Assoc(AssocArgs),
     /// Show pool config + current epoch on-chain.
     Status(StatusArgs),
     /// (confidential value) Derive a value spend + viewing keypair and save a keyfile.
@@ -504,6 +519,158 @@ struct ProveArgs {
     out: Option<PathBuf>,
 }
 
+/// `prove-associated`: the opt-in compliance proof. Mirrors [`ProveArgs`], with
+/// the association circuit's artifacts and the curator's identity + leaf list.
+#[derive(Args)]
+struct ProveAssociatedArgs {
+    /// The saved ZK opt-in note (from `deposit-commit`).
+    #[arg(long)]
+    note: PathBuf,
+    /// RPC endpoint (used to confirm both roots are known on-chain).
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// The curator whose association set to prove against (base58). Together with
+    /// the pool this fixes the AssociationSet PDA `["assoc", pool, curator]`.
+    #[arg(long)]
+    curator: String,
+    /// The curator's PUBLISHED curated leaf list (hex commitments, one per line,
+    /// in the curator's ordering). The association root is rebuilt from this, so
+    /// anyone can independently check what the curator actually vouched for.
+    #[arg(long)]
+    association_leaves: PathBuf,
+    /// Circuit witness generator (gitignored; `bash circuits/build_association.sh`).
+    #[arg(long, default_value = DEFAULT_ASSOC_WASM)]
+    wasm: PathBuf,
+    /// Compiled R1CS (gitignored; `bash circuits/build_association.sh`). Used by
+    /// the default in-process Rust prover.
+    #[arg(long, default_value = DEFAULT_ASSOC_R1CS)]
+    r1cs: PathBuf,
+    /// Groth16 proving key (gitignored; `bash circuits/build_association.sh`).
+    #[arg(long, default_value = DEFAULT_ASSOC_ZKEY)]
+    zkey: PathBuf,
+    /// Groth16 verification key (committed under circuits/artifacts/). Only used
+    /// by the `--use-snarkjs` fallback.
+    #[arg(long, default_value = DEFAULT_ASSOC_VK)]
+    vk: PathBuf,
+    /// Use the legacy snarkjs shell-out (needs Node) instead of the default
+    /// in-process Rust prover. The default path spawns NO Node process.
+    #[arg(long)]
+    use_snarkjs: bool,
+    /// snarkjs invocation (default `snarkjs`). Only used with `--use-snarkjs`.
+    #[arg(long, default_value = "snarkjs")]
+    snarkjs: String,
+    /// Optional full POOL leaf set (hex, one per line) to rebuild the whole pool
+    /// tree and prove against the CURRENT pool root instead of the note's
+    /// frontier snapshot.
+    #[arg(long)]
+    leaves: Option<PathBuf>,
+    /// Directory for input.json/proof.json/public.json (snarkjs path only).
+    #[arg(long)]
+    work_dir: Option<PathBuf>,
+    /// Also write the emitted SettleZkAssociated bundle (JSON) to this path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+/// `assoc`: curator-side association-set tooling.
+#[derive(Args)]
+struct AssocArgs {
+    #[command(subcommand)]
+    command: AssocCommand,
+}
+
+#[derive(Subcommand)]
+enum AssocCommand {
+    /// Rebuild the Merkle root of a curated leaf list and emit the
+    /// `UpdateAssociationRoot` instruction data for the curator to submit.
+    BuildRoot(AssocBuildRootArgs),
+    /// (curator) Register an association set for a pool. Permissionless: anyone
+    /// may become a curator, and whether their attestation is worth anything is
+    /// judged off-chain by whoever reads it.
+    Init(AssocInitArgs),
+    /// (curator) Rebuild the root from a curated leaf list and publish it on-chain.
+    Publish(AssocPublishArgs),
+    /// Show a curator's association set: pool, curator, update count, recent roots.
+    Show(AssocShowArgs),
+}
+
+#[derive(Args)]
+struct AssocInitArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// The Pool PDA (base58) this set will curate.
+    #[arg(long)]
+    pool: String,
+    /// Curator keypair (JSON byte array). Signs for itself.
+    #[arg(long)]
+    curator: PathBuf,
+    /// Fee payer keypair; defaults to the curator.
+    #[arg(long)]
+    payer: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct AssocPublishArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// The Pool PDA (base58) this set curates.
+    #[arg(long)]
+    pool: String,
+    /// Curator keypair (JSON byte array). Must be the registered curator.
+    #[arg(long)]
+    curator: PathBuf,
+    /// The curated leaf list (hex commitments, one per line). Publish this file
+    /// alongside the root: the chain cannot check what the root covers.
+    #[arg(long)]
+    leaves: PathBuf,
+}
+
+#[derive(Args)]
+struct AssocShowArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// The Pool PDA (base58).
+    #[arg(long)]
+    pool: String,
+    /// The curator (base58).
+    #[arg(long)]
+    curator: String,
+}
+
+#[derive(Args)]
+struct AssocBuildRootArgs {
+    /// The curated leaf list (hex commitments, one per line; `#` comments and
+    /// blank lines ignored). Duplicates are rejected so the reported set size is
+    /// the real anonymity set.
+    #[arg(long)]
+    leaves: PathBuf,
+    /// mirror-pool program id (base58). Optional; with --pool and --curator it
+    /// also reports the AssociationSet PDA to pass.
+    #[arg(long)]
+    program_id: Option<String>,
+    /// The Pool PDA (base58) this set curates. Optional; see --program-id.
+    #[arg(long)]
+    pool: Option<String>,
+    /// The curator (base58). Optional; see --program-id.
+    #[arg(long)]
+    curator: Option<String>,
+    /// Also write the emitted JSON to this path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
 #[derive(Args)]
 struct StatusArgs {
     /// RPC endpoint.
@@ -599,6 +766,13 @@ fn main() -> Result<()> {
         Command::Commit(args) => run_commit(args),
         Command::DepositCommit(args) => run_deposit_commit(args),
         Command::Prove(args) => run_prove(args),
+        Command::ProveAssociated(args) => run_prove_associated(args),
+        Command::Assoc(args) => match args.command {
+            AssocCommand::BuildRoot(a) => run_assoc_build_root(a),
+            AssocCommand::Init(a) => run_assoc_init(a),
+            AssocCommand::Publish(a) => run_assoc_publish(a),
+            AssocCommand::Show(a) => run_assoc_show(a),
+        },
         Command::Status(args) => run_status(args),
         Command::ValueKeygen(args) => run_value_keygen(args),
         Command::InitValuePool(args) => run_init_value_pool(args),
@@ -855,6 +1029,220 @@ fn run_prove(args: ProveArgs) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&emit).context("serializing emit")?
     );
+    Ok(())
+}
+
+fn run_prove_associated(args: ProveAssociatedArgs) -> Result<()> {
+    let curator = parse_pubkey(&args.curator, "curator")?;
+    let use_snarkjs = args.use_snarkjs;
+    let emit = association::run(association::ProveAssociatedOpts {
+        note_path: args.note,
+        rpc_url: args.rpc_url,
+        wasm: args.wasm,
+        r1cs: args.r1cs,
+        zkey: args.zkey,
+        vk: args.vk,
+        snarkjs: args.snarkjs,
+        use_snarkjs,
+        curator,
+        association_leaves: args.association_leaves,
+        leaves: args.leaves,
+        work_dir: args.work_dir,
+        out: args.out,
+    })?;
+
+    if use_snarkjs {
+        println!("association proof generated and VERIFIED by snarkjs (fallback path).");
+    } else {
+        println!(
+            "association proof generated and VERIFIED in-process (pure Rust; no Node process)."
+        );
+    }
+    println!();
+    println!("SettleZkAssociated instruction (submit from the pool authority / coordinator):");
+    println!("  program_id:      {}", emit.program_id);
+    println!("  epoch:           {}", emit.epoch);
+    println!("  amount:          {} lamports", emit.amount);
+    println!("  root:            {}", emit.root_hex);
+    println!("  nullifierHash:   {}", emit.nullifier_hash_hex);
+    println!("  actionHash:      {}", emit.action_hash_hex);
+    println!("  associationRoot: {}", emit.association_root_hex);
+    println!("  curator:         {}", emit.curator);
+    println!();
+    println!("  accounts (in order):");
+    println!("    0. pool           {}  (writable)", emit.pool);
+    println!(
+        "    1. authority      {}  (signer, writable)",
+        emit.authority
+    );
+    println!("    2. nullifier PDA  {}  (writable)", emit.nullifier_pda);
+    println!("    3. recipient      {}  (writable)", emit.recipient);
+    println!("    4. system_program {}", emit.system_program);
+    println!("    5. clock sysvar   {}", emit.clock_sysvar);
+    println!("    6. association    {}", emit.association_pda);
+    println!();
+    println!(
+        "  data ({} bytes, hex):",
+        emit.settle_zk_associated_data_hex.len() / 2
+    );
+    println!("    {}", emit.settle_zk_associated_data_hex);
+    println!();
+    // The honest bound, printed every time rather than buried in docs.
+    println!(
+        "  anonymity note: this attestation hides you inside the curated set of {} leaves. \
+         Against a set that small an observer learns correspondingly much; the pool's own \
+         anonymity set does not rescue a tiny association set.",
+        emit.association_set_size
+    );
+    println!();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&emit).context("serializing emit")?
+    );
+    Ok(())
+}
+
+fn run_assoc_build_root(args: AssocBuildRootArgs) -> Result<()> {
+    // The PDA is only reported when all three of program-id/pool/curator are
+    // given; a partial set is a user mistake worth naming rather than ignoring.
+    let ctx = match (&args.program_id, &args.pool, &args.curator) {
+        (Some(p), Some(pool), Some(cur)) => Some((
+            parse_pubkey(p, "program-id")?,
+            parse_pubkey(pool, "pool")?,
+            parse_pubkey(cur, "curator")?,
+        )),
+        (None, None, None) => None,
+        _ => {
+            return Err(anyhow!(
+                "--program-id, --pool and --curator must be given together (or all omitted)"
+            ))
+        }
+    };
+    let emit = association::build_root(
+        &args.leaves,
+        ctx.as_ref().map(|(p, pool, cur)| (p, pool, cur)),
+    )?;
+
+    println!("association root:  {}", emit.association_root_hex);
+    println!("curated set size:  {}", emit.set_size);
+    if let Some(pda) = &emit.association_pda {
+        println!("association PDA:   {pda}");
+    }
+    println!();
+    println!("UpdateAssociationRoot instruction (submit signed by the curator):");
+    println!("  accounts (in order):");
+    println!("    0. association    (writable)");
+    println!("    1. curator        (signer)");
+    println!(
+        "  data ({} bytes, hex): {}",
+        emit.update_root_data_hex.len() / 2,
+        emit.update_root_data_hex
+    );
+    println!();
+    println!(
+        "  PUBLISH the leaf list alongside this root. The program cannot check that the root \
+         covers the commitments you claim; only publication lets anyone verify it."
+    );
+    println!();
+    if let Some(out) = &args.out {
+        let json = serde_json::to_string_pretty(&emit).context("serializing emit")?;
+        std::fs::write(out, json).with_context(|| format!("writing {}", out.display()))?;
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&emit).context("serializing emit")?
+    );
+    Ok(())
+}
+
+fn run_assoc_init(args: AssocInitArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let pool = parse_pubkey(&args.pool, "pool")?;
+    let curator_kp = chain::read_keypair(&args.curator)?;
+    let payer_kp = match &args.payer {
+        Some(p) => chain::read_keypair(p)?,
+        None => chain::read_keypair(&args.curator)?,
+    };
+    let curator = curator_kp.pubkey();
+    let payer = payer_kp.pubkey();
+    let assoc = chain::association_pda(&program_id, &pool, &curator);
+
+    let ix = chain::init_association_ix(&program_id, &assoc, &pool, &curator, &payer);
+    // Fee payer first; add the curator only if it is a distinct signer.
+    let mut signers: Vec<&solana_keypair::Keypair> = vec![&payer_kp];
+    if curator != payer {
+        signers.push(&curator_kp);
+    }
+    let chain_client = Chain::new(args.rpc_url);
+    let sig = chain_client
+        .submit(&[ix], &signers)
+        .context("submitting InitAssociation")?;
+
+    println!("association set registered.");
+    println!("  pool:            {pool}");
+    println!("  curator:         {curator}");
+    println!("  association PDA: {assoc}");
+    println!("  signature:       {sig}");
+    println!();
+    println!(
+        "  No root is published yet, so this set vouches for nothing. Run \
+         `mirror-cli assoc publish` with your curated leaf list next."
+    );
+    Ok(())
+}
+
+fn run_assoc_publish(args: AssocPublishArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let pool = parse_pubkey(&args.pool, "pool")?;
+    let curator_kp = chain::read_keypair(&args.curator)?;
+    let curator = curator_kp.pubkey();
+    let assoc = chain::association_pda(&program_id, &pool, &curator);
+
+    let emit = association::build_root(&args.leaves, Some((&program_id, &pool, &curator)))?;
+    let root = util::from_hex32(&emit.association_root_hex)?;
+
+    let ix = chain::update_association_root_ix(&program_id, &assoc, &curator, &root);
+    let chain_client = Chain::new(args.rpc_url);
+    let sig = chain_client
+        .submit(&[ix], &[&curator_kp])
+        .context("submitting UpdateAssociationRoot")?;
+
+    println!("association root published.");
+    println!("  association PDA:  {assoc}");
+    println!("  root:             {}", emit.association_root_hex);
+    println!("  curated set size: {}", emit.set_size);
+    println!("  signature:        {sig}");
+    println!();
+    println!(
+        "  PUBLISH {} alongside this root. The program cannot check that the root covers the \
+         commitments you claim; only publication lets anyone verify it.",
+        args.leaves.display()
+    );
+    Ok(())
+}
+
+fn run_assoc_show(args: AssocShowArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let pool = parse_pubkey(&args.pool, "pool")?;
+    let curator = parse_pubkey(&args.curator, "curator")?;
+    let assoc = chain::association_pda(&program_id, &pool, &curator);
+
+    let chain_client = Chain::new(args.rpc_url);
+    let state = chain_client.association_state(&assoc)?;
+
+    println!("association set {assoc}");
+    println!("  pool:          {}", state.pool);
+    println!("  curator:       {}", state.curator);
+    println!("  roots published: {}", state.update_count);
+    println!("  recent roots (accepted by SettleZkAssociated):");
+    for (i, root) in state.root_ring.iter().enumerate() {
+        let label = if root == &[0u8; 32] {
+            "  (unwritten)"
+        } else {
+            ""
+        };
+        println!("    [{i}] {}{label}", to_hex(root));
+    }
     Ok(())
 }
 

@@ -15,11 +15,17 @@
 //! ValuePool PDA     seeds = [b"vpool",  authority(32)]
 //! Value vault PDA   seeds = [b"vvault", vpool(32)]
 //! Value nf PDA      seeds = [b"vnf",    vpool(32), nullifier(32)]
+//! AssociationSet    seeds = [b"assoc",  pool(32), curator(32)]
 //! ```
 //!
 //! The confidential-value seeds (`vpool` / `vvault` / `vnf`) are a SEPARATE
 //! namespace from the behavioral pool: a value nullifier is globally unique
 //! (position-bound by the transaction circuit), so its PDA is NOT epoch-scoped.
+//!
+//! The AssociationSet seeds include the CURATOR, so any number of curators can
+//! publish competing curated sets over the same pool and a user picks which one
+//! to prove against. Keying the set to the pool alone would have made "who
+//! curates" a single, unaccountable slot.
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -43,6 +49,8 @@ pub const VALUE_POOL_SEED: &[u8] = b"vpool";
 pub const VALUE_VAULT_SEED: &[u8] = b"vvault";
 /// Seed prefix for the confidential-value nullifier PDA (global spent-set).
 pub const VALUE_NULLIFIER_SEED: &[u8] = b"vnf";
+/// Seed prefix for a curator's AssociationSet PDA (opt-in compliance layer).
+pub const ASSOCIATION_SEED: &[u8] = b"assoc";
 
 /// Find a program-derived address and its bump.
 ///

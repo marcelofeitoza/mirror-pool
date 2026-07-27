@@ -42,6 +42,10 @@ pub const VALUE_POOL_SEED: &[u8] = b"vpool";
 pub const VALUE_VAULT_SEED: &[u8] = b"vvault";
 pub const VALUE_NULLIFIER_SEED: &[u8] = b"vnf";
 
+/// Opt-in compliance layer: a curator's AssociationSet PDA seed prefix,
+/// byte-identical to the on-chain `pda` module.
+pub const ASSOCIATION_SEED: &[u8] = b"assoc";
+
 /// Derive the Pool PDA: seeds `[b"pool", authority]`.
 pub fn pool_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[POOL_SEED, authority.as_ref()], program_id).0
@@ -65,6 +69,18 @@ pub fn nullifier_pda(program_id: &Pubkey, pool: &Pubkey, epoch: u64, nullifier: 
             &epoch.to_le_bytes(),
             nullifier,
         ],
+        program_id,
+    )
+    .0
+}
+
+/// Derive a curator's AssociationSet PDA: seeds `[b"assoc", pool, curator]`.
+///
+/// The curator is part of the seeds, so several curators can publish competing
+/// curated sets over the same pool.
+pub fn association_pda(program_id: &Pubkey, pool: &Pubkey, curator: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[ASSOCIATION_SEED, pool.as_ref(), curator.as_ref()],
         program_id,
     )
     .0
@@ -198,6 +214,83 @@ impl PoolState {
 }
 
 // ---------------------------------------------------------------------------
+// AssociationSet account layout, byte-identical to the on-chain
+// `state::association`. (LE integers; see
+// programs/mirror-pool/src/state/association.rs.)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+mod assoc_off {
+    pub const VERSION: usize = 0;
+    pub const POOL: usize = 1;
+    pub const CURATOR: usize = 33;
+    pub const BUMP: usize = 65;
+    pub const UPDATE_COUNT: usize = 66;
+    pub const ROOT_HEAD: usize = 74;
+    pub const ROOT_RING: usize = ROOT_HEAD + 4; // 78
+    pub const ROOT_HISTORY_SIZE: usize = 8;
+    pub const ROOT_RING_LEN: usize = ROOT_HISTORY_SIZE * 32;
+    pub const LEN: usize = ROOT_RING + ROOT_RING_LEN; // 334
+}
+
+/// A decoded snapshot of an AssociationSet account, as read over RPC.
+#[derive(Clone, Debug)]
+pub struct AssociationState {
+    pub pool: Pubkey,
+    pub curator: Pubkey,
+    /// Total roots ever published by this curator (monotonic).
+    pub update_count: u64,
+    /// The recent published-root ring (the last `ROOT_HISTORY_SIZE` roots).
+    pub root_ring: Vec<Hash32>,
+}
+
+impl AssociationState {
+    /// Decode the raw AssociationSet account bytes. Fails closed on a wrong
+    /// length or an uninitialized account.
+    pub fn decode(data: &[u8]) -> Result<AssociationState> {
+        if data.len() != assoc_off::LEN {
+            bail!(
+                "association account is {} bytes, expected {} (layout drift or not an association set)",
+                data.len(),
+                assoc_off::LEN
+            );
+        }
+        if data[assoc_off::VERSION] == 0 {
+            bail!("association account is not initialized (version 0)");
+        }
+        let read_hash =
+            |off: usize| -> Hash32 { data[off..off + 32].try_into().expect("32 bytes in range") };
+        let mut root_ring = Vec::with_capacity(assoc_off::ROOT_HISTORY_SIZE);
+        for i in 0..assoc_off::ROOT_HISTORY_SIZE {
+            root_ring.push(read_hash(assoc_off::ROOT_RING + i * 32));
+        }
+        Ok(AssociationState {
+            pool: Pubkey::new_from_array(read_hash(assoc_off::POOL)),
+            curator: Pubkey::new_from_array(read_hash(assoc_off::CURATOR)),
+            update_count: u64::from_le_bytes(
+                data[assoc_off::UPDATE_COUNT..assoc_off::UPDATE_COUNT + 8]
+                    .try_into()
+                    .expect("8 bytes in range"),
+            ),
+            root_ring,
+        })
+    }
+
+    /// Whether `root` is one of the last `ROOT_HISTORY_SIZE` published roots,
+    /// i.e. a root `SettleZkAssociated` would accept.
+    ///
+    /// The all-zero sentinel (an unwritten ring slot) is never a match, mirroring
+    /// the on-chain `association::is_known_root`: a set that has published nothing
+    /// accepts nothing.
+    pub fn is_known_root(&self, root: &Hash32) -> bool {
+        if root == &[0u8; 32] {
+            return false;
+        }
+        self.root_ring.iter().any(|r| r == root)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ValuePool account layout, byte-identical to the on-chain `state::value_pool`.
 // (LE integers; see programs/mirror-pool/src/state/value_pool.rs.)
 // ---------------------------------------------------------------------------
@@ -316,6 +409,15 @@ impl Chain {
         PoolState::decode(&account.data)
     }
 
+    /// Read and decode an AssociationSet account (opt-in compliance layer).
+    pub fn association_state(&self, assoc: &Pubkey) -> Result<AssociationState> {
+        let account = self
+            .rpc
+            .get_account(assoc)
+            .with_context(|| format!("reading association account {assoc}"))?;
+        AssociationState::decode(&account.data)
+    }
+
     /// Read and decode a ValuePool account.
     pub fn value_pool_state(&self, vpool: &Pubkey) -> Result<ValuePoolState> {
         let account = self
@@ -387,6 +489,58 @@ pub fn init_pool_ix(
             AccountMeta::new_readonly(*authority, true),
             AccountMeta::new(*payer, true),
             AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+        ],
+        data,
+    }
+}
+
+/// Build the `InitAssociation` instruction (opt-in compliance layer).
+///
+/// Body: none (just the tag). Accounts (see `instructions::init_association`):
+/// assoc(w), pool(readonly), curator(signer), payer(signer, w), system_program.
+/// The curator signs for itself: registration is permissionless by design, so any
+/// number of curators can publish competing sets over the same pool.
+pub fn init_association_ix(
+    program_id: &Pubkey,
+    assoc: &Pubkey,
+    pool: &Pubkey,
+    curator: &Pubkey,
+    payer: &Pubkey,
+) -> Instruction {
+    let data = vec![wire::tag::INIT_ASSOCIATION];
+    debug_assert_eq!(data.len(), wire::INIT_ASSOCIATION_LEN);
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*assoc, false),
+            AccountMeta::new_readonly(*pool, false),
+            AccountMeta::new_readonly(*curator, true),
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+        ],
+        data,
+    }
+}
+
+/// Build the `UpdateAssociationRoot` instruction (opt-in compliance layer).
+///
+/// Body: `[root(32)]`. Accounts (see `instructions::update_association_root`):
+/// assoc(w), curator(signer).
+pub fn update_association_root_ix(
+    program_id: &Pubkey,
+    assoc: &Pubkey,
+    curator: &Pubkey,
+    root: &Hash32,
+) -> Instruction {
+    let mut data = Vec::with_capacity(wire::UPDATE_ASSOCIATION_ROOT_LEN);
+    data.push(wire::tag::UPDATE_ASSOCIATION_ROOT);
+    data.extend_from_slice(root);
+    debug_assert_eq!(data.len(), wire::UPDATE_ASSOCIATION_ROOT_LEN);
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*assoc, false),
+            AccountMeta::new_readonly(*curator, true),
         ],
         data,
     }

@@ -219,7 +219,10 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
 
 /// Rebuild the inclusion path: from `--leaves` (full rebuild vs current root) if
 /// given, otherwise from the note's frontier snapshot (walk-the-frontier).
-fn build_path(note: &Note, leaf: &Hash32, leaves: Option<&Path>) -> Result<MerklePath> {
+///
+/// Shared with [`crate::association`], whose `prove-associated` builds the SAME
+/// pool path and then adds a second one against the curated set.
+pub(crate) fn build_path(note: &Note, leaf: &Hash32, leaves: Option<&Path>) -> Result<MerklePath> {
     if let Some(leaves_path) = leaves {
         let leaf_set = read_leaves(leaves_path)?;
         let index = match note.leaf_index {

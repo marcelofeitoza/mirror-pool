@@ -177,6 +177,64 @@ pub fn settle_zk_data(
     data
 }
 
+/// Assemble the full `SettleZkAssociated` instruction data (433 bytes).
+///
+/// ```text
+/// [tag(1)][epoch(8 LE)][amount(8 LE)]
+///   [proof_a(64)][proof_b(128)][proof_c(64)]
+///   [root(32)][nullifierHash(32)][actionHash(32)][epoch(32 BE)][associationRoot(32)]
+/// ```
+///
+/// A strict EXTENSION of [`settle_zk_data`]: byte-for-byte identical through the
+/// `epoch` public input, with the curated-set root appended. The five trailing
+/// 32-byte values are the Groth16 public inputs in the FIXED order
+/// `[root, nullifierHash, actionHash, epoch, associationRoot]`.
+///
+/// The `proof` MUST come from the ASSOCIATION circuit: the on-chain handler
+/// verifies it against a different verifying key, so a membership proof passed
+/// here can never verify.
+#[allow(clippy::too_many_arguments)]
+pub fn settle_zk_associated_data(
+    epoch: u64,
+    amount: u64,
+    proof: &ProofBytes,
+    root: &Hash32,
+    nullifier_hash: &Hash32,
+    action_hash: &Hash32,
+    association_root: &Hash32,
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(wire::SETTLE_ZK_ASSOCIATED_LEN);
+    data.push(wire::tag::SETTLE_ZK_ASSOCIATED);
+    data.extend_from_slice(&epoch.to_le_bytes());
+    data.extend_from_slice(&amount.to_le_bytes());
+    data.extend_from_slice(&proof.proof_a);
+    data.extend_from_slice(&proof.proof_b);
+    data.extend_from_slice(&proof.proof_c);
+    data.extend_from_slice(root);
+    data.extend_from_slice(nullifier_hash);
+    data.extend_from_slice(action_hash);
+    // epoch public input: 32-byte big-endian encoding of the u64 header.
+    let mut epoch_be = [0u8; 32];
+    epoch_be[24..].copy_from_slice(&epoch.to_be_bytes());
+    data.extend_from_slice(&epoch_be);
+    data.extend_from_slice(association_root);
+    debug_assert_eq!(data.len(), wire::SETTLE_ZK_ASSOCIATED_LEN);
+    data
+}
+
+/// Assemble the `UpdateAssociationRoot` instruction data (33 bytes):
+/// `[tag(1)][root(32)]`.
+///
+/// Emitted on its own (not only inside a built [`Instruction`]) so a curator can
+/// hand the bytes to whatever signer it actually keeps its key in.
+pub fn update_association_root_data(root: &Hash32) -> Vec<u8> {
+    let mut data = Vec::with_capacity(wire::UPDATE_ASSOCIATION_ROOT_LEN);
+    data.push(wire::tag::UPDATE_ASSOCIATION_ROOT);
+    data.extend_from_slice(root);
+    debug_assert_eq!(data.len(), wire::UPDATE_ASSOCIATION_ROOT_LEN);
+    data
+}
+
 /// Assemble the full `Transact` instruction data (tag + body) exactly as the
 /// on-chain `instructions::transact` handler parses it, with `proof_a` already
 /// negated (via [`ProofBytes`]).

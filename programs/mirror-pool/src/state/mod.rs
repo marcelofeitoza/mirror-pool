@@ -7,6 +7,7 @@
 
 use pinocchio::error::ProgramError;
 
+pub mod association;
 pub mod epoch;
 pub mod merkle;
 pub mod nullifier;

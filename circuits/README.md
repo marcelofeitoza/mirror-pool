@@ -1,6 +1,6 @@
 # mirror-pool circuits
 
-This directory holds two independent Groth16 circuits and their dev/test trusted
+This directory holds three independent Groth16 circuits and their dev/test trusted
 setups and on-chain artifacts:
 
 - **`membership.circom`**: the ZK-deniable initiation (behavioral) circuit,
@@ -13,6 +13,18 @@ setups and on-chain artifacts:
   `bash build_transaction.sh` (or `npm run build:transaction`). It is additive:
   it shares `convert_to_rust.js` (via `--circuit=transaction`) but leaves the
   membership circuit and all its artifacts untouched.
+- **`association.circom`**: the OPT-IN compliance circuit (Privacy-Pools-style
+  association sets). It proves the membership statement AND that the same
+  commitment is in a curator's curated set, under a 5th public input
+  `associationRoot`. Build it with `bash build_association.sh`; it touches only
+  the `association_*` artifacts. The trust model, the censorship tradeoff and the
+  limits are in **[`../docs/COMPLIANCE.md`](../docs/COMPLIANCE.md)**.
+
+`membership.circom` and `association.circom` share their Poseidon Merkle
+templates through **`merkle.circom`** (`HashLeftRight`, `PathSelector`,
+`MerkleProof(depth)`), extracted verbatim from `membership.circom` rather than
+forked. See [Artifact consistency](#artifact-consistency) for why that extraction
+is safe for the already-deployed membership key, and how to re-check it.
 
 ---
 
@@ -182,8 +194,78 @@ Committed (small, in `artifacts/`):
 | `proof_fixture.rs`      | `PROOF_A` / `PROOF_B` / `PROOF_C` / `PUBLIC_INPUTS`     |
 | `fixture_meta.json`     | public-input order metadata                            |
 
+The transaction circuit's artifacts are the `transaction_*`-prefixed equivalents,
+and the association circuit's are the `association_*`-prefixed equivalents
+(`association_verification_key.json`, `association_vk.rs`,
+`association_proof_fixture.json`, `association_proof_fixture.rs`,
+`association_fixture_meta.json`).
+
 Not committed (gitignored build outputs): `node_modules/`, `*.ptau`, `*.zkey`,
 `*.r1cs`, `*.sym`, `*.wasm`, `*_js/`.
+
+## Artifact consistency
+
+A committed verifying key is bound to the exact constraint system it was
+generated from. If the circuit source changes and the key does not, the committed
+FIXTURE keeps verifying (it was generated with the key) while every FRESHLY
+generated proof fails on-chain. That failure mode is silent under a test suite
+that only checks fixtures, so this repo checks more than fixtures.
+
+Three properties are worth re-establishing after ANY circuit change.
+
+**1. A fresh proof over new inputs verifies against the committed key.** This is
+the check that actually rules out key drift, because it exercises the committed
+key against a statement it has never seen:
+
+```bash
+# membership + transaction (pre-existing), and association
+MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored
+```
+
+`association_fresh_proof_over_new_inputs_verifies_under_committed_vk` builds a
+witness that shares nothing with the committed fixture (different secret, epoch,
+recipient, amount, and both tree shapes), proves it in-process with
+`ark-groth16`, and then runs the EXACT on-chain `groth16-solana` verifier against
+the COMMITTED `association_vk.rs`. `rust_prove_membership_verifies_and_on_chain_verifier_accepts`
+does the equivalent for the membership circuit.
+
+**2. Every pre-existing fixture still passes.**
+
+```bash
+cargo test --workspace
+cd programs/mirror-pool && cargo build-sbf && cargo test
+```
+
+**3. The vendored program-side keys match the `artifacts/` copies.** The program
+embeds its own copies so the deployed `.so` is self-contained; they must not
+diverge:
+
+```bash
+diff programs/mirror-pool/src/transaction_vk.rs circuits/artifacts/transaction_vk.rs
+diff programs/mirror-pool/src/association_vk.rs circuits/artifacts/association_vk.rs
+# vk.rs is the same bytes with a 5-line vendoring header prepended:
+diff <(tail -n +6 programs/mirror-pool/src/vk.rs) circuits/artifacts/vk.rs
+```
+
+### Why extracting `merkle.circom` did not disturb the membership key
+
+circom inlines templates at their use site, so moving `HashLeftRight`,
+`PathSelector` and `MerkleProof` into an included file cannot change the emitted
+constraint system. That is an argument, not evidence, so it was measured:
+
+```bash
+# compile the circuit as committed and compare the constraint system
+circom membership.circom --r1cs -l node_modules -o /tmp/check
+shasum -a 256 /tmp/check/membership.r1cs membership.r1cs   # identical
+```
+
+The `.r1cs` is byte-identical before and after the extraction, so the committed
+`membership_final.zkey` and `vk.rs` remain valid for it. The witness-calculator
+`.wasm` DOES differ (it is regenerated from different source text), so that was
+checked too, by proving with the newly compiled `.wasm` against the COMMITTED
+zkey and verifying against the COMMITTED verifying key - which succeeds, with
+public signals identical to the committed fixture. The membership, ceremony, and
+transaction live tests all pass against the recompiled artifacts.
 
 ## On-chain verifier integration (groth16-solana v0.2.0)
 

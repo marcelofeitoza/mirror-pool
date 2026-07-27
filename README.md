@@ -259,6 +259,12 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   1) under funding-provenance partitioning; mirror-pool's shielded funding rounds
   measure 28.80 (90.0% of nominal), with the residual 10% published rather than
   rounded away, and 7.66 if you use the same pool naively.
+- [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) - the OPT-IN association-set layer
+  (Privacy Pools): prove your deposit is in a curator's curated set without
+  revealing which deposit it is, enforced on-chain in the execute path. Includes
+  the curator trust assumption, the censorship tradeoff (and why there is
+  deliberately no mandatory mode), what an excluded user can still do, how it
+  composes with the viewing keys, and the limits.
 - [`docs/CEREMONY.md`](docs/CEREMONY.md) - the multi-party Groth16 phase-2
   trusted-setup ceremony: how to contribute, how to verify somebody else's, what the
   beacon is for, how the independent-contributor count refuses to count self-runs,

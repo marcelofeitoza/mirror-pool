@@ -48,6 +48,15 @@ pub fn process_instruction(
             instructions::init_value_pool::process(program_id, accounts, data)
         }
         wire::tag::TRANSACT => instructions::transact::process(program_id, accounts, data),
+        wire::tag::INIT_ASSOCIATION => {
+            instructions::init_association::process(program_id, accounts, data)
+        }
+        wire::tag::UPDATE_ASSOCIATION_ROOT => {
+            instructions::update_association_root::process(program_id, accounts, data)
+        }
+        wire::tag::SETTLE_ZK_ASSOCIATED => {
+            instructions::settle_zk_associated::process(program_id, accounts, data)
+        }
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
