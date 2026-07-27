@@ -10,6 +10,11 @@
 //!  - INIT_POOL creates a v1 pool; re-init fails (PoolAlreadyInitialized).
 //!  - COMMIT bumps the epoch commit count, the pool commitment count, and the
 //!    accumulator root; the entry fee lands in the pool.
+//!  - COMMIT of varied, non-trivial leaves (1, `r - 1`, a zero leaf at a
+//!    non-zero index, fixed pseudo-random vectors) reproduces a host-recomputed
+//!    frontier root and every frontier sibling, step by step.
+//!  - The recent-root ring wraps after `ROOT_HISTORY_SIZE` commits and evicts
+//!    the oldest root, not an arbitrary one.
 //!  - SETTLE_EPOCH fails closed before the window closes (EpochNotClosed), below
 //!    the k-floor (BelowKFloor), and for a non-authority signer (Unauthorized).
 //!  - Happy path: window closed + count >= k_floor settles, creates the
@@ -46,6 +51,13 @@ mod fixture {
         env!("CARGO_MANIFEST_DIR"),
         "/../../circuits/artifacts/proof_fixture.rs"
     ));
+}
+
+/// Host-side reference frontier accumulator (`poseidon2` + `HostFrontier`), used
+/// to recompute the root the on-chain accumulator must produce. Read the header
+/// of the included file for what this equivalence does and does not prove.
+mod host {
+    include!("fixtures/host_frontier.rs");
 }
 
 /// The fixture's epoch (public signal [3] = 7).
@@ -468,6 +480,174 @@ fn empty_root_matches_circuit_zero_ladder() {
         on_chain,
         circuit_empty_root(),
         "on-chain empty root must equal the circuit's Poseidon zero ladder"
+    );
+}
+
+/// Parse a 64-character big-endian hex string into 32 bytes.
+fn hex32(s: &str) -> [u8; 32] {
+    let bytes = s.as_bytes();
+    assert_eq!(bytes.len(), 64, "expected 64 hex characters");
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let hi = (bytes[2 * i] as char).to_digit(16).expect("hex digit");
+        let lo = (bytes[2 * i + 1] as char).to_digit(16).expect("hex digit");
+        *byte = (hi * 16 + lo) as u8;
+    }
+    out
+}
+
+/// Leaves picked to stress the accumulator rather than its happy path. Every
+/// value is a canonical BN254 scalar (each is smaller than the field modulus
+/// `r = 0x30644e...f0000001`, so the Poseidon syscall accepts it):
+///
+/// - the field element 1, the smallest non-zero leaf;
+/// - `r - 1`, the largest canonical scalar there is;
+/// - a zero leaf at a NON-zero index, which must not be confused with an empty
+///   subtree (the frontier's zero ladder is positional, not value-based);
+/// - four fixed pseudo-random vectors.
+///
+/// Seven leaves put indices 0..6 through both the even (left child, record the
+/// sibling) and odd (right child, pair with the recorded sibling) branches at
+/// levels 0, 1 and 2.
+fn varied_leaves() -> [[u8; 32]; 7] {
+    [
+        hex32("0000000000000000000000000000000000000000000000000000000000000001"),
+        // r - 1, the largest canonical BN254 scalar.
+        hex32("30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000"),
+        hex32("0f1e2d3c4b5a69788796a5b4c3d2e1f00123456789abcdef0fedcba987654321"),
+        // A zero leaf, appended at index 3.
+        [0u8; 32],
+        hex32("1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809"),
+        hex32("2bd6f1c0a95e8347d2c1b0a9f8e7d6c5b4a39281706f5e4d3c2b1a0918273645"),
+        hex32("07ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+    ]
+}
+
+/// A distinct canonical leaf per index, for the ring-buffer test. The leading
+/// `0x01` byte keeps the value far below the BN254 modulus.
+fn ring_leaf(i: usize) -> [u8; 32] {
+    let mut leaf = [0u8; 32];
+    leaf[0] = 0x01;
+    leaf[30] = (i / 256) as u8;
+    leaf[31] = (i % 256) as u8;
+    leaf
+}
+
+/// The equivalence check the zero-ladder test above does NOT cover: append
+/// arbitrary, varied leaves through the real COMMIT instruction and compare the
+/// on-chain accumulator against a host recomputation at every step.
+///
+/// `empty_root_matches_circuit_zero_ladder` only pins the all-zeros case, where
+/// both children of every node are equal and the leaf values never enter; before
+/// this test the loaded-tree case was only exercised end-to-end by the live
+/// soaks. Here the root, the leaf count and every frontier sibling must match
+/// after each of seven appends.
+///
+/// Read `tests/fixtures/host_frontier.rs` for what this equivalence proves: the
+/// host and the syscall are not independent Poseidon implementations, so the
+/// check pins the parameter/endianness/argument-order wiring and the frontier
+/// insert, not the hash function itself.
+#[test]
+fn commit_root_matches_host_frontier_for_varied_leaves() {
+    let mut env = Env::new();
+    let (_authority, payer, pool_key) = init_pool(&mut env, 1_000, 2, 0);
+    env.warp(3);
+    let epoch_acct = env.epoch_pda(&pool_key, 0);
+
+    let mut host = host::HostFrontier::new();
+    assert_eq!(
+        pool::current_root(&env.get(&pool_key).data).unwrap(),
+        host.root(),
+        "empty accumulators must agree before any append"
+    );
+
+    for (i, leaf) in varied_leaves().iter().enumerate() {
+        let ix = env.commit_ix(&pool_key, &epoch_acct, &payer, leaf);
+        env.process(&ix, &[Check::success()]);
+
+        let expected = host.append(leaf);
+        let data = env.get(&pool_key).data;
+        assert_eq!(
+            pool::current_root(&data).unwrap(),
+            expected,
+            "on-chain root must equal the host frontier root after leaf {i}"
+        );
+        assert_eq!(pool::commitment_count(&data).unwrap(), (i + 1) as u64);
+        for level in 0..mirror_pool::state::merkle::DEPTH {
+            assert_eq!(
+                pool::filled_subtree(&data, level).unwrap(),
+                host.filled_subtree(level),
+                "frontier sibling at level {level} must match after leaf {i}"
+            );
+        }
+        assert!(
+            pool::is_known_root(&data, &expected).unwrap(),
+            "each new root must enter the recent-root ring"
+        );
+    }
+}
+
+/// The recent-root ring is what lets a proof made against a snapshot still
+/// settle after later appends, so its wrap-around matters: `INIT_POOL` seeds all
+/// `ROOT_HISTORY_SIZE` slots with the empty root, exactly that many commits must
+/// evict every one of them, and the next commit must drop the oldest real root.
+#[test]
+fn root_history_ring_wraps_and_evicts_oldest() {
+    let mut env = Env::new();
+    let (_authority, payer, pool_key) = init_pool(&mut env, 100_000, 2, 0);
+    env.warp(3);
+    let epoch_acct = env.epoch_pda(&pool_key, 0);
+
+    let empty = circuit_empty_root();
+    assert!(
+        pool::is_known_root(&env.get(&pool_key).data, &empty).unwrap(),
+        "init seeds every ring slot with the empty root"
+    );
+
+    let mut host = host::HostFrontier::new();
+    let mut roots = Vec::with_capacity(pool::ROOT_HISTORY_SIZE);
+    for i in 0..pool::ROOT_HISTORY_SIZE {
+        let leaf = ring_leaf(i);
+        let ix = env.commit_ix(&pool_key, &epoch_acct, &payer, &leaf);
+        env.process(&ix, &[Check::success()]);
+        let expected = host.append(&leaf);
+        assert_eq!(
+            pool::current_root(&env.get(&pool_key).data).unwrap(),
+            expected,
+            "on-chain root must equal the host frontier root at append {i}"
+        );
+        roots.push(expected);
+    }
+
+    let data = env.get(&pool_key).data;
+    assert_eq!(
+        pool::root_head(&data).unwrap(),
+        0,
+        "the head must have wrapped exactly once"
+    );
+    for (i, root) in roots.iter().enumerate() {
+        assert!(
+            pool::is_known_root(&data, root).unwrap(),
+            "root {i} must still be in the ring"
+        );
+    }
+    assert!(
+        !pool::is_known_root(&data, &empty).unwrap(),
+        "the seeded empty root must be fully evicted after a full ring of commits"
+    );
+
+    // One more commit evicts the oldest recorded root and nothing else.
+    let leaf = ring_leaf(pool::ROOT_HISTORY_SIZE);
+    let ix = env.commit_ix(&pool_key, &epoch_acct, &payer, &leaf);
+    env.process(&ix, &[Check::success()]);
+    let data = env.get(&pool_key).data;
+    assert!(
+        !pool::is_known_root(&data, &roots[0]).unwrap(),
+        "the oldest root must be evicted"
+    );
+    assert!(
+        pool::is_known_root(&data, &roots[1]).unwrap(),
+        "the second-oldest root must survive one more commit"
     );
 }
 
