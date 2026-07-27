@@ -440,11 +440,14 @@ The pipeline:
    a `--leaves` set to prove against the current root. Self-check that the path
    verifies to its own root, then confirm the pool currently accepts that root
    (current root or in the ring).
-3. Generate the Groth16 proof by shelling out to `snarkjs groth16 fullprove`
-   against the built `membership.wasm` + `membership_final.zkey`, then verify it
-   with `snarkjs groth16 verify` and fail loudly unless it reports OK. Cross-check
-   snarkjs's public signals against the computed `[root, nullifierHash,
-   actionHash, epoch]`.
+3. Generate the Groth16 proof in-process in pure Rust (`ark-circom` builds the
+   witness from the built `membership.wasm` inside a `wasmer` VM and reads the
+   proving key from `membership_final.zkey`; `ark-groth16` over `ark-bn254`
+   proves with the snarkjs-compatible `CircomReduction` QAP), then verify it
+   in-process against the same verifying key and fail loudly unless it passes.
+   Cross-check the circuit's public signals against the computed `[root,
+   nullifierHash, actionHash, epoch]`. No Node process is spawned. `--use-snarkjs`
+   selects the legacy `snarkjs groth16 fullprove` shell-out instead.
 4. Serialize the proof (proof A pre-negated) plus public inputs into the exact
    `SettleZk` instruction bytes and emit the bundle (data + accounts) for the relay
    to submit.
@@ -702,13 +705,13 @@ per-settlement nullifier PDAs change every time, so all its accounts stay static
 | membership circuit + setup + verifying key | `circuits/` | **Implemented** - depth-20 Poseidon membership circuit, dev/test Groth16 setup, committed proof fixture + vendored `vk.rs` |
 | gasless batch coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window scheduler, real-k floor gate, rotating fee-payer, normalized `TxProfile`, atomic crowd-tx composition (N+1 signer, ALT, `plan_settlements`), mockable RPC boundary |
 | pooled-action behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + `PlainTransfer` (soak baseline), Jupiter swap, jitoSOL stake adapters; bucketed amounts |
-| participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`status`; prove rebuilds the path, runs snarkjs, emits `SettleZk` |
+| participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`status`; prove rebuilds the path, proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback), emits `SettleZk` |
 | adversarial harness | `crates/mirror-harness` | **Implemented** - FIFO, amount, gas-payer, and wallet-fingerprint attacks measuring attacker advantage over 1/k, Baseline vs mirror-pool; FIFO advantage collapses to about 0 under shared-epoch batching |
 | anti-Sybil entry fee + dwell reward | `programs/mirror-pool` + `docs/INCENTIVES.md` | **Implemented** (crowd path) - entry-fee split, reward pool, dwell accrual, drain-safe `ClaimReward`; ZK-path reward is designed, not implemented |
 | confidential-value program (ValuePool + Transact) | `programs/mirror-pool` | **Implemented** - `InitValuePool`/`Transact`; separate ValuePool value-note accumulator + 32-root ring + vault PDA; on-chain 2-in/2-out JoinSplit Groth16 (alt_bn128), value nullifier PDAs, `publicAmount` lamport moves, fixed-denomination enforcement (`DenominationMismatch`) |
 | confidential JoinSplit circuit + setup + verifying key | `circuits/` | **Implemented** - depth-20 2-in/2-out Tornado-Nova transaction circuit (7 public inputs), dev/test Groth16 setup, committed shield/transfer/unshield fixtures + vendored `transaction_vk.rs` |
 | value notes + encrypted notes | `crates/mirror-core` | **Implemented** - `note` (value-note commitment / nullifier / `publicAmount` / `extDataHash`) + `encrypted_note` (ECIES X25519 -> HKDF-SHA256 -> ChaCha20-Poly1305, 100-byte blob, `scan`) |
-| confidential CLI | `crates/mirror-cli` | **Implemented** - `value-keygen`/`init-value-pool`/`shield`/`transfer`/`unshield`/`scan`; proves with snarkjs and emits `Transact` |
+| confidential CLI | `crates/mirror-cli` | **Implemented** - `value-keygen`/`init-value-pool`/`shield`/`transfer`/`unshield`/`scan`; proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node) and emits `Transact` |
 | gasless confidential submitter | `crates/mirror-coordinator` | **Implemented** - `submit_transact` (relay-only signer for transfer/unshield, depositor co-sign for shield), normalized `TxProfile`, mockable RPC boundary |
 | confidential-value soak | `tests/` | **Implemented** - shield / transfer / unshield + fixed-denomination end-to-end on a local mainnet mirror, 25/25 on-chain assertions (`docs/PROOF.md`) |
 | Surfpool soak (behavioral crowd path) | `tests/` | **In progress** - automated end-to-end multi-epoch run against a local mainnet mirror |

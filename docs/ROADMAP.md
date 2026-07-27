@@ -116,7 +116,8 @@ coordinator owns the one pool-wide tx shape.
 
 `init-pool`, `commit`, `deposit-commit`, `prove`, and `status`. `prove` rebuilds
 the Merkle inclusion path off-chain, confirms the root is a known recent root,
-generates and verifies a Groth16 proof through snarkjs, and emits the `SettleZk`
+generates and verifies a Groth16 proof in-process in pure Rust (`ark-circom` /
+`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback), and emits the `SettleZk`
 instruction for the relay (it never self-submits, keeping settlement gasless).
 
 ### The adversarial harness (`crates/mirror-harness`)
@@ -158,7 +159,7 @@ recipient discovers by trial-decryption with a viewing key. An optional fixed-
 denomination mode (`ValuePool.denomination = Some(d)`) enforces that every public
 shield/unshield moves exactly `d` (`DenominationMismatch`), giving amount
 k-anonymity. The CLI (`value-keygen`/`init-value-pool`/`shield`/`transfer`/
-`unshield`/`scan`) proves with snarkjs and emits the `Transact`; the coordinator's
+`unshield`/`scan`) proves in pure Rust and emits the `Transact`; the coordinator's
 `submit_transact` settles it gaslessly (relay-only signer for transfer/unshield, so
 the user never signs; depositor co-sign for a shield). Because a confidential
 transfer settles through the gasless relay with `publicAmount == 0`, mirror-pool
@@ -270,7 +271,7 @@ settlement trace.
 | Fixed `ActionClass` + `SizeBucket` (one anonymity set per class) | Built |
 | Gasless rotating coordinator with normalized tx shape | Built |
 | Behavior adapters (PlainTransfer, Jupiter swap, jitoSOL stake) | Built |
-| CLI `prove` (path rebuild + snarkjs + emit `SettleZk`) | Built |
+| CLI `prove` (path rebuild + in-process pure-Rust Groth16 + emit `SettleZk`) | Built |
 | Adversarial harness (FIFO/amount/gas-payer/fingerprint, real k) | Built |
 | Anti-Sybil entry fee + crowd-path dwell reward | Built |
 | Membership circuit + dev/test trusted setup + vendored verifying key | Built |
