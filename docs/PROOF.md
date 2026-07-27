@@ -568,3 +568,140 @@ MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored ceremony_key
 
 Your digests from step 0 onward will differ from the table above (different entropy);
 the phase-1 digest, the r1cs digest and the initial-key digest will not.
+
+<!-- funding-round-soak:begin -->
+## Funding-round soak
+
+This section documents an automated end-to-end run of `mirror-soak-funding` against a
+LIVE local Surfpool validator (a local mainnet mirror at `http://127.0.0.1:8999`), treated as mainnet and
+run honestly. It exercises the FUNDING-PROVENANCE path through the shipped components:
+`mirror-cli shield | scan | fund-commit` on the participant side, and
+`mirror_coordinator::FundingService` + `DirectoryIntake` on the coordinator side, which
+polls the real chain slot, ingests the emitted requests, batches them into slot rounds,
+and releases each round through the gasless relay. The signatures below are
+local-validator signatures, reproducible by re-running the soak against a fresh Surfpool,
+not lookups on a public explorer.
+
+- generated: unix 1785196047
+- program id (fresh deploy): `5uZEkrQv5EaEn4jsgnWvpW7pWcG7SLnU8HN7RGBLDBKU`
+- funding ValuePool: `4KiYiBzpJ16W1nBcL5hWoFWdg1bQ7zEfsMwqwaUZGsU3` (authority / relay `7GAAPEMHQJb2xNgSEmoZHFdN3aMHBJ3JaYcUKWSjjRL8`), vault `FsSXtmoXAer8mux8UAhoxmqf29TvBeaagv6WKwHM6BS7`
+- behavioral Pool: `JADctbdSkNk9ZoTuwuTH9vfpBu5FuCbLYWG53Zrwnk25`
+- denomination: 100000000 lamports (every shield and every funding withdrawal moves exactly this)
+- round: 12 slots, `min_round_size` 4, 4 participants; the released round was 408 at slot 4908
+
+### What was exercised
+
+1. **Setup** - a denominated funding `ValuePool` plus the behavioral `Pool` a funded
+   commit wallet participates in.
+2. **Shield** - every participant shields exactly the denomination from their OWN main
+   wallet, then `scan`s the on-chain `enc` blobs to recover a spendable note.
+3. **Request** - `fund-commit` mints a FRESH commit-wallet keypair and emits its
+   relay-only-signed unshield into the coordinator's inbox directory.
+4. **Thin round** - a round below `min_round_size` rolls forward, and nothing reaches
+   the chain while it is thin.
+5. **Release** - the merged round releases at its boundary; each fresh commit wallet is
+   credited exactly the denomination and the vault is debited by exactly the sum.
+6. **Provenance** - every funding transaction carries exactly one signature (the
+   relay's), mentions no participant main wallet, and each fresh commit wallet's ONLY
+   inbound transfer across its entire on-chain history is from the pool vault.
+7. **Participation** - a funded commit wallet then commits to the behavioral pool,
+   paying its own fee out of the pool-funded balance.
+8. **Adversarial** - a wrong-amount request is refused client-side by the CLI and
+   coordinator-side at the intake, and a live mid-round submit failure re-queues the
+   remainder instead of dropping it.
+
+What this does NOT claim: the shield leg is still the participant's own transaction from
+their own wallet, and both boundary crossings expose an amount and a slot. The funding
+edge is not erased, it is turned into a matching problem; the residual is measured in
+`docs/EFFECTIVE_K.md`, not assumed away.
+
+### On-chain assertions
+
+25/25 assertions passed.
+
+| result | assertion | detail |
+| --- | --- | --- |
+| PASS | program deployed + executable | 5uZEkrQv5EaEn4jsgnWvpW7pWcG7SLnU8HN7RGBLDBKU |
+| PASS | denominated funding ValuePool initialized (uniform amount enforced on-chain) | vpool=4KiYiBzpJ16W1nBcL5hWoFWdg1bQ7zEfsMwqwaUZGsU3 vault=FsSXtmoXAer8mux8UAhoxmqf29TvBeaagv6WKwHM6BS7 denomination=Some(100000000) |
+| PASS | behavioral Pool initialized (the pool a funded commit wallet participates in) | pool=JADctbdSkNk9ZoTuwuTH9vfpBu5FuCbLYWG53Zrwnk25 epoch_slots=60 k_floor=2 |
+| PASS | every participant shielded EXACTLY the denomination (uniform deposits) | vault credited 400000000 lamports = 4 x 100000000 |
+| PASS | every participant recovered a SPENDABLE note by scanning | 4 notes recovered from the on-chain enc blobs |
+| PASS | fund-commit minted a FRESH commit wallet per participant (all distinct, none a main wallet) | 4 distinct commit wallets |
+| PASS | every fresh commit wallet is UNFUNDED before the round releases | no commit wallet had any lamports at request time |
+| PASS | the coordinator INGESTED the fund-commit emits (the shipped intake path) | 3 request(s) batched into round 407 at slot 4887 |
+| PASS | a round below min_round_size ROLLS FORWARD instead of releasing | round 407 held 3 < min_round_size 4 and moved to round 408 |
+| PASS | a thin round reaches the chain NOT AT ALL (every commit wallet still unfunded) | all 4 commit wallets still at 0 lamports |
+| PASS | the merged round RELEASED every batched withdrawal at its boundary | round 408 released 4 withdrawals at slot 4908 |
+| PASS | every fresh commit wallet is credited EXACTLY the denomination | 4 wallets each credited 100000000 lamports |
+| PASS | the pool vault was debited by exactly the sum released | vault debited 400000000 lamports (= 4 x 100000000) |
+| PASS | every funding transaction carries EXACTLY ONE signature | signature counts: [1, 1, 1, 1] |
+| PASS | that one signature is the RELAY's (fee payer at account key 0) | relay 7GAAPEMHQJb2xNgSEmoZHFdN3aMHBJ3JaYcUKWSjjRL8 |
+| PASS | no funding transaction mentions ANY participant main wallet | 4 main wallets checked against 4 funding transactions |
+| PASS | each fresh commit wallet's ONLY inbound transfer is from the pool vault | wallet F6QaK9m2B3K99eNAdkZDRRJjyFYBps4Nyv2uod6ToHhk: 1 transaction(s) in its entire history, 1 inbound, the only credit is 100000000 lamports debited from the vault FsSXtmoXAer8mux8UAhoxmqf29TvBeaagv6WKwHM6BS7 |
+| PASS | the release order within a round is ARRIVAL-INDEPENDENT (same round, reversed arrival, identical release sequence) | arrival-order run ["F6QaK9", "2MXSpY", "HWB4KQ", "CVtJTA"] == reversed-arrival run ["F6QaK9", "2MXSpY", "HWB4KQ", "CVtJTA"] |
+| PASS | the on-chain submission sequence IS the release order, not the arrival order | released ["F6QaK9", "2MXSpY", "HWB4KQ", "CVtJTA"] while participants arrived ["F6QaK9", "CVtJTA", "2MXSpY", "HWB4KQ"] |
+| PASS | the funded commit wallet COMMITS to the behavioral pool, paying its own fee | epoch 81 commit_count=1 and the wallet paid 1118600 lamports out of its pool-funded balance |
+| PASS | CLI fail-fast: a wrong-amount funding request is refused client-side | Error: this value pool is denominated at 100000000 lamports; --amount 100000001 would be rejected on-chain (DenominationMismatch) and a distinctive amount re-links the funder to the funded wallet anyway  |
+| PASS | coordinator refuses an off-denomination request at the intake (no relay signature burned) | doctored-request.json: funding withdrawal of 100000001 does not match the pool denomination 100000000; a distinctive amount re-links the funder to the fundee |
+| PASS | the refused request was quarantined, not batched | the doctored emit is in rejected/ and no round holds it |
+| PASS | a mid-round submit failure RE-QUEUES the remainder instead of dropping it | the submit at release position 1 failed (submitting funding withdrawal in round 414 (index 3): send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x3: 7 log messages: Program ComputeBudget11), and 3 of 4 withdrawals moved into round 415 |
+| PASS | the withdrawal released BEFORE the failure still landed (partial release, honestly reported) | release position 0 (AjMP7JwzEgBzZ39CFEhYyVPnorXN22raVBNyoiY9CF1Y) is funded; the poisoned request at position 1 belonged to participant 3 (wallet 4nVyLCJAczDrwwoPH9nBqF1QD7wvyjY7wCtDRs3L8tq4) |
+
+### Honest notes from this run
+
+- the re-queued remainder keeps the FAILING request with it, so the same request fails again in the next round it lands in, releasing only the withdrawals ordered before it. The good requests still drain (the failing one drifts through the deterministic order), but a permanently-invalid request degrades round throughput until an operator removes it. FundingRounds has no quarantine policy for that today.
+
+### Captured transaction signatures
+
+| step | signature |
+| --- | --- |
+| init_value_pool_funding | `2ELXwLLYfuz7qT1C9Edy96fEtGUJdMPX12jvAmHmobgZhfSYLihpGjb66CQAbqzioppcSdpA2qEsvFm32sBEfHbD` |
+| init_pool_behavioral | `5smnuF3DXc4FBQaYJzvxPpGyNLc8kLq4w47JgPMdT9t7YqHx6VH51dZVqVgNbEW9eKHxzo7PVXxfnHs21igdXedM` |
+| shield_0 | `5FdQiBfwyetCFhWm8Svu7roCrSyQzLHTzdXjuKWYiQTMwr3JTaptT7Jn8WcnqDKjfagL8MyNKP8w4mkFHbeRRvMj` |
+| shield_1 | `56T1cbVcfESxiCTuj3NUx3omP1tUmA6SSomjTmPcPCfvyxHzwPJWhxXHHzvK3XPRdTzeo6e1E2Ud4PEHAKwubHoG` |
+| shield_2 | `2pk67NzadSPdxJSS8bJY1w4egwJiXWBj3ZCMkhZMXvMxoPxVqR82ch4vtAA3gMYsnNVr2cbxxxtcy17zMf7Vg8ui` |
+| shield_3 | `4Ud3mFkqPAPEE1SYhYBBJpeZeZgQyQVxAt7tAcHPbASge4qDV6eKex6cuJRrDXkyYUGFHyq9sDB3uf4vrhaftzC8` |
+| funding_release_0 | `2X6v3yZfHFE1eUayhUvChKie4rnJVu9zsb4joeGMAPRR4b2bKroj25m6WuXK1i36M2g4zDiK6s57Aj5w9er1Ayyx` |
+| funding_release_1 | `2ZyxJvNYBrSVQHagKWXbujb6x1pA1kw9rXqUXxa2Kj3oUP7hqZKSjtf6C7h5eFE9H3yFct42ujzZ1GkMkZ4TnqQ6` |
+| funding_release_2 | `5yLZo4exvQJYQKkJizgw4Ujj8u1vMkmEexqTyLLWYo6QsriENzLnXRGfq9NJVszfqkTaVfDs5o2kVcj8sxpTzyC3` |
+| funding_release_3 | `57iVKcQwQikTZ5PB7p9zVQGvxhXmoqoaPD2xdWJ5JwoxB1ofyJU2aK5CU7UDMuvPqtGb3rPqhm4xJHjzyneHok2s` |
+| commit_from_funded_wallet | `3YmiBaekvnLdCvRoqdMKfujdZFCfVAzGyUHVmddLDhKnJFAnjDkH5uPaWngam9wT1j6QRpJgMPNjgcPczrLQD5xD` |
+| out_of_band_spend | `64gtFEgAMsg59WT5D3EZ7XjcSC6UFLzGern8B5csPGUWjdvJSbC3eFbjpixqBRcTBBJQ1VRw3LYGdBuxH6waCgbD` |
+
+### Compute units (the released funding withdrawals)
+
+| signature | compute units |
+| --- | --- |
+| `2X6v3yZfHFE1eUayhUvChKie4rnJVu9zsb4joeGMAPRR4b2bKroj25m6WuXK1i36M2g4zDiK6s57Aj5w9er1Ayyx` | 200588 |
+| `2ZyxJvNYBrSVQHagKWXbujb6x1pA1kw9rXqUXxa2Kj3oUP7hqZKSjtf6C7h5eFE9H3yFct42ujzZ1GkMkZ4TnqQ6` | 193634 |
+| `5yLZo4exvQJYQKkJizgw4Ujj8u1vMkmEexqTyLLWYo6QsriENzLnXRGfq9NJVszfqkTaVfDs5o2kVcj8sxpTzyC3` | 201994 |
+| `57iVKcQwQikTZ5PB7p9zVQGvxhXmoqoaPD2xdWJ5JwoxB1ofyJU2aK5CU7UDMuvPqtGb3rPqhm4xJHjzyneHok2s` | 195070 |
+
+### Reproduce
+
+With a local Surfpool running at `http://127.0.0.1:8999` (treated as mainnet). That endpoint is whatever
+`--rpc-url` was given for this run; `surfpool start --no-tui` listens on port 8899 by
+default, and any other port here simply means the run was pointed at one.
+
+```sh
+# 1. build the on-chain program + host workspace
+cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml
+cargo build --workspace
+
+# 2. deploy the program under a FRESH program id
+solana-keygen new -o .soak/keys/funding-program.json
+solana program deploy \
+  --url http://127.0.0.1:8999 \
+  --program-id .soak/keys/funding-program.json \
+  programs/mirror-pool/target/deploy/mirror_pool.so
+
+# 3. build the transaction-circuit artifacts (bash circuits/build_transaction.sh)
+
+# 4. run the funding-round soak
+cargo run -p mirror-soak --bin mirror-soak-funding -- \
+  --rpc-url http://127.0.0.1:8999 \
+  --program-id 5uZEkrQv5EaEn4jsgnWvpW7pWcG7SLnU8HN7RGBLDBKU
+```
+
+Every run creates a fresh pool, fresh main wallets, and fresh commit wallets, so the run
+is self-contained and repeatable; the signatures above are from this run.

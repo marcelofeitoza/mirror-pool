@@ -312,6 +312,8 @@ settlement trace.
 | Gasless confidential submit (`submit_transact`, relay-only signer) | Built |
 | Confidential CLI (`value-keygen`/`shield`/`transfer`/`unshield`/`scan`) | Built |
 | Funding-provenance path: `fund-commit` (fresh commit wallet funded by unshield) + coordinator funding rounds (denomination, batching, minimum-round floor) | Built |
+| Funding ingestion service: `DirectoryIntake` + `FundingService` (real slot polling, request parsing/validation, normalized `TxProfile`) and the `mirror-coordinator funding` binary mode | Built |
+| Funding-round soak: live end-to-end funding-provenance verification on Surfpool (25/25 on-chain assertions) | Built |
 | Effective-k derived from the funding mechanism, with its residual measured and published | Built |
 | Joint deposit-to-withdrawal matching inference in the harness adversary | Built |
 | Swap/stake-from-pool via CPI on the ZK path | Future |

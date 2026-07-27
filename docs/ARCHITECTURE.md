@@ -780,6 +780,26 @@ relay's, so the participant's main wallet appears on no transaction in the path.
   epoch below `k_floor`: a round of one withdrawal is a direct shield-to-unshield
   link no matter how good the cryptography is.
 
+`mirror_coordinator::funding_service` is what feeds it on a live cluster, and it is
+shaped like the crowd path: `DirectoryIntake` reads `fund-commit` emits out of an
+inbox directory and parses each one into a `FundingRequest`, refusing anything that
+is not a relay-only-signed unshield for this program (in particular an emit that
+marks a second signer, which would write another wallet onto the funding
+transaction); `FundingService::tick` reads the REAL chain slot through the same
+mockable `SolanaClient` seam the settlement path uses, ingests, and releases every
+round whose window has closed. The pool-wide normalized `TxProfile` is stamped on by
+the coordinator and the participant's own compute-budget preference is discarded,
+because a participant-chosen compute budget fingerprints a withdrawal exactly like a
+distinctive amount does. `mirror-coordinator funding --rpc-url ... --program-id ...
+--relay <keypair> --intake-dir <dir> --denomination <lamports>` runs it.
+
+Because the on-chain `Transact` requires the ValuePool authority to sign and makes
+that signer the fee payer, the funding path CANNOT rotate fee payers the way the
+crowd path does: paying from another key would add a second signature, which is a
+worse linkage handle than a predictable payer. `RelaySet` therefore rotates ACROSS
+pools (one relay key per funding pool) and says so rather than implying a rotation
+that does not exist.
+
 The residual is stated rather than hidden: `publicAmount` is public on both
 crossings, so an observer sees the deposits and the withdrawals and is left with a
 matching problem. `crates/mirror-harness` measures how much of that matching
@@ -800,7 +820,7 @@ of nominal `k`, and under naive pass-through use of the same pool it is most of 
 | pooled-action behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + `PlainTransfer` (soak baseline), Jupiter swap, jitoSOL stake adapters; bucketed amounts |
 | participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`fund-commit`/`status`/`ceremony`; prove rebuilds the path, proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback, `--proving-key` proves under a ceremony key), emits `SettleZk` |
 | adversarial harness | `crates/mirror-harness` | **Implemented** - FIFO, amount, gas-payer, and wallet-fingerprint attacks measuring attacker advantage over 1/k, Baseline vs mirror-pool; FIFO advantage collapses to about 0 under shared-epoch batching; plus the effective-k metric whose funding-provenance classes are derived from the shipped funding mechanism (`funding.rs`) with policy, adversary-strength, dwell and adoption ablations |
-| funding rounds (funding-provenance path) | `crates/mirror-coordinator` + `crates/mirror-cli` | **Implemented, not yet soaked** - `fund-commit` (fresh commit wallet funded by unshield, denomination enforced client-side, relay-only signature) + `FundingRounds` (round batching, minimum-round floor with roll-forward, arrival-independent release order); unit-tested against the mock RPC boundary, but the live soaks in `docs/PROOF.md` predate it and do not exercise it; residual measured in `docs/EFFECTIVE_K.md` |
+| funding rounds (funding-provenance path) | `crates/mirror-coordinator` + `crates/mirror-cli` | **Implemented + soaked** - `fund-commit` (fresh commit wallet funded by unshield, denomination enforced client-side, relay-only signature) + `FundingService`/`DirectoryIntake` (the ingestion path: real slot polling, request parsing and validation, normalized `TxProfile`) + `FundingRounds` (round batching, minimum-round floor with roll-forward, arrival-independent release order); unit-tested against the mock RPC and intake boundaries AND soak-proven end to end on Surfpool, 25/25 on-chain assertions (`docs/PROOF.md`); residual measured in `docs/EFFECTIVE_K.md` |
 | anti-Sybil entry fee + dwell reward | `programs/mirror-pool` + `docs/INCENTIVES.md` | **Implemented** (crowd path) - entry-fee split, reward pool, dwell accrual, drain-safe `ClaimReward`; ZK-path reward is designed, not implemented |
 | confidential-value program (ValuePool + Transact) | `programs/mirror-pool` | **Implemented** - `InitValuePool`/`Transact`; separate ValuePool value-note accumulator + 32-root ring + vault PDA; on-chain 2-in/2-out JoinSplit Groth16 (alt_bn128), value nullifier PDAs, `publicAmount` lamport moves, fixed-denomination enforcement (`DenominationMismatch`) |
 | confidential JoinSplit circuit + setup + verifying key | `circuits/` | **Implemented** - depth-20 2-in/2-out Tornado-Nova transaction circuit (7 public inputs), dev/test Groth16 setup, committed shield/transfer/unshield fixtures + vendored `transaction_vk.rs` |

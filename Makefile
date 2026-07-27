@@ -8,7 +8,7 @@
 SURFPOOL_RPC ?= http://127.0.0.1:8899
 PROGRAM_MANIFEST := programs/mirror-pool/Cargo.toml
 
-.PHONY: all fmt fmt-check clippy test build build-sbf harness soak ceremony-test check clean
+.PHONY: all fmt fmt-check clippy test build build-sbf harness soak soak-funding ceremony-test check clean
 
 all: fmt-check clippy test build-sbf
 
@@ -48,6 +48,15 @@ harness:
 soak:
 	@echo "Soaking against Surfpool at $(SURFPOOL_RPC) (treated as mainnet)"
 	SOLANA_RPC=$(SURFPOOL_RPC) cargo run -p mirror-coordinator --release
+
+# The FUNDING-ROUND soak: fund-commit -> coordinator ingestion -> thin-round
+# roll-forward -> batched gasless release -> commit from the funded wallet, with
+# on-chain funding-provenance verification. Needs a running Surfpool, a freshly
+# deployed program id (PROGRAM_ID=...), and the transaction-circuit artifacts.
+soak-funding:
+	@test -n "$(PROGRAM_ID)" || (echo "set PROGRAM_ID=<freshly deployed program id>" && false)
+	cargo run -p mirror-soak --release --bin mirror-soak-funding -- \
+	  --rpc-url $(SURFPOOL_RPC) --program-id $(PROGRAM_ID)
 
 check: fmt-check clippy test
 
