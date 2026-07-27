@@ -63,18 +63,32 @@
 //! transient, privacy regression for those participants.
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use mirror_core::{
     note::{decode_public_amount, SignedAmount},
     wire,
 };
+use solana_instruction::AccountMeta;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
+use solana_signer::Signer;
 
 use crate::client::SolanaClient;
+use crate::config::TxProfile;
 use crate::value::{submit_transact, ValueTransactRequest};
+
+/// The account index the ValuePool authority (the relay) occupies in a
+/// `Transact` account list. Fixed by the on-chain program's account order.
+const AUTHORITY_ACCOUNT_INDEX: usize = 1;
+/// The account index the withdrawal recipient (the fresh commit wallet)
+/// occupies in a `Transact` account list.
+const RECIPIENT_ACCOUNT_INDEX: usize = 4;
+/// The number of accounts a `Transact` takes: vpool, authority, nf0, nf1,
+/// recipient, depositor, system, clock, vault.
+const TRANSACT_ACCOUNTS: usize = 9;
 
 /// Default funding-round length in slots. A quarter of the 600-slot epoch window
 /// the harness models, so a participant who funds and commits in the same epoch
@@ -155,6 +169,268 @@ impl FundingRequest {
             }
             SignedAmount::Transfer => {
                 bail!("funding request is an internal transfer; it funds no commit wallet")
+            }
+        }
+    }
+
+    /// The ValuePool authority (the relay) this withdrawal is bound to.
+    ///
+    /// The on-chain program checks that account 1 is the pool's authority and
+    /// that it signed, so this is the key the coordinator must hold to release
+    /// the request at all.
+    pub fn authority(&self) -> Result<Pubkey> {
+        let meta = self
+            .transact
+            .accounts
+            .get(AUTHORITY_ACCOUNT_INDEX)
+            .ok_or_else(|| anyhow!("funding request has no authority account"))?;
+        ensure!(
+            meta.is_signer,
+            "the authority account of a funding request must be marked signer"
+        );
+        Ok(meta.pubkey)
+    }
+
+    /// Parse a `mirror-cli fund-commit` emit (the JSON the participant's CLI
+    /// writes with `--out`) into a request the batcher can hold.
+    ///
+    /// This is the wire format between the participant and the coordinator, and
+    /// it is where a malformed or hostile request is supposed to die. Everything
+    /// checked here is checked because letting it through would either burn a
+    /// relay signature on a doomed transaction or, worse, put the participant
+    /// back onto the funding transaction:
+    ///
+    /// - the op must be an **unshield** (a shield or an internal transfer funds
+    ///   no commit wallet, and a shield needs the depositor's signature);
+    /// - the program id must be the one the coordinator was configured with, so
+    ///   a request cannot aim a relay signature at some other program;
+    /// - the account list must be the program's fixed 9-account `Transact`
+    ///   order, and the recipient slot must agree with the emit's stated
+    ///   recipient, so a doctored emit cannot redirect the withdrawal (the
+    ///   proof's `extDataHash` binds the real recipient, so a mismatch here is
+    ///   a request that would fail on-chain anyway);
+    /// - **exactly one account may be a signer, and it must be the authority.**
+    ///   This is the privacy-critical one. If any other account were marked
+    ///   signer, the released transaction would carry a second signature, and
+    ///   whoever that key belongs to is written into the funding transaction
+    ///   forever. Relay-only signing is the entire point of routing the funding
+    ///   leg through the pool.
+    ///
+    /// The [`TxProfile`] is supplied by the COORDINATOR, not read from the
+    /// emit: a participant-chosen compute-unit limit or priority fee
+    /// fingerprints their withdrawal exactly like a distinctive amount does, so
+    /// the pool-wide normalized shape is stamped on here and the emit's opinion
+    /// (if any) is discarded.
+    pub fn from_emit_json(
+        emit: &serde_json::Value,
+        expected_program_id: &Pubkey,
+        tx_profile: TxProfile,
+    ) -> Result<FundingRequest> {
+        let s = |key: &str| -> Result<&str> {
+            emit[key]
+                .as_str()
+                .ok_or_else(|| anyhow!("funding emit missing string field `{key}`"))
+        };
+
+        let op = s("op")?;
+        ensure!(
+            op == "unshield",
+            "funding emit is a `{op}`; only an unshield funds a commit wallet"
+        );
+        if emit["shield_requires_depositor_signature"]
+            .as_bool()
+            .unwrap_or(false)
+        {
+            bail!("funding emit demands a depositor co-signature; a funding withdrawal is relay-only signed");
+        }
+
+        let program_id = Pubkey::from_str(s("program_id")?)
+            .map_err(|e| anyhow!("funding emit has an invalid program_id: {e}"))?;
+        ensure!(
+            program_id == *expected_program_id,
+            "funding emit targets program {program_id}, but this coordinator serves \
+             {expected_program_id}"
+        );
+
+        let accounts = emit
+            .get("accounts")
+            .and_then(|a| a.as_array())
+            .ok_or_else(|| anyhow!("funding emit missing `accounts` array"))?
+            .iter()
+            .map(|a| {
+                let pubkey = Pubkey::from_str(
+                    a["pubkey"]
+                        .as_str()
+                        .ok_or_else(|| anyhow!("funding emit account missing `pubkey`"))?,
+                )
+                .map_err(|e| anyhow!("funding emit account has an invalid pubkey: {e}"))?;
+                Ok(AccountMeta {
+                    pubkey,
+                    is_signer: a["is_signer"].as_bool().unwrap_or(false),
+                    is_writable: a["is_writable"].as_bool().unwrap_or(false),
+                })
+            })
+            .collect::<Result<Vec<AccountMeta>>>()?;
+        ensure!(
+            accounts.len() == TRANSACT_ACCOUNTS,
+            "funding emit carries {} accounts; a Transact takes exactly {TRANSACT_ACCOUNTS}",
+            accounts.len()
+        );
+
+        let signers: Vec<Pubkey> = accounts
+            .iter()
+            .filter(|a| a.is_signer)
+            .map(|a| a.pubkey)
+            .collect();
+        ensure!(
+            signers.len() == 1 && signers[0] == accounts[AUTHORITY_ACCOUNT_INDEX].pubkey,
+            "a funding withdrawal must be signed by the relay authority ALONE, but this emit \
+             marks {} account(s) as signer ({signers:?}); a second signature writes another \
+             wallet into the funding transaction",
+            signers.len()
+        );
+
+        let stated_recipient = Pubkey::from_str(s("recipient")?)
+            .map_err(|e| anyhow!("funding emit has an invalid recipient: {e}"))?;
+        ensure!(
+            accounts[RECIPIENT_ACCOUNT_INDEX].pubkey == stated_recipient,
+            "funding emit's recipient {stated_recipient} does not match its recipient account \
+             {}",
+            accounts[RECIPIENT_ACCOUNT_INDEX].pubkey
+        );
+
+        let transact_data = decode_hex(s("transact_data_hex")?)
+            .context("decoding the funding emit's transact_data_hex")?;
+
+        let request = FundingRequest {
+            transact: ValueTransactRequest {
+                program_id,
+                transact_data,
+                accounts,
+                tx_profile,
+            },
+            commit_wallet: stated_recipient,
+        };
+        // Reject a non-withdrawal here rather than at `accept`, so a bad emit is
+        // named at the boundary it entered through.
+        request
+            .withdraw_amount()
+            .context("the funding emit's publicAmount")?;
+        Ok(request)
+    }
+}
+
+/// Decode a lowercase-or-uppercase hex string into bytes.
+fn decode_hex(s: &str) -> Result<Vec<u8>> {
+    let s = s.trim();
+    ensure!(s.len().is_multiple_of(2), "odd-length hex string");
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow!("bad hex: {e}")))
+        .collect()
+}
+
+/// The relay keys this coordinator can release funding withdrawals with, indexed
+/// by the ValuePool authority each one is.
+///
+/// **Why this is not a `FeePayerRing`.** The crowd path rotates over a set of
+/// fee payers so that no single payer key becomes a stable cluster label across
+/// settlements. A funding withdrawal cannot rotate the same way, and saying why
+/// is more useful than pretending it can: the on-chain `Transact` requires the
+/// ValuePool **authority** to sign, and that signer is also the transaction fee
+/// payer. Paying from some other key would put a SECOND signature on the
+/// transaction, and a two-signature funding withdrawal is a strictly worse
+/// linkage handle than a predictable payer, because the extra key is per-relay
+/// state an observer can follow.
+///
+/// So within one pool the payer is pinned to that pool's authority by
+/// construction, and rotation happens ACROSS pools: a coordinator serving
+/// several denominated funding pools holds one relay key per pool and releases
+/// each request under the authority it is bound to. A request naming an
+/// authority this coordinator does not hold is refused rather than turned into a
+/// transaction that cannot be signed.
+#[derive(Default)]
+pub struct RelaySet {
+    by_authority: BTreeMap<Pubkey, Keypair>,
+}
+
+impl std::fmt::Debug for RelaySet {
+    /// Prints the authorities only. A relay key is a secret and must never reach
+    /// a log line through a `Debug` impl.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelaySet")
+            .field("authorities", &self.by_authority.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl RelaySet {
+    /// A set holding one relay (the single-funding-pool case).
+    pub fn single(relay: Keypair) -> Self {
+        let mut set = Self::default();
+        set.insert(relay);
+        set
+    }
+
+    /// Build from several relay keys. Rejects an empty set: a coordinator with
+    /// no relay key can never release a round.
+    pub fn new(relays: impl IntoIterator<Item = Keypair>) -> Result<Self> {
+        let mut set = Self::default();
+        for relay in relays {
+            set.insert(relay);
+        }
+        ensure!(
+            !set.by_authority.is_empty(),
+            "the relay set must hold at least one key"
+        );
+        Ok(set)
+    }
+
+    pub fn insert(&mut self, relay: Keypair) {
+        self.by_authority.insert(relay.pubkey(), relay);
+    }
+
+    pub fn authorities(&self) -> Vec<Pubkey> {
+        self.by_authority.keys().copied().collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_authority.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_authority.is_empty()
+    }
+
+    /// The relay key for `authority`, or `None` if this coordinator does not
+    /// serve that pool.
+    pub fn get(&self, authority: &Pubkey) -> Option<&Keypair> {
+        self.by_authority.get(authority)
+    }
+}
+
+/// How a release loop finds the key to sign a given request with.
+enum RelaySelector<'a> {
+    /// One relay for every request (the shape [`FundingRounds::on_slot`] has
+    /// always had; behavior is unchanged).
+    Single(&'a Keypair),
+    /// Per-request lookup by the request's bound authority.
+    Set(&'a RelaySet),
+}
+
+impl RelaySelector<'_> {
+    fn resolve(&self, request: &FundingRequest) -> Result<&Keypair> {
+        match self {
+            RelaySelector::Single(relay) => Ok(relay),
+            RelaySelector::Set(set) => {
+                let authority = request.authority()?;
+                set.get(&authority).ok_or_else(|| {
+                    anyhow!(
+                        "no relay key for value-pool authority {authority}; this coordinator \
+                         serves {:?}",
+                        set.authorities()
+                    )
+                })
             }
         }
     }
@@ -289,6 +565,34 @@ impl FundingRounds {
         client: &dyn SolanaClient,
         relay: &Keypair,
     ) -> Result<Vec<RoundOutcome>> {
+        self.release_due(slot, client, &RelaySelector::Single(relay))
+            .await
+    }
+
+    /// [`FundingRounds::on_slot`] for a coordinator serving more than one
+    /// funding pool: each request is released under the relay key for the
+    /// ValuePool authority it is bound to (see [`RelaySet`]).
+    ///
+    /// A request whose authority this coordinator does not hold fails the round
+    /// exactly like a failed submit does: the remainder is re-queued and the
+    /// error is surfaced, because silently dropping it would strand the
+    /// participant's value in the pool.
+    pub async fn on_slot_with_relays(
+        &mut self,
+        slot: u64,
+        client: &dyn SolanaClient,
+        relays: &RelaySet,
+    ) -> Result<Vec<RoundOutcome>> {
+        self.release_due(slot, client, &RelaySelector::Set(relays))
+            .await
+    }
+
+    async fn release_due(
+        &mut self,
+        slot: u64,
+        client: &dyn SolanaClient,
+        relays: &RelaySelector<'_>,
+    ) -> Result<Vec<RoundOutcome>> {
         let closable: Vec<u64> = self
             .pending_rounds()
             .into_iter()
@@ -332,6 +636,15 @@ impl FundingRounds {
                 let request = requests[i]
                     .as_ref()
                     .expect("the release order visits each request exactly once");
+                let relay = match relays.resolve(request) {
+                    Ok(relay) => relay,
+                    Err(e) => {
+                        failure = Some(e.context(format!(
+                            "resolving the relay key for round {round} (index {i})"
+                        )));
+                        break;
+                    }
+                };
                 match submit_transact(client, relay, &request.transact, &[]).await {
                     Ok(signature) => {
                         signatures.push(signature);

@@ -52,8 +52,12 @@ pub use crowd::{
     PLAIN_TRANSFER_MAX_PER_TX,
 };
 pub use funding::{
-    FundingRequest, FundingRoundConfig, FundingRounds, RoundOutcome, DEFAULT_MIN_ROUND_SIZE,
-    DEFAULT_ROUND_SLOTS,
+    FundingRequest, FundingRoundConfig, FundingRounds, RelaySet, RoundOutcome,
+    DEFAULT_MIN_ROUND_SIZE, DEFAULT_ROUND_SLOTS,
+};
+pub use funding_service::{
+    DirectoryIntake, FundingIntake, FundingService, FundingServiceConfig, FundingTick,
+    IncomingRequest,
 };
 pub use value::{build_transact_message, submit_transact, ValueTransactRequest};
 
@@ -64,6 +68,9 @@ pub mod crowd;
 /// Funding rounds: batching the shielded withdrawals that fund fresh commit
 /// wallets, so no funding edge links a main wallet to a commit wallet.
 pub mod funding;
+/// The funding ingestion path: participant requests in (through a mockable
+/// intake seam), released rounds out, driven by the real chain slot.
+pub mod funding_service;
 /// The gasless confidential submit path: building + signing + sending a Transact.
 pub mod value;
 

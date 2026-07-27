@@ -246,7 +246,9 @@ impl SolanaClient for RpcSolanaClient {
 #[derive(Default)]
 pub(crate) struct MockSolanaClient {
     pub blockhash: Hash,
-    pub slot: u64,
+    /// The slot `get_slot` reports. Behind an atomic so a test can advance the
+    /// clock across a round boundary while the client is shared behind an `Arc`.
+    pub slot: std::sync::atomic::AtomicU64,
     pub table: Pubkey,
     pub sent: std::sync::Mutex<Vec<VersionedTransaction>>,
     /// When set, `send_and_confirm_transaction` fails once this many
@@ -262,7 +264,7 @@ impl MockSolanaClient {
         Self {
             // A fixed, nonzero blockhash so signed transactions are stable.
             blockhash: Hash::new_from_array([7u8; 32]),
-            slot: 123,
+            slot: std::sync::atomic::AtomicU64::new(123),
             table: Pubkey::new_from_array([0xA1; 32]),
             sent: std::sync::Mutex::new(Vec::new()),
             fail_after: None,
@@ -275,6 +277,18 @@ impl MockSolanaClient {
             fail_after: Some(n),
             ..Self::new()
         }
+    }
+
+    /// A client whose clock starts at `slot`.
+    pub fn at_slot(slot: u64) -> Self {
+        let client = Self::new();
+        client.set_slot(slot);
+        client
+    }
+
+    /// Advance (or rewind) the simulated slot clock.
+    pub fn set_slot(&self, slot: u64) {
+        self.slot.store(slot, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn sent_count(&self) -> usize {
@@ -290,7 +304,7 @@ impl SolanaClient for MockSolanaClient {
     }
 
     async fn get_slot(&self) -> Result<u64> {
-        Ok(self.slot)
+        Ok(self.slot.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     async fn send_and_confirm_transaction(&self, tx: &VersionedTransaction) -> Result<Signature> {
