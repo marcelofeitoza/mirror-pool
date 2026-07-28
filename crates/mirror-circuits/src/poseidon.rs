@@ -69,8 +69,8 @@ pub enum PoseidonGadgetError {
 }
 
 /// The cached `bn254_x5` parameter sets for widths [`MIN_WIDTH`]..=[`MAX_WIDTH`],
-/// indexed by `width - MIN_WIDTH`. Built once; the tables are large and the
-/// membership circuit hashes 22 times per proof.
+/// indexed by `width - MIN_WIDTH`. Built once; the tables are large and a proof
+/// hashes many times (22 for membership, 50 for the JoinSplit).
 fn table() -> &'static [PoseidonParameters<Fr>] {
     static TABLE: OnceLock<Vec<PoseidonParameters<Fr>>> = OnceLock::new();
     TABLE.get_or_init(|| {

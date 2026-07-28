@@ -52,3 +52,7 @@ mirror-core.workspace = true
 groth16-solana = "0.2.0"
 rand.workspace = true
 sha2.workspace = true
+# Reads the COMMITTED circom proof fixtures, so the arkworks JoinSplit can be
+# checked against the public signals snarkjs actually emitted rather than
+# against a restatement of them.
+serde_json.workspace = true

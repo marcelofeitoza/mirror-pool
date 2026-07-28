@@ -103,22 +103,38 @@ fn parse_r1cs(d: &[u8]) -> R1csShape {
     }
 }
 
-fn r1cs_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../circuits/membership.r1cs")
+fn r1cs_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../circuits/{name}.r1cs"))
+}
+
+fn read_shape(name: &str) -> R1csShape {
+    let path = r1cs_path(name);
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read {}: {e}. Run the circuit build script once to produce the \
+             gitignored circom build artifacts.",
+            path.display()
+        )
+    });
+    parse_r1cs(&bytes)
+}
+
+/// A circomlib Poseidon of `t - 1` inputs costs three rows per S-box, and there
+/// are `8*t + partial` S-boxes. `partial` comes from circomlib's own table.
+fn circom_poseidon_rows(t: usize) -> usize {
+    let partial = match t {
+        2 => 56,
+        3 => 57,
+        4 => 56,
+        _ => panic!("width {t} is not used by these circuits"),
+    };
+    3 * (8 * t + partial)
 }
 
 #[test]
 #[ignore = "needs the gitignored circom build artifact circuits/membership.r1cs"]
 fn circom_membership_r1cs_shape_is_what_the_docs_claim() {
-    let path = r1cs_path();
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-        panic!(
-            "cannot read {}: {e}. Run `bash circuits/build.sh` once to produce the \
-             gitignored circom build artifacts.",
-            path.display()
-        )
-    });
-    let shape = parse_r1cs(&bytes);
+    let shape = read_shape("membership");
     println!("circom membership.r1cs: {shape:?}");
 
     assert_eq!(
@@ -138,12 +154,75 @@ fn circom_membership_r1cs_shape_is_what_the_docs_claim() {
     // 21 Poseidon(2) (nullifier + 20 Merkle levels) at 3 constraints per S-box,
     // 1 Poseidon(3), and 3 constraints per path selector, accounts for every
     // quadratic row exactly.
-    let poseidon_t3 = 3 * (8 * 3 + 57);
-    let poseidon_t4 = 3 * (8 * 4 + 56);
     let selectors = 3 * 20;
     assert_eq!(
-        21 * poseidon_t3 + poseidon_t4 + selectors,
+        21 * circom_poseidon_rows(3) + circom_poseidon_rows(4) + selectors,
         shape.quadratic as usize,
         "the S-box accounting must explain every quadratic constraint"
+    );
+}
+
+/// The same, for the confidential-value JoinSplit. This is the number
+/// `docs/ARKWORKS.md` compares the arkworks JoinSplit against, so it is measured
+/// rather than quoted.
+///
+/// The accounting below is worth reading once, because one line of it is
+/// counter-intuitive. circomlib's `IsEqual` is two quadratic rows, and the
+/// circuit writes `sameNullifier[p].out === 0`. That equality is LINEAR, so
+/// circom's linear-substitution pass eliminates the `out` signal, at which point
+/// `IsZero`'s second row `in * out === 0` becomes identically zero and is
+/// dropped. What survives is a single row, `diff * inv === 1` - which is exactly
+/// what `FpVar::enforce_not_equal` emits on the arkworks side, so the two
+/// systems pay the same one row for nullifier distinctness.
+#[test]
+#[ignore = "needs the gitignored circom build artifact circuits/transaction.r1cs"]
+fn circom_transaction_r1cs_shape_is_what_the_docs_claim() {
+    let shape = read_shape("transaction");
+    println!("circom transaction.r1cs: {shape:?}");
+
+    assert_eq!(
+        shape,
+        R1csShape {
+            n_wires: 27_328,
+            n_pub_in: 7,
+            // inAmount[2] + inPrivateKey[2] + inBlinding[2] + inPathIndices[2]
+            // + inPathElements[2][20] + outAmount[2] + outPubkey[2]
+            // + outBlinding[2] + magnitude + sign
+            n_prv_in: 56,
+            n_constraints: 27_278,
+            quadratic: 13_098,
+            linear: 14_180,
+        },
+        "the committed circom JoinSplit changed shape; docs/ARKWORKS.md is now stale"
+    );
+
+    // 50 Poseidon calls: 2 keypairs (t=2); 8 three-input hashes (t=4) for the
+    // two input commitments, two signatures, two nullifiers and two output
+    // commitments; and 40 Merkle nodes (t=3), 20 per input.
+    let hashes =
+        2 * circom_poseidon_rows(2) + 8 * circom_poseidon_rows(4) + 40 * circom_poseidon_rows(3);
+    assert_eq!(hashes, 12_264);
+
+    let num2bits_20 = 2 * 20; // one per input's path index
+    let switchers = 2 * 20; // one row each
+    let force_equal_if_enabled = 2 * 3; // IsZero (2) + the enable product (1)
+    let num2bits_248 = 3 * 248; // two output amounts + the publicAmount magnitude
+    let sign_booleanity = 1;
+    let signed_decoding = 1; // publicAmount === magnitude * signFactor
+    let nullifier_distinctness = 1; // IsEqual, reduced as described above
+    let ext_data_hash_square = 1;
+
+    assert_eq!(
+        hashes
+            + num2bits_20
+            + switchers
+            + force_equal_if_enabled
+            + num2bits_248
+            + sign_booleanity
+            + signed_decoding
+            + nullifier_distinctness
+            + ext_data_hash_square,
+        shape.quadratic as usize,
+        "the gadget accounting must explain every quadratic constraint"
     );
 }
