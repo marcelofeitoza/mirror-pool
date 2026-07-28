@@ -51,7 +51,11 @@ pub fn circuit_id(name: &str) -> Result<u8> {
     }
 }
 
-fn key_for(circuit_id: u8) -> Result<&'static Groth16Verifyingkey<'static>> {
+/// The committed verifying key for a circuit: the same bytes the program pins by
+/// digest and reads from its registry PDA. `prove` checks its own output against
+/// this before emitting, so a proof made under a mismatched proving key fails
+/// locally instead of on chain.
+pub(crate) fn key_for(circuit_id: u8) -> Result<&'static Groth16Verifyingkey<'static>> {
     match circuit_id {
         wire::CIRCUIT_MEMBERSHIP => Ok(&membership::VERIFYINGKEY),
         wire::CIRCUIT_TRANSACTION => Ok(&transaction::VERIFYINGKEY),

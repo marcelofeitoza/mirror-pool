@@ -24,10 +24,15 @@
 //!
 //!    NOTE: the DEPLOYED membership verifying key is a phase-2 ceremony output
 //!    (`docs/CEREMONY.md` section 10), and `circuits/membership_final.zkey` is the
-//!    old dev key, so a proof made under the `--zkey` default will NOT be accepted
-//!    on chain. Pass `--proving-key <ceremony>/key_NNNN.mpk` to produce a proof
-//!    that lands. The `--zkey` path stays for circuit work against a locally
-//!    exported key.
+//!    old dev key, so a proof made under the `--zkey` default cannot land. Pass
+//!    `--proving-key <ceremony>/key_NNNN.mpk` to produce one that does. The
+//!    `--zkey` path stays for circuit work against a locally exported key.
+//!    Then verify that finished proof against the COMMITTED verifying key, using
+//!    the same `groth16-solana` verifier the program runs, and refuse to emit if
+//!    it fails. Every earlier check passes under a mismatched proving key, because
+//!    a proof is verified against the key it was made under; this is the only step
+//!    that compares it to the key the program will actually use. Without it the
+//!    mismatch surfaces as a rejected transaction the user already paid for.
 //! 5. Serialize the proof + public inputs into the exact `SettleZk` instruction
 //!    data (proof_a pre-negated) and emit it for the relay/coordinator to submit.
 //!
@@ -364,6 +369,17 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
         )?
     };
 
+    // (4b) Refuse to emit a proof the deployed program would reject.
+    //
+    // The proving key and the committed verifying key can disagree: the membership
+    // key came from the phase-2 ceremony, while `--zkey` still defaults to the dev
+    // key `circuits/build.sh` produces. Proving under the wrong one yields a proof
+    // that is internally valid and verifies against ITS OWN key, so every check up
+    // to here passes, and it is only rejected on chain after the user has paid to
+    // submit it. Verifying here against the SAME key the program pins turns that
+    // into a local error with a name.
+    check_against_committed_vk(&proof_bytes, &path.root, &nullifier_hash, &action_hash, note.epoch)?;
+
     // (5) Serialize into SettleZk instruction data.
     let data = groth16::settle_zk_data(
         note.epoch,
@@ -480,6 +496,43 @@ pub(crate) fn membership_input_json(
 /// The four membership public inputs, in circuit-declaration order
 /// `[root, nullifierHash, actionHash, epoch]`, each 32-byte big-endian. `epoch` is
 /// the big-endian encoding of the u64 (the value the proof commits to).
+/// Verify a freshly made membership proof against the COMMITTED verifying key,
+/// using the exact verifier the on-chain program runs.
+///
+/// Every earlier check passes even when the proving key is the wrong one: a proof
+/// is verified against the key it was made under, so a dev-key proof looks
+/// perfectly valid right up until the program rejects it. This is the only check
+/// that compares the proof to the key the program will actually use.
+fn check_against_committed_vk(
+    bytes: &groth16::ProofBytes,
+    root: &Hash32,
+    nullifier_hash: &Hash32,
+    action_hash: &Hash32,
+    epoch: u64,
+) -> Result<()> {
+    let public_inputs = membership_public_inputs(root, nullifier_hash, action_hash, epoch);
+    let vk = crate::vk::key_for(wire::CIRCUIT_MEMBERSHIP)?;
+    let mut verifier = groth16_solana::groth16::Groth16Verifier::new(
+        &bytes.proof_a,
+        &bytes.proof_b,
+        &bytes.proof_c,
+        &public_inputs,
+        vk,
+    )
+    .map_err(|e| anyhow!("constructing the on-chain verifier: {e:?}"))?;
+    verifier.verify().map_err(|_| {
+        anyhow!(
+            "this proof does NOT verify against the committed membership verifying key, so the \
+             program would reject it on chain.\n\nThe usual cause is a proving-key mismatch: the \
+             deployed membership key came from the phase-2 ceremony, while `--zkey` still \
+             defaults to the dev key that `bash circuits/build.sh` produces. Prove under the \
+             ceremony key instead:\n\n    --proving-key ceremony/membership/key_NNNN.mpk\n\n\
+             See docs/CEREMONY.md. Refusing to emit rather than let you pay to submit a proof \
+             that cannot land."
+        )
+    })
+}
+
 pub(crate) fn membership_public_inputs(
     root: &Hash32,
     nullifier_hash: &Hash32,
@@ -1225,6 +1278,68 @@ mod tests {
         verifier.verify().expect(
             "the committed verifying key must accept a fresh proof over new inputs; if this \
              fails the proving key and the committed vk have drifted apart",
+        );
+    }
+
+    /// The guard's reason for existing: a proof made under the DEV zkey is
+    /// internally valid and verifies against its OWN key, so every check in the
+    /// prove pipeline passes. Only a comparison against the COMMITTED key, which
+    /// is now a ceremony output, catches it. Without this the user finds out by
+    /// paying to submit a transaction the program rejects.
+    ///
+    /// Asserts the failure is the specific mismatch, and that the message points
+    /// at the fix rather than just saying "verification failed".
+    #[test]
+    #[ignore = "requires the built r1cs/wasm/dev zkey (bash circuits/build.sh); set MIRROR_PROVE_LIVE=1"]
+    fn a_dev_key_proof_is_refused_before_it_can_be_emitted() {
+        if std::env::var("MIRROR_PROVE_LIVE").ok().as_deref() != Some("1") {
+            eprintln!("MIRROR_PROVE_LIVE != 1; skipping dev-key refusal test");
+            return;
+        }
+        let repo = repo_root();
+        let dev_zkey = repo.join("circuits/membership_final.zkey");
+        assert!(
+            dev_zkey.exists(),
+            "this test needs the dev zkey at {} (bash circuits/build.sh)",
+            dev_zkey.display()
+        );
+
+        // Prove the FIXTURE witness under the DEV key. The witness is fine; only
+        // the proving key is wrong for the deployed program.
+        let f = fixture_witness();
+        let (root, nullifier_hash, action_hash, epoch) =
+            (f.path.root, f.nullifier_hash, f.action_hash, f.epoch);
+        let input = membership_input_json(
+            &root,
+            &nullifier_hash,
+            &action_hash,
+            epoch,
+            &f.secret.0,
+            &f.path,
+        );
+        let expected = membership_public_inputs(&root, &nullifier_hash, &action_hash, epoch);
+        let wasm = repo.join("circuits/membership_js/membership.wasm");
+        let r1cs = repo.join("circuits/membership.r1cs");
+        let art = crate::prove_rust::Artifacts {
+            wasm: &wasm,
+            r1cs: &r1cs,
+            zkey: &dev_zkey,
+        };
+        let proof_bytes = crate::prove_rust::prove(&art, &input, &expected).expect(
+            "proving under the dev key must SUCCEED: the proof is valid, just for the wrong key",
+        );
+
+        // The guard is the only thing standing between that and a wasted fee.
+        let err = check_against_committed_vk(&proof_bytes, &root, &nullifier_hash, &action_hash, epoch)
+            .expect_err("a dev-key proof MUST be refused against the committed ceremony key");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("does NOT verify against the committed membership verifying key"),
+            "unexpected error text: {msg}"
+        );
+        assert!(
+            msg.contains("--proving-key"),
+            "the error must tell the user how to fix it, got: {msg}"
         );
     }
 
