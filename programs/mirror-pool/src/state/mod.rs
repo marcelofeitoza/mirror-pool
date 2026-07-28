@@ -14,6 +14,7 @@ pub mod nullifier;
 pub mod participant;
 pub mod pool;
 pub mod value_pool;
+pub mod vk_registry;
 
 /// Read a single byte at `offset`.
 pub(crate) fn read_u8(data: &[u8], offset: usize) -> Result<u8, ProgramError> {

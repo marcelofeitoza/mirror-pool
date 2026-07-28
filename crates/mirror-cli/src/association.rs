@@ -88,6 +88,11 @@ pub struct SettleZkAssociatedEmit {
     pub curator: String,
     /// The AssociationSet PDA, seeds `["assoc", pool, curator]`.
     pub association_pda: String,
+    /// The write-once, digest-pinned ASSOCIATION verifying-key registry PDA. The
+    /// program reads its verifying key from here rather than from its own code,
+    /// so a submitter MUST pass this account; it must already be installed
+    /// (`mirror-cli init-vk --circuit association`).
+    pub vk_registry: String,
     pub epoch: u64,
     pub amount: u64,
     pub root_hex: String,
@@ -273,6 +278,7 @@ pub fn run(opts: ProveAssociatedOpts) -> Result<SettleZkAssociatedEmit> {
         clock_sysvar: chain::CLOCK_SYSVAR_ID.to_string(),
         curator: opts.curator.to_string(),
         association_pda: assoc_pda.to_string(),
+        vk_registry: chain::vk_registry_pda(&program_id, wire::CIRCUIT_ASSOCIATION).to_string(),
         epoch: note.epoch,
         amount,
         root_hex: to_hex(&path.root),

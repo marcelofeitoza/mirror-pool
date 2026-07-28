@@ -1300,6 +1300,7 @@ dependencies = [
  "pinocchio",
  "pinocchio-log",
  "pinocchio-system",
+ "sha2 0.10.9",
  "solana-account",
  "solana-instruction",
  "solana-program-error",

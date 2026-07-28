@@ -433,6 +433,11 @@ pub mod wire {
         /// Opt-in compliance layer: settle one membership that ALSO carries a
         /// curated-set inclusion proof. See [`super::SETTLE_ZK_ASSOCIATED_LEN`].
         pub const SETTLE_ZK_ASSOCIATED: u8 = 10;
+        /// Write-once install of a digest-pinned verifying key into its
+        /// program-owned registry PDA (seeds `["vk", circuit_id]`). See
+        /// [`super::INIT_VK_HEADER_LEN`]. There is deliberately no update tag:
+        /// the key a verify path reads is immutable for the deployment's life.
+        pub const INIT_VK: u8 = 11;
     }
 
     /// INIT_POOL layout:
@@ -612,6 +617,111 @@ pub mod wire {
     const _: () = assert!(ASSOCIATION_N_PUBLIC_INPUTS == 5);
     const _: () = assert!(SETTLE_ZK_ASSOCIATED_LEN == 433);
     const _: () = assert!(PUBLIC_INPUT_LEN == 32);
+    // Digest-pinned verifying-key registry: pin the canonical encoding sizes in
+    // lockstep with the program's mirrored `wire` module.
+    const _: () = assert!(VK_IC_OFF == 449);
+    const _: () = assert!(vk_encoded_len(4) == 769);
+    const _: () = assert!(vk_encoded_len(5) == 833);
+    const _: () = assert!(vk_encoded_len(7) == 961);
+    const _: () = assert!(VK_MAX_ENCODED_LEN == 961);
+    const _: () = assert!(INIT_VK_HEADER_LEN == 2);
+    const _: () = assert!(VK_REGISTRY_HEADER_LEN == 4);
+
+    // --- Digest-pinned verifying-key registry (ADDITIVE). Kept byte-identical to
+    // the on-chain program's mirrored `wire` module. ---
+
+    /// Circuit ids. One write-once registry PDA per id (seeds
+    /// `["vk", circuit_id]`), each holding exactly the key whose SHA-256 the
+    /// program pins at compile time. MUST match the program's `wire::CIRCUIT_*`.
+    pub const CIRCUIT_MEMBERSHIP: u8 = 0;
+    pub const CIRCUIT_TRANSACTION: u8 = 1;
+    pub const CIRCUIT_ASSOCIATION: u8 = 2;
+
+    /// PDA seed prefix for a circuit's verifying-key registry.
+    pub const VK_REGISTRY_SEED: &[u8] = b"vk";
+
+    /// Bytes of registry-account header before the key: `[version][circuit_id]
+    /// [bump][reserved]`.
+    pub const VK_REGISTRY_HEADER_LEN: usize = 4;
+
+    /// Byte offsets inside the CANONICAL verifying-key encoding, the one
+    /// serialization the on-chain digest is taken over:
+    ///
+    /// ```text
+    /// [nr_pubinputs(1)][alpha_g1(64)][beta_g2(128)][gamma_g2(128)][delta_g2(128)]
+    ///   [ic(64 * (nr_pubinputs + 1))]
+    /// ```
+    ///
+    /// Big-endian and uncompressed, i.e. byte-identical to the `groth16-solana`
+    /// in-memory layout. MUST match the program's `wire::VK_*`.
+    pub const VK_NR_PUBINPUTS_OFF: usize = 0;
+    pub const VK_ALPHA_G1_OFF: usize = 1;
+    pub const VK_BETA_G2_OFF: usize = VK_ALPHA_G1_OFF + VK_G1_LEN;
+    pub const VK_GAMMA_G2_OFF: usize = VK_BETA_G2_OFF + VK_G2_LEN;
+    pub const VK_DELTA_G2_OFF: usize = VK_GAMMA_G2_OFF + VK_G2_LEN;
+    pub const VK_IC_OFF: usize = VK_DELTA_G2_OFF + VK_G2_LEN;
+
+    /// One uncompressed G1 point (`x || y`).
+    pub const VK_G1_LEN: usize = 64;
+    /// One uncompressed G2 point (`x_c1 || x_c0 || y_c1 || y_c0`).
+    pub const VK_G2_LEN: usize = 128;
+
+    /// Largest public-input count any pinned circuit uses (the JoinSplit's 7).
+    pub const VK_MAX_PUBLIC_INPUTS: usize = 7;
+
+    /// Length of the canonical encoding for a key with `nr_pubinputs` inputs.
+    /// MUST match the program's `wire::vk_encoded_len`.
+    pub const fn vk_encoded_len(nr_pubinputs: usize) -> usize {
+        VK_IC_OFF + VK_G1_LEN * (nr_pubinputs + 1)
+    }
+
+    /// Longest canonical encoding across the pinned circuits.
+    pub const VK_MAX_ENCODED_LEN: usize = vk_encoded_len(VK_MAX_PUBLIC_INPUTS);
+
+    /// INIT_VK layout: `[tag(1)][circuit_id(1)][vk(vk_encoded_len(n))]`, where
+    /// `n` is the circuit's pinned public-input count, so the body length is
+    /// fixed per circuit and any other length is malformed. The largest key
+    /// (the JoinSplit's 961 bytes) still fits a single 1232-byte transaction.
+    /// MUST match the program's `wire::INIT_VK_HEADER_LEN`.
+    pub const INIT_VK_HEADER_LEN: usize = 1 + 1;
+
+    /// Serialize a Groth16 verifying key into the canonical encoding above.
+    ///
+    /// Takes the parts rather than a verifier type so this crate stays free of
+    /// an on-chain-verifier dependency. `ic` must have `nr_pubinputs + 1`
+    /// entries; anything else is a caller bug and returns `None`.
+    pub fn encode_vk(
+        nr_pubinputs: usize,
+        alpha_g1: &[u8; VK_G1_LEN],
+        beta_g2: &[u8; VK_G2_LEN],
+        gamma_g2: &[u8; VK_G2_LEN],
+        delta_g2: &[u8; VK_G2_LEN],
+        ic: &[[u8; VK_G1_LEN]],
+    ) -> Option<Vec<u8>> {
+        if nr_pubinputs > VK_MAX_PUBLIC_INPUTS || ic.len() != nr_pubinputs + 1 {
+            return None;
+        }
+        let mut out = vec![0u8; vk_encoded_len(nr_pubinputs)];
+        out[VK_NR_PUBINPUTS_OFF] = nr_pubinputs as u8;
+        out[VK_ALPHA_G1_OFF..VK_ALPHA_G1_OFF + VK_G1_LEN].copy_from_slice(alpha_g1);
+        out[VK_BETA_G2_OFF..VK_BETA_G2_OFF + VK_G2_LEN].copy_from_slice(beta_g2);
+        out[VK_GAMMA_G2_OFF..VK_GAMMA_G2_OFF + VK_G2_LEN].copy_from_slice(gamma_g2);
+        out[VK_DELTA_G2_OFF..VK_DELTA_G2_OFF + VK_G2_LEN].copy_from_slice(delta_g2);
+        for (i, point) in ic.iter().enumerate() {
+            let off = VK_IC_OFF + i * VK_G1_LEN;
+            out[off..off + VK_G1_LEN].copy_from_slice(point);
+        }
+        Some(out)
+    }
+
+    /// Assemble `INIT_VK` instruction data for a circuit and a canonical key.
+    pub fn init_vk_data(circuit_id: u8, vk: &[u8]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(INIT_VK_HEADER_LEN + vk.len());
+        data.push(tag::INIT_VK);
+        data.push(circuit_id);
+        data.extend_from_slice(vk);
+        data
+    }
 }
 
 /// Encrypted output-notes and client-side discovery (host-side only). ADDITIVE:

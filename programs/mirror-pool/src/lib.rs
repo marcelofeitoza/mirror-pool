@@ -114,6 +114,15 @@ pub mod transaction_vk;
 /// the association path and vice versa.
 pub mod association_vk;
 
+/// Compile-time SHA-256 digests of the three vendored verifying keys
+/// (`src/vk_digest.rs`). This is the PIN: the verifying key a verify path
+/// actually uses is read from a program-owned registry account, and is accepted
+/// only if it hashes to the digest recorded here. Moving the key bytes into an
+/// account without pinning them would let whoever writes the account install a
+/// key whose trapdoor they hold; the digest is what makes the account model as
+/// safe as the compile-time constant it replaces. See `docs/VK_REGISTRY.md`.
+pub mod vk_digest;
+
 #[cfg(not(feature = "no-entrypoint"))]
 mod entrypoint;
 
@@ -157,6 +166,10 @@ pub mod wire {
         /// Opt-in compliance layer: settle one membership that ALSO carries a
         /// curated-set inclusion proof (see [`super::SETTLE_ZK_ASSOCIATED_LEN`]).
         pub const SETTLE_ZK_ASSOCIATED: u8 = 10;
+        /// Write-once install of a digest-pinned verifying key into its
+        /// program-owned registry PDA (see [`super::INIT_VK_HEADER_LEN`]).
+        /// There is deliberately NO matching update tag.
+        pub const INIT_VK: u8 = 11;
     }
 
     /// COMMIT layout: `[tag(1)][commitment(32)]`.
@@ -292,6 +305,61 @@ pub mod wire {
     /// public inputs, with `associationRoot` appended.
     pub const SETTLE_ZK_ASSOCIATED_LEN: usize = SETTLE_ZK_LEN + PUBLIC_INPUT_LEN;
 
+    // --- Digest-pinned verifying-key registry (ADDITIVE). REDEFINED here for the
+    // same reason the rest of this module is, and pinned by the compile-time
+    // asserts below in lockstep with `mirror_core::wire`. ---
+
+    /// Circuit ids. One registry PDA per id (seeds `["vk", circuit_id]`), each
+    /// holding exactly the key whose digest this program pins at compile time.
+    /// MUST match `mirror_core::wire::CIRCUIT_*`.
+    pub const CIRCUIT_MEMBERSHIP: u8 = 0;
+    pub const CIRCUIT_TRANSACTION: u8 = 1;
+    pub const CIRCUIT_ASSOCIATION: u8 = 2;
+
+    /// Byte offsets inside the CANONICAL verifying-key encoding, the single
+    /// serialization the digest is taken over and the registry account stores:
+    ///
+    /// ```text
+    /// [nr_pubinputs(1)][alpha_g1(64)][beta_g2(128)][gamma_g2(128)][delta_g2(128)]
+    ///   [ic(64 * (nr_pubinputs + 1))]
+    /// ```
+    ///
+    /// Big-endian, uncompressed, byte-identical to the `groth16-solana` in-memory
+    /// layout. MUST match `mirror_core::wire::VK_*`.
+    pub const VK_NR_PUBINPUTS_OFF: usize = 0;
+    pub const VK_ALPHA_G1_OFF: usize = 1;
+    pub const VK_BETA_G2_OFF: usize = VK_ALPHA_G1_OFF + G1_LEN;
+    pub const VK_GAMMA_G2_OFF: usize = VK_BETA_G2_OFF + G2_LEN;
+    pub const VK_DELTA_G2_OFF: usize = VK_GAMMA_G2_OFF + G2_LEN;
+    pub const VK_IC_OFF: usize = VK_DELTA_G2_OFF + G2_LEN;
+
+    /// One uncompressed G1 point (`x || y`).
+    pub const G1_LEN: usize = 64;
+    /// One uncompressed G2 point (`x_c1 || x_c0 || y_c1 || y_c0`).
+    pub const G2_LEN: usize = 128;
+
+    /// Largest public-input count any pinned circuit uses (the JoinSplit's 7).
+    /// Bounds the fixed-size decode buffer, so the decoder never allocates and
+    /// never sizes anything from untrusted account data.
+    pub const VK_MAX_PUBLIC_INPUTS: usize = 7;
+    /// Largest IC vector (`nr_pubinputs + 1`).
+    pub const VK_MAX_IC: usize = VK_MAX_PUBLIC_INPUTS + 1;
+
+    /// Length of the canonical encoding for a key with `nr_pubinputs` inputs.
+    /// MUST match `mirror_core::wire::vk_encoded_len`.
+    pub const fn vk_encoded_len(nr_pubinputs: usize) -> usize {
+        VK_IC_OFF + G1_LEN * (nr_pubinputs + 1)
+    }
+
+    /// Longest canonical encoding across the pinned circuits.
+    pub const VK_MAX_ENCODED_LEN: usize = vk_encoded_len(VK_MAX_PUBLIC_INPUTS);
+
+    /// INIT_VK layout: `[tag(1)][circuit_id(1)][vk(vk_encoded_len(n))]`, where
+    /// `n` is the circuit's pinned public-input count. The body length is
+    /// therefore fixed per circuit, and any other length is malformed.
+    /// MUST match `mirror_core::wire::INIT_VK_HEADER_LEN`.
+    pub const INIT_VK_HEADER_LEN: usize = 1 + 1;
+
     /// Hard upper bound on nullifiers per SETTLE_EPOCH call. Bounds the
     /// `n * 32` length arithmetic (no overflow) and keeps a single settle
     /// inside transaction and compute limits. Larger epochs settle in
@@ -323,6 +391,16 @@ pub mod wire {
     const _: () = assert!(UPDATE_ASSOCIATION_ROOT_LEN == 33);
     const _: () = assert!(ASSOCIATION_N_PUBLIC_INPUTS == 5);
     const _: () = assert!(SETTLE_ZK_ASSOCIATED_LEN == 433);
+    // Digest-pinned VK registry: pin the canonical encoding sizes in lockstep
+    // with `mirror_core::wire` (which asserts the same numbers). The 769 is the
+    // membership key's encoding; a blob of any other length is rejected on shape
+    // alone, before the digest is even computed.
+    const _: () = assert!(VK_IC_OFF == 449);
+    const _: () = assert!(vk_encoded_len(4) == 769);
+    const _: () = assert!(vk_encoded_len(5) == 833);
+    const _: () = assert!(vk_encoded_len(7) == 961);
+    const _: () = assert!(VK_MAX_ENCODED_LEN == 961);
+    const _: () = assert!(INIT_VK_HEADER_LEN == 2);
     const _: () = assert!(
         SETTLE_ZK_ASSOCIATED_LEN
             == 1 + 8
@@ -432,6 +510,21 @@ pub enum MirrorPoolError {
     /// or it has aged out behind newer publications. Fail closed: no nullifier is
     /// created and no escrow moves.
     AssociationRootNotKnown = 27,
+    /// INIT_VK on a verifying-key registry PDA that is already written. The
+    /// registry is WRITE-ONCE: there is no update instruction, and re-running
+    /// init over a live account fails here rather than overwriting the key.
+    VkRegistryAlreadyInitialized = 28,
+    /// A verify path was handed a verifying-key registry account that is missing,
+    /// not program-owned, not the canonical registry PDA for the circuit it
+    /// claims, the wrong size, or not a v1 registry. Fail closed: no proof is
+    /// verified against an account this program cannot vouch for.
+    VkRegistryNotInitialized = 29,
+    /// The verifying key does not hash to the digest this program pins at compile
+    /// time for that circuit. This is the check that makes the registry safe:
+    /// an arbitrary key blob (including a well-formed one whose trapdoor the
+    /// submitter holds) can be neither installed at INIT_VK nor used at verify.
+    /// Also returned for an unknown circuit id, which is pinned to nothing.
+    VkNotApproved = 30,
     /// Skeleton guard: reserved for handlers whose logic has not landed yet.
     /// Unused in v1 (all five instructions are implemented) but kept so the
     /// off-chain error mapping stays stable.

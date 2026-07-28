@@ -46,6 +46,10 @@ pub const VALUE_NULLIFIER_SEED: &[u8] = b"vnf";
 /// byte-identical to the on-chain `pda` module.
 pub const ASSOCIATION_SEED: &[u8] = b"assoc";
 
+/// A circuit's write-once, digest-pinned verifying-key registry seed prefix,
+/// byte-identical to the on-chain `pda` module.
+pub const VK_REGISTRY_SEED: &[u8] = wire::VK_REGISTRY_SEED;
+
 /// Derive the Pool PDA: seeds `[b"pool", authority]`.
 pub fn pool_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[POOL_SEED, authority.as_ref()], program_id).0
@@ -84,6 +88,15 @@ pub fn association_pda(program_id: &Pubkey, pool: &Pubkey, curator: &Pubkey) -> 
         program_id,
     )
     .0
+}
+
+/// Derive a circuit's verifying-key registry PDA: seeds `[b"vk", circuit_id]`.
+///
+/// The namespace is global rather than per-pool: the registry's contents are
+/// pinned to a digest the program carries in its bytecode, so there is exactly
+/// one legal byte string per circuit and a per-pool copy would only add rent.
+pub fn vk_registry_pda(program_id: &Pubkey, circuit_id: u8) -> Pubkey {
+    Pubkey::find_program_address(&[VK_REGISTRY_SEED, &[circuit_id]], program_id).0
 }
 
 /// Derive the ValuePool PDA: seeds `[b"vpool", authority]`.
@@ -571,6 +584,30 @@ pub fn init_pool_ix(
             AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
         ],
         data,
+    }
+}
+
+/// Build the `InitVk` instruction: install a circuit's digest-pinned verifying
+/// key into its registry PDA, ONCE.
+///
+/// Body: `[circuit_id(1)][vk(vk_encoded_len(n))]`, the canonical encoding
+/// produced by [`mirror_core::wire::encode_vk`]. Accounts (see
+/// `instructions::init_vk`): registry(w), payer(signer, w), system_program.
+///
+/// Installation is permissionless and that is safe: the caller does not choose
+/// the key. The program accepts the bytes only if they hash to the digest it
+/// pins at compile time, so all a caller can do is pay rent to publish the one
+/// key the bytecode already committed to. Once written the registry cannot be
+/// changed - there is no update instruction.
+pub fn init_vk_ix(program_id: &Pubkey, payer: &Pubkey, circuit_id: u8, vk: &[u8]) -> Instruction {
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(vk_registry_pda(program_id, circuit_id), false),
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+        ],
+        data: wire::init_vk_data(circuit_id, vk),
     }
 }
 

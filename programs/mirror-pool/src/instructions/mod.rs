@@ -19,6 +19,7 @@ pub mod commit_deposit;
 pub mod init_association;
 pub mod init_pool;
 pub mod init_value_pool;
+pub mod init_vk;
 pub mod settle_epoch;
 pub mod settle_zk;
 pub mod settle_zk_associated;

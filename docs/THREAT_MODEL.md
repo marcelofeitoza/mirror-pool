@@ -507,7 +507,11 @@ extends beyond the behavioral "not for funds" theme.
   that is committed and deployed came from the dev setup in
   `circuits/build_transaction.sh`, whose phase-2 entropy is a hard-coded public
   string, so its toxic waste is public. It MUST NOT secure real value until a real
-  ceremony output is exported and the program is redeployed with it. This is a
+  ceremony output is exported and the program is redeployed with it. Note that
+  moving the keys into write-once, digest-pinned registry accounts
+  (`docs/VK_REGISTRY.md`) does NOT touch this: it makes the key in force publicly
+  readable and unswappable, which is orthogonal to whether the setup that
+  produced it was sound. A pinned bad key is faithfully pinned. This is a
   soundness caveat, not a confidentiality one, but it is disclosed here rather than
   buried.
 

@@ -51,6 +51,7 @@ mod tree;
 mod util;
 mod value;
 mod value_note;
+mod vk;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -109,6 +110,11 @@ struct Cli {
 enum Command {
     /// (admin) Create a pool and fix its config forever, then print the Pool PDA.
     InitPool(InitPoolArgs),
+    /// (deployment, permissionless) Publish a circuit's verifying key into its
+    /// write-once registry PDA. One call per circuit per deployment; there is no
+    /// update instruction and nothing to choose - the program accepts only the
+    /// key whose digest it pins at compile time.
+    InitVk(InitVkArgs),
     /// (crowd path) Commit an action into the current epoch and save the note.
     Commit(CommitArgs),
     /// (ZK opt-in) Escrow lamports + commit a transfer to a fresh recipient.
@@ -375,6 +381,30 @@ struct ScanArgs {
     /// Directory to save recovered spendable notes into (gitignored).
     #[arg(long, default_value = DEFAULT_NOTE_DIR)]
     note_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct InitVkArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+    /// Which circuit's key to publish: membership, transaction, or association.
+    /// Publish every circuit the deployment will actually use; a verify path
+    /// whose registry is missing fails closed.
+    #[arg(long)]
+    circuit: String,
+    /// Keypair file that funds the registry PDA's rent. It signs, but it does
+    /// NOT get to choose the key: the program hashes the bytes and refuses
+    /// anything but the one key its bytecode pins.
+    #[arg(long)]
+    payer: PathBuf,
+    /// Print the canonical encoding's digest and address and exit, without
+    /// submitting anything. Useful for checking a deployment out of band.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -771,6 +801,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::InitPool(args) => run_init_pool(args),
+        Command::InitVk(args) => run_init_vk(args),
         Command::Commit(args) => run_commit(args),
         Command::DepositCommit(args) => run_deposit_commit(args),
         Command::Prove(args) => run_prove(args),
@@ -835,6 +866,40 @@ fn run_init_pool(args: InitPoolArgs) -> Result<()> {
     println!("k_floor:        {}", args.k_floor);
     println!("entry_fee:      {} lamports", args.entry_fee);
     println!("reward_bps:     {}", args.reward_bps);
+    println!("signature:      {sig}");
+    Ok(())
+}
+
+/// Publish a circuit's verifying key into its write-once registry PDA.
+///
+/// This is a PUBLICATION step, not a configuration step. There is exactly one
+/// byte string the program will accept per circuit (the canonical encoding of
+/// the key its `vk_digest` constants commit to), the caller cannot choose it,
+/// and once written no instruction in the program can change it. What the step
+/// buys is that the key in force becomes readable straight off the chain
+/// instead of only by disassembling the program. See `docs/VK_REGISTRY.md`.
+fn run_init_vk(args: InitVkArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let circuit_id = vk::circuit_id(&args.circuit)?;
+    let canonical = vk::canonical(circuit_id)?;
+    let registry = chain::vk_registry_pda(&program_id, circuit_id);
+    let digest = vk::digest(&canonical);
+
+    println!("circuit:        {} (id {circuit_id})", args.circuit);
+    println!("registry PDA:   {registry}");
+    println!("vk bytes:       {}", canonical.len());
+    println!("sha256(vk):     {digest}");
+    if args.dry_run {
+        println!("dry run: nothing submitted");
+        return Ok(());
+    }
+
+    let payer_kp = chain::read_keypair(&args.payer)?;
+    let ix = chain::init_vk_ix(&program_id, &payer_kp.pubkey(), circuit_id, &canonical);
+    let chain = Chain::new(args.rpc_url);
+    let sig = chain
+        .submit(&[ix], &[&payer_kp])
+        .context("submitting InitVk")?;
     println!("signature:      {sig}");
     Ok(())
 }

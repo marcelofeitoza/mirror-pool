@@ -131,6 +131,11 @@ pub struct SettleZkEmit {
     pub recipient: String,
     pub system_program: String,
     pub clock_sysvar: String,
+    /// The write-once, digest-pinned MEMBERSHIP verifying-key registry PDA. The
+    /// program reads its verifying key from here rather than from its own code,
+    /// so a submitter MUST pass this account; it must already be installed
+    /// (`mirror-cli init-vk --circuit membership`).
+    pub vk_registry: String,
     pub epoch: u64,
     pub amount: u64,
     pub root_hex: String,
@@ -311,6 +316,7 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
         recipient: recipient.to_string(),
         system_program: chain::SYSTEM_PROGRAM_ID.to_string(),
         clock_sysvar: chain::CLOCK_SYSVAR_ID.to_string(),
+        vk_registry: chain::vk_registry_pda(&program_id, wire::CIRCUIT_MEMBERSHIP).to_string(),
         epoch: note.epoch,
         amount,
         root_hex: to_hex(&path.root),

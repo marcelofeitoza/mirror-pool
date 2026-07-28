@@ -414,6 +414,11 @@ mod tests {
                 account(SYSTEM_PROGRAM_ID.to_string(), false, false),
                 account(SYSTEM_PROGRAM_ID.to_string(), false, false),
                 account(Pubkey::new_from_array([0x88; 32]).to_string(), false, true),
+                // The write-once, digest-pinned JoinSplit verifying-key registry
+                // the on-chain Transact now reads its key from. Readonly, never
+                // a signer, and always last, so the index-based checks above are
+                // unaffected.
+                account(Pubkey::new_from_array([0x99; 32]).to_string(), false, false),
             ],
         })
     }

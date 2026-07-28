@@ -84,6 +84,8 @@
 //!                              only checks the binding (see above)
 //! 4. system_program            for the create-account CPI
 //! 5. clock          sysvar     current slot for the window-closed gate
+//! 6. vk_registry    readonly   write-once, digest-pinned membership verifying
+//!                              key; seeds [b"vk", CIRCUIT_MEMBERSHIP]
 //! ```
 //!
 //! Checks run IN ORDER and fail closed: (1) authority is a signer and equals
@@ -91,9 +93,21 @@
 //! input; (3) the epoch window has closed; (4) `root` is a known recent root;
 //! (5) the recomputed `actionHash` from (recipient, amount) equals the proof's
 //! `actionHash` so the relay cannot redirect the escrow; (6) the nullifier PDA
-//! does not yet exist (created here; NullifierSpent on replay); (7) the Groth16
-//! proof verifies; then (8) the action executes (transfer the escrow to the
-//! recipient).
+//! does not yet exist (created here; NullifierSpent on replay); (7) the verifying
+//! key is loaded from its registry account and re-pinned to the compile-time
+//! digest, and the Groth16 proof verifies under it; then (8) the action executes
+//! (transfer the escrow to the recipient).
+//!
+//! # Where the verifying key comes from
+//!
+//! Account 6, not this program's `.rodata`. It is a program-owned PDA that
+//! `INIT_VK` filled ONCE and that no instruction can rewrite, and step (7)
+//! re-checks its SHA-256 against [`crate::vk_digest::MEMBERSHIP_VK_SHA256`]
+//! before the bytes reach the verifier. The point of the account is that the key
+//! in force is readable on-chain by anybody; the point of the digest is that
+//! reading it is all anybody can do with it. Without that second half, moving a
+//! verifying key into account data hands the root of trust to whoever can write
+//! the account. See `docs/VK_REGISTRY.md`.
 //!
 //! Extension note: swap/stake-from-pool are the same pattern with a different
 //! step (8) - execute a different action from the pool authority via CPI
@@ -101,7 +115,6 @@
 //! transfer. Those are documented follow-ups; the anonymity mechanics
 //! (membership proof + nullifier + recipient binding) are identical.
 
-use groth16_solana::groth16::Groth16Verifier;
 use pinocchio::{
     cpi::Seed,
     error::ProgramError,
@@ -112,8 +125,7 @@ use pinocchio_log::log;
 
 use crate::{
     action, pda,
-    state::{nullifier, pool},
-    vk::VERIFYINGKEY,
+    state::{nullifier, pool, vk_registry},
     wire, MirrorPoolError,
 };
 
@@ -168,7 +180,7 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         .try_into()
         .map_err(|_| MirrorPoolError::MalformedInstruction)?;
 
-    let [pool_account, authority, nullifier_account, recipient, _system_program, clock_account, ..] =
+    let [pool_account, authority, nullifier_account, recipient, _system_program, clock_account, vk_account, ..] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -280,14 +292,23 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     // (7) Verify the Groth16 membership proof against the fixed public-input
     // order [root, nullifierHash, actionHash, epoch]. `verify()` also rejects any
     // public input that is not a canonical BN254 scalar.
+    //
+    // The verifying key is READ FROM THE CHAIN, not from this program's code:
+    // `vk_registry::verify_pinned` loads the write-once VkRegistry PDA and re-checks
+    // its contents against the digest pinned in `crate::vk_digest` before the key
+    // touches the verifier. So the key in force is publicly readable, and is
+    // still exactly the key the bytecode committed to.
     let public_inputs: [[u8; 32]; wire::N_PUBLIC_INPUTS] =
         [root, nullifier_hash, action_hash, epoch_pub];
-    let mut verifier =
-        Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public_inputs, &VERIFYINGKEY)
-            .map_err(|_| MirrorPoolError::ProofVerificationFailed)?;
-    verifier
-        .verify()
-        .map_err(|_| MirrorPoolError::ProofVerificationFailed)?;
+    vk_registry::verify_pinned(
+        vk_account,
+        program_id,
+        wire::CIRCUIT_MEMBERSHIP,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &public_inputs,
+    )?;
 
     // (8) Execute the action: transfer the escrow from the pool to the bound
     // recipient. The pool is program-owned, so move lamports directly (a system

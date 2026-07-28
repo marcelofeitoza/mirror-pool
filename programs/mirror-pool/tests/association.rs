@@ -101,6 +101,14 @@ fn circuit_empty_root() -> [u8; 32] {
     out
 }
 
+/// Shared helpers for the write-once, digest-pinned verifying-key registry (see
+/// `fixtures/vk_install.rs`). Every settle path now reads its verifying key from
+/// a registry account, so every environment installs one first.
+#[allow(dead_code)]
+mod vk_fixture {
+    include!("fixtures/vk_install.rs");
+}
+
 /// A tiny stateful harness (the same shape `integration.rs` uses).
 struct Env {
     mollusk: Mollusk,
@@ -120,18 +128,39 @@ impl Env {
         let mollusk = Mollusk::new(&program_id, "mirror_pool");
         let system_id = keyed_account_for_system_program().0;
         let clock_id = mollusk.sysvars.keyed_account_for_clock_sysvar().0;
-        Env {
+        let mut env = Env {
             mollusk,
             program_id,
             system_id,
             clock_id,
             accounts: HashMap::new(),
-        }
+        };
+        // Every verifying instruction reads its key from a registry account, so
+        // every environment installs the pinned key(s) it needs up front.
+        env.install_vk(mirror_pool::wire::CIRCUIT_MEMBERSHIP);
+        env.install_vk(mirror_pool::wire::CIRCUIT_ASSOCIATION);
+        env
     }
 
     fn fund(&mut self, key: Pubkey, lamports: u64) {
         self.accounts
             .insert(key, Account::new(lamports, 0, &self.system_id));
+    }
+
+    /// Canonical PDA of a circuit's write-once verifying-key registry.
+    fn vk_registry_pda(&self, circuit_id: u8) -> Pubkey {
+        vk_fixture::vk_registry_pda(&self.program_id, circuit_id)
+    }
+
+    /// Install a circuit's pinned verifying key through the REAL `INIT_VK`
+    /// instruction, so every settle test also exercises the install path.
+    fn install_vk(&mut self, circuit_id: u8) -> Pubkey {
+        let payer = Pubkey::new_unique();
+        self.fund(payer, SOL);
+        let vk = vk_fixture::canonical_vk(circuit_id);
+        let ix = vk_fixture::init_vk_ix(&self.program_id, &self.system_id, &payer, circuit_id, &vk);
+        self.process(&ix, &[Check::success()]);
+        self.vk_registry_pda(circuit_id)
     }
 
     fn get(&self, key: &Pubkey) -> Account {
@@ -265,6 +294,11 @@ impl Env {
                 AccountMeta::new_readonly(self.system_id, false),
                 AccountMeta::new_readonly(self.clock_id, false),
                 AccountMeta::new_readonly(*assoc, false),
+                // The write-once, digest-pinned ASSOCIATION verifying key.
+                AccountMeta::new_readonly(
+                    self.vk_registry_pda(mirror_pool::wire::CIRCUIT_ASSOCIATION),
+                    false,
+                ),
             ],
             data,
         }
@@ -329,6 +363,11 @@ impl Env {
                 AccountMeta::new(*recipient, false),
                 AccountMeta::new_readonly(self.system_id, false),
                 AccountMeta::new_readonly(self.clock_id, false),
+                // The write-once, digest-pinned MEMBERSHIP verifying key.
+                AccountMeta::new_readonly(
+                    self.vk_registry_pda(mirror_pool::wire::CIRCUIT_MEMBERSHIP),
+                    false,
+                ),
             ],
             data,
         }
@@ -1183,4 +1222,121 @@ fn settle_zk_associated_unknown_pool_root_fails() {
         &fixture::PUBLIC_INPUTS,
     );
     env.process(&ix, &[Check::err(custom(MirrorPoolError::RootNotKnown))]);
+}
+
+// ---------------------------------------------------------------------------
+// The ASSOCIATION verifying key is read from the write-once, digest-pinned
+// registry, and the pin is re-checked on EVERY settle
+// ---------------------------------------------------------------------------
+
+/// The registry contents changed after install, by any means whatsoever. The
+/// per-verify digest catches it even though the account is still program-owned,
+/// still at the canonical address, still the right size and version.
+#[test]
+fn settle_zk_associated_rejects_a_tampered_vk_registry() {
+    let mut env = Env::new();
+    let registry = env.vk_registry_pda(mirror_pool::wire::CIRCUIT_ASSOCIATION);
+    let mut account = env.get(&registry);
+    account.data[mirror_pool::state::vk_registry::VK_OFF + mirror_pool::wire::VK_DELTA_G2_OFF] ^=
+        0x80;
+    env.accounts.insert(registry, account);
+
+    let (authority, pool, _curator, assoc) = setup_associated(&mut env);
+    let recipient = zk_recipient();
+    env.warp(120);
+    let pool_start = env.get(&pool).lamports;
+    let nf = fixture::PUBLIC_INPUTS[1];
+    let nf_pda = env.nf_pda(&pool, ZK_EPOCH, &nf);
+    let ix = env.settle_assoc_ix(
+        &pool,
+        &authority,
+        &nf_pda,
+        &recipient,
+        &assoc,
+        ZK_EPOCH,
+        ZK_AMOUNT,
+        &fixture::PUBLIC_INPUTS,
+    );
+    env.process(&ix, &[Check::err(custom(MirrorPoolError::VkNotApproved))]);
+
+    // Fail closed: no escrow moves and no nullifier is recorded.
+    assert_eq!(env.get(&recipient).lamports, 0);
+    assert_eq!(env.get(&pool).lamports, pool_start);
+    assert_eq!(env.get(&nf_pda).data.len(), 0);
+}
+
+/// The strongest form of the attack: a program-owned, correctly sized,
+/// correctly versioned registry at the canonical address, holding a key that
+/// passes every FORMAT check (same length, same `nr_pubinputs`, same `ic_len`,
+/// real BN254 points) and whose trapdoor the attacker holds. Format-only
+/// validation accepts it. The digest pin does not.
+#[test]
+fn settle_zk_associated_rejects_a_well_formed_foreign_key() {
+    let mut env = Env::new();
+    let registry = env.vk_registry_pda(mirror_pool::wire::CIRCUIT_ASSOCIATION);
+
+    let mut foreign = vk_fixture::canonical_vk(mirror_pool::wire::CIRCUIT_ASSOCIATION);
+    let beta = foreign[mirror_pool::wire::VK_BETA_G2_OFF
+        ..mirror_pool::wire::VK_BETA_G2_OFF + mirror_pool::wire::G2_LEN]
+        .to_vec();
+    foreign[mirror_pool::wire::VK_DELTA_G2_OFF
+        ..mirror_pool::wire::VK_DELTA_G2_OFF + mirror_pool::wire::G2_LEN]
+        .copy_from_slice(&beta);
+    assert_eq!(foreign.len(), 833, "same length as the pinned key");
+    assert_eq!(
+        foreign[mirror_pool::wire::VK_NR_PUBINPUTS_OFF], 5,
+        "same nr_pubinputs, so the same ic_len"
+    );
+
+    let mut account = env.get(&registry);
+    account.data[mirror_pool::state::vk_registry::VK_OFF..].copy_from_slice(&foreign);
+    env.accounts.insert(registry, account);
+
+    let (authority, pool, _curator, assoc) = setup_associated(&mut env);
+    let recipient = zk_recipient();
+    env.warp(120);
+    let nf = fixture::PUBLIC_INPUTS[1];
+    let nf_pda = env.nf_pda(&pool, ZK_EPOCH, &nf);
+    let ix = env.settle_assoc_ix(
+        &pool,
+        &authority,
+        &nf_pda,
+        &recipient,
+        &assoc,
+        ZK_EPOCH,
+        ZK_AMOUNT,
+        &fixture::PUBLIC_INPUTS,
+    );
+    env.process(&ix, &[Check::err(custom(MirrorPoolError::VkNotApproved))]);
+    assert_eq!(env.get(&recipient).lamports, 0);
+}
+
+/// Substituting the MEMBERSHIP registry - a genuine, pinned, ceremony-produced
+/// key - fails on the PDA derivation, because the registry PDA is keyed by
+/// circuit id. The compliance path can only ever verify under the association
+/// key, exactly as when that key was a compile-time constant.
+#[test]
+fn settle_zk_associated_rejects_the_membership_registry() {
+    let mut env = Env::new();
+    let membership = env.vk_registry_pda(mirror_pool::wire::CIRCUIT_MEMBERSHIP);
+
+    let (authority, pool, _curator, assoc) = setup_associated(&mut env);
+    let recipient = zk_recipient();
+    env.warp(120);
+    let nf = fixture::PUBLIC_INPUTS[1];
+    let nf_pda = env.nf_pda(&pool, ZK_EPOCH, &nf);
+    let mut ix = env.settle_assoc_ix(
+        &pool,
+        &authority,
+        &nf_pda,
+        &recipient,
+        &assoc,
+        ZK_EPOCH,
+        ZK_AMOUNT,
+        &fixture::PUBLIC_INPUTS,
+    );
+    let last = ix.accounts.len() - 1;
+    ix.accounts[last] = AccountMeta::new_readonly(membership, false);
+    env.process(&ix, &[Check::err(custom(MirrorPoolError::InvalidPda))]);
+    assert_eq!(env.get(&recipient).lamports, 0);
 }

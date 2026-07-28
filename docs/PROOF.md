@@ -4,6 +4,22 @@ This file has two independent, honestly-labeled proofs of the same program:
 a **public Solana devnet deployment** (top, browser-verifiable on the Solana
 Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
 
+> **HISTORICAL: the deployed program no longer matches this source tree.** Every
+> verifying instruction (`SettleZk`, `SettleZkAssociated`, `Transact`) now reads
+> its Groth16 verifying key from a write-once, digest-pinned account instead of
+> from a compile-time constant, and the program gained an `InitVk` instruction to
+> publish those keys ([`VK_REGISTRY.md`](VK_REGISTRY.md)). The devnet program id
+> below was deployed BEFORE that change: its bytecode has no `InitVk` and no
+> registry, its settle instructions take one fewer account, and the claim above
+> that the on-chain bytes hash-match a local build of this repo is no longer
+> true. Every run recorded in this file - behavioral 17/17, confidential 25/25,
+> funding 25/25 - was run against that earlier program and is left exactly as
+> captured. It is still valid evidence for what it was evidence of (the pool's
+> behavioral and confidential mechanics on a live public cluster); it is NOT
+> evidence about the verifying-key registry. The program was NOT redeployed for
+> this change, and the soak drivers, though updated to publish the keys and pass
+> the accounts, have not been re-run against a public cluster since.
+
 > **These are records of runs, not descriptions of the current tree.** Both runs
 > predate the move to in-process pure-Rust Groth16 proving, so several assertion
 > rows below say the proof was generated and verified by `snarkjs`. That is what

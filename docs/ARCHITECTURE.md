@@ -114,6 +114,13 @@ program's `wire` module (SBF parser) with compile-time size asserts on both side
 | `8` | `InitAssociation` | any curator | create a curator's AssociationSet PDA for a pool (permissionless; seeds include the curator so curators compete) |
 | `9` | `UpdateAssociationRoot` | that curator | publish a new curated-set Merkle root into the set's 8-root ring |
 | `10` | `SettleZkAssociated` | rotating relay | as `SettleZk`, but verifies the ASSOCIATION circuit (5 public inputs, its own verifying key) so the settlement additionally proves curated-set inclusion; shares the `SettleZk` nullifier namespace |
+| `11` | `InitVk` | anyone, once | publish a circuit's Groth16 verifying key into its write-once registry PDA. Permissionless because the caller cannot CHOOSE the key: the bytes are accepted only if they hash to the SHA-256 the program pins at compile time. There is deliberately NO update tag, and every verify re-checks the pin (`docs/VK_REGISTRY.md`) |
+
+Tag `11` is where every verifying key now lives. `SettleZk`, `SettleZkAssociated`
+and `Transact` each read theirs from a program-owned account rather than from a
+compile-time constant, and each re-hashes it against the pinned digest before it
+reaches the verifier, so the key in force is publicly readable while the set of
+keys the program can ever accept stays fixed by its bytecode.
 
 Tags `8`-`10` are the OPT-IN compliance layer (Privacy-Pools-style association
 sets). They are strictly additive: `SettleZk` is unchanged and never reads an
@@ -229,8 +236,10 @@ a signer and equals `pool.authority`; (2) the `u64` epoch header equals the
 is one of the pool's recent roots (root-history ring); (5) the recomputed
 `actionHash` from the on-chain `(recipient, amount)` equals the proof's
 `actionHash`, so a relay cannot redirect the escrow; (6) the Nullifier PDA does
-not yet exist (created here, else `NullifierSpent`); (7) the Groth16 proof verifies
-against the vendored verifying key; (8) the escrow is released to the recipient by
+not yet exist (created here, else `NullifierSpent`); (7) the verifying key is
+loaded from its write-once registry account, re-checked against the SHA-256 the
+program pins at compile time, and the Groth16 proof verifies under it
+(`docs/VK_REGISTRY.md`); (8) the escrow is released to the recipient by
 a direct lamport move (the pool is program-owned), keeping the pool rent-exempt.
 One membership settles per call; the coordinator batches independent memberships
 across calls. Swap-from-pool and stake-from-pool are the identical pattern with a
@@ -539,7 +548,12 @@ against the circuit's own `actionHash`.
 
 `SettleZk` verifies the membership proof with `groth16-solana` (v0.2.0 byte
 layout) via the `alt_bn128` (BN254) pairing syscalls. The verifying key is
-vendored into the program from `circuits/artifacts/vk.rs`; proof A is pre-negated
+vendored from `circuits/artifacts/vk.rs`, but no verify path reads it from the
+program's code: it is published once into a program-owned, write-once registry
+PDA and re-checked on every verify against a SHA-256 the bytecode pins, so the
+set of keys the program can ever accept is still fixed by its bytecode while the
+key in force is readable straight off the chain. The tradeoff, including the
+measured per-verify compute cost, is in `docs/VK_REGISTRY.md`. Proof A is pre-negated
 in the emitted layout so the on-chain path needs no ark serialization at runtime.
 Verification is 4 public inputs in the fixed order and runs in under about 200K
 compute units, comfortably inside a transaction's CU budget alongside the

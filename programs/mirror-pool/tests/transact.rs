@@ -104,6 +104,14 @@ fn circuit_empty_root() -> [u8; 32] {
     out
 }
 
+/// Shared helpers for the write-once, digest-pinned verifying-key registry (see
+/// `fixtures/vk_install.rs`). Every settle path now reads its verifying key from
+/// a registry account, so every environment installs one first.
+#[allow(dead_code)]
+mod vk_fixture {
+    include!("fixtures/vk_install.rs");
+}
+
 /// A tiny stateful harness (mirrors `integration.rs`'s `Env`).
 struct Env {
     mollusk: Mollusk,
@@ -123,18 +131,38 @@ impl Env {
         let mollusk = Mollusk::new(&program_id, "mirror_pool");
         let system_id = keyed_account_for_system_program().0;
         let clock_id = mollusk.sysvars.keyed_account_for_clock_sysvar().0;
-        Env {
+        let mut env = Env {
             mollusk,
             program_id,
             system_id,
             clock_id,
             accounts: HashMap::new(),
-        }
+        };
+        // TRANSACT reads its verifying key from a registry account, so every
+        // environment installs the pinned JoinSplit key up front.
+        env.install_vk(mirror_pool::wire::CIRCUIT_TRANSACTION);
+        env
     }
 
     fn fund(&mut self, key: Pubkey, lamports: u64) {
         self.accounts
             .insert(key, Account::new(lamports, 0, &self.system_id));
+    }
+
+    /// Canonical PDA of a circuit's write-once verifying-key registry.
+    fn vk_registry_pda(&self, circuit_id: u8) -> Pubkey {
+        vk_fixture::vk_registry_pda(&self.program_id, circuit_id)
+    }
+
+    /// Install a circuit's pinned verifying key through the REAL `INIT_VK`
+    /// instruction, so every settle test also exercises the install path.
+    fn install_vk(&mut self, circuit_id: u8) -> Pubkey {
+        let payer = Pubkey::new_unique();
+        self.fund(payer, SOL);
+        let vk = vk_fixture::canonical_vk(circuit_id);
+        let ix = vk_fixture::init_vk_ix(&self.program_id, &self.system_id, &payer, circuit_id, &vk);
+        self.process(&ix, &[Check::success()]);
+        self.vk_registry_pda(circuit_id)
     }
 
     fn get(&self, key: &Pubkey) -> Account {
@@ -273,6 +301,11 @@ impl Env {
                 AccountMeta::new_readonly(self.system_id, false),
                 AccountMeta::new_readonly(self.clock_id, false),
                 AccountMeta::new(*vault, false),
+                // The write-once, digest-pinned JoinSplit verifying key.
+                AccountMeta::new_readonly(
+                    self.vk_registry_pda(mirror_pool::wire::CIRCUIT_TRANSACTION),
+                    false,
+                ),
             ],
             data,
         }
@@ -1090,4 +1123,157 @@ fn transact_fixed_denom_allows_transfer() {
     // No public value moved.
     assert_eq!(env.get(&recipient).lamports, 0);
     assert_eq!(env.get(&vault).lamports, vault_start, "vault untouched");
+}
+
+// ---------------------------------------------------------------------------
+// The JoinSplit verifying key is read from the write-once, digest-pinned
+// registry, and the pin is re-checked on EVERY transact
+// ---------------------------------------------------------------------------
+
+/// Stage a value pool ready to settle the committed TRANSFER fixture, so the
+/// only thing left to fail on is the verifying key.
+fn transfer_stage(env: &mut Env) -> (Pubkey, Pubkey, Pubkey, Pubkey, Pubkey, Pubkey) {
+    let authority = fixture_relayer_authority();
+    env.fund(authority, 5 * SOL);
+    let (vpool, vault) = build_value_pool(
+        env,
+        &authority,
+        0,
+        None,
+        &transfer::PUBLIC_INPUTS[0],
+        5 * SOL,
+    );
+    let recipient = fixture_recipient();
+    env.fund(recipient, 0);
+    let depositor = Pubkey::new_unique();
+    env.fund(depositor, SOL);
+    let nf0 = env.vnf_pda(&vpool, &transfer::PUBLIC_INPUTS[3]);
+    let nf1 = env.vnf_pda(&vpool, &transfer::PUBLIC_INPUTS[4]);
+    (authority, vpool, vault, recipient, nf0, nf1)
+}
+
+fn transfer_ix(
+    env: &Env,
+    authority: &Pubkey,
+    vpool: &Pubkey,
+    vault: &Pubkey,
+    recipient: &Pubkey,
+    nf0: &Pubkey,
+    nf1: &Pubkey,
+) -> Instruction {
+    let depositor = Pubkey::new_unique();
+    env.transact_ix(
+        vpool,
+        authority,
+        nf0,
+        nf1,
+        recipient,
+        &depositor,
+        vault,
+        &transfer::PUBLIC_INPUTS,
+        &transfer::PROOF_A,
+        &transfer::PROOF_B,
+        &transfer::PROOF_C,
+        0,
+        &payload(3),
+        &payload(4),
+    )
+}
+
+/// The registry contents changed after install, by any means whatsoever. The
+/// per-verify digest catches it even though the account is still program-owned,
+/// still at the canonical address, still the right size and version.
+#[test]
+fn transact_rejects_a_tampered_vk_registry() {
+    let mut env = Env::new();
+    let registry = env.vk_registry_pda(mirror_pool::wire::CIRCUIT_TRANSACTION);
+    let mut account = env.get(&registry);
+    account.data[mirror_pool::state::vk_registry::VK_OFF + mirror_pool::wire::VK_DELTA_G2_OFF] ^=
+        0x80;
+    env.accounts.insert(registry, account);
+
+    let (authority, vpool, vault, recipient, nf0, nf1) = transfer_stage(&mut env);
+    let ix = transfer_ix(&env, &authority, &vpool, &vault, &recipient, &nf0, &nf1);
+    env.process(
+        &ix,
+        &[Check::err(custom(MirrorPoolError::VkNotApproved))],
+    );
+
+    // Fail closed: no commitment inserted, no nullifier recorded.
+    let vp = env.get(&vpool);
+    assert_eq!(
+        value_pool::commitment_count(&vp.data).unwrap(),
+        0,
+        "no output commitment may be appended"
+    );
+    assert_eq!(env.get(&nf0).data.len(), 0, "no nullifier may be recorded");
+}
+
+/// The strongest form of the attack this design exists to survive: a
+/// program-owned, correctly sized, correctly versioned registry at the canonical
+/// address, holding a key that passes every FORMAT check (same length, same
+/// `nr_pubinputs`, same `ic_len`, real BN254 points) and whose trapdoor the
+/// attacker holds. Format-only validation - the shape the reviewed alternative
+/// uses - accepts this. The digest pin does not.
+#[test]
+fn transact_rejects_a_well_formed_foreign_key() {
+    let mut env = Env::new();
+    let registry = env.vk_registry_pda(mirror_pool::wire::CIRCUIT_TRANSACTION);
+
+    let mut foreign = vk_fixture::canonical_vk(mirror_pool::wire::CIRCUIT_TRANSACTION);
+    let beta = foreign
+        [mirror_pool::wire::VK_BETA_G2_OFF..mirror_pool::wire::VK_BETA_G2_OFF + mirror_pool::wire::G2_LEN]
+        .to_vec();
+    foreign[mirror_pool::wire::VK_DELTA_G2_OFF
+        ..mirror_pool::wire::VK_DELTA_G2_OFF + mirror_pool::wire::G2_LEN]
+        .copy_from_slice(&beta);
+    assert_eq!(foreign.len(), 961, "same length as the pinned key");
+    assert_eq!(
+        foreign[mirror_pool::wire::VK_NR_PUBINPUTS_OFF], 7,
+        "same nr_pubinputs, so the same ic_len"
+    );
+
+    let mut account = env.get(&registry);
+    account.data[mirror_pool::state::vk_registry::VK_OFF..].copy_from_slice(&foreign);
+    env.accounts.insert(registry, account);
+
+    let (authority, vpool, vault, recipient, nf0, nf1) = transfer_stage(&mut env);
+    let ix = transfer_ix(&env, &authority, &vpool, &vault, &recipient, &nf0, &nf1);
+    env.process(
+        &ix,
+        &[Check::err(custom(MirrorPoolError::VkNotApproved))],
+    );
+}
+
+/// No registry at all: the verify path refuses rather than falling back to
+/// anything.
+#[test]
+fn transact_rejects_a_missing_vk_registry() {
+    let mut env = Env::new();
+    let registry = env.vk_registry_pda(mirror_pool::wire::CIRCUIT_TRANSACTION);
+    env.accounts.remove(&registry);
+
+    let (authority, vpool, vault, recipient, nf0, nf1) = transfer_stage(&mut env);
+    let ix = transfer_ix(&env, &authority, &vpool, &vault, &recipient, &nf0, &nf1);
+    env.process(
+        &ix,
+        &[Check::err(custom(
+            MirrorPoolError::VkRegistryNotInitialized,
+        ))],
+    );
+}
+
+/// Another circuit's registry, even though it holds a genuine ceremony-produced
+/// key this program pins: the registry PDA is keyed by circuit id, so this
+/// instruction can only ever verify under the JoinSplit key.
+#[test]
+fn transact_rejects_another_circuits_registry() {
+    let mut env = Env::new();
+    let membership = env.install_vk(mirror_pool::wire::CIRCUIT_MEMBERSHIP);
+
+    let (authority, vpool, vault, recipient, nf0, nf1) = transfer_stage(&mut env);
+    let mut ix = transfer_ix(&env, &authority, &vpool, &vault, &recipient, &nf0, &nf1);
+    let last = ix.accounts.len() - 1;
+    ix.accounts[last] = AccountMeta::new_readonly(membership, false);
+    env.process(&ix, &[Check::err(custom(MirrorPoolError::InvalidPda))]);
 }

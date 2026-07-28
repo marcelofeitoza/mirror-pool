@@ -387,6 +387,11 @@ pub struct TransactEmit {
     pub depositor: String,
     pub system_program: String,
     pub clock_sysvar: String,
+    /// The write-once, digest-pinned JoinSplit verifying-key registry PDA. The
+    /// program reads its verifying key from here rather than from its own code,
+    /// so a submitter MUST pass this account; it must already be installed
+    /// (`mirror-cli init-vk --circuit transaction`).
+    pub vk_registry: String,
     pub fee: u64,
     pub public_amount_hex: String,
     pub ext_data_hash_hex: String,
@@ -460,6 +465,9 @@ fn build_emit(
 
     let nf0_pda = chain::value_nullifier_pda(program_id, vpool, nf0);
     let nf1_pda = chain::value_nullifier_pda(program_id, vpool, nf1);
+    // The JoinSplit verifying key lives in a write-once, digest-pinned registry
+    // account, so every Transact must carry it (see docs/VK_REGISTRY.md).
+    let vk_registry = chain::vk_registry_pda(program_id, wire::CIRCUIT_TRANSACTION);
     let depositor_signs = op == Op::Shield;
 
     // Transact account order (see instructions::transact):
@@ -520,6 +528,12 @@ fn build_emit(
             is_writable: true,
             role: "vault".into(),
         },
+        AccountMetaJson {
+            pubkey: vk_registry.to_string(),
+            is_signer: false,
+            is_writable: false,
+            role: "vk_registry".into(),
+        },
     ];
 
     Ok(TransactEmit {
@@ -534,6 +548,7 @@ fn build_emit(
         depositor: depositor.to_string(),
         system_program: chain::SYSTEM_PROGRAM_ID.to_string(),
         clock_sysvar: chain::CLOCK_SYSVAR_ID.to_string(),
+        vk_registry: vk_registry.to_string(),
         fee,
         public_amount_hex: to_hex(public_amount),
         ext_data_hash_hex: to_hex(ext_data_hash),

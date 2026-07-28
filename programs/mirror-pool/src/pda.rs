@@ -16,7 +16,13 @@
 //! Value vault PDA   seeds = [b"vvault", vpool(32)]
 //! Value nf PDA      seeds = [b"vnf",    vpool(32), nullifier(32)]
 //! AssociationSet    seeds = [b"assoc",  pool(32), curator(32)]
+//! VkRegistry        seeds = [b"vk",     circuit_id(1)]
 //! ```
+//!
+//! The VkRegistry namespace is deliberately GLOBAL rather than per-pool: its
+//! contents are pinned to a compile-time digest, so there is exactly one legal
+//! byte string per circuit and a per-pool copy would only add rent and a second
+//! place to get the plumbing wrong.
 //!
 //! The confidential-value seeds (`vpool` / `vvault` / `vnf`) are a SEPARATE
 //! namespace from the behavioral pool: a value nullifier is globally unique
@@ -51,6 +57,8 @@ pub const VALUE_VAULT_SEED: &[u8] = b"vvault";
 pub const VALUE_NULLIFIER_SEED: &[u8] = b"vnf";
 /// Seed prefix for a curator's AssociationSet PDA (opt-in compliance layer).
 pub const ASSOCIATION_SEED: &[u8] = b"assoc";
+/// Seed prefix for a circuit's write-once, digest-pinned VkRegistry PDA.
+pub const VK_REGISTRY_SEED: &[u8] = b"vk";
 
 /// Find a program-derived address and its bump.
 ///

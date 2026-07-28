@@ -156,6 +156,9 @@ mod tests {
             AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
             AccountMeta::new_readonly(CLOCK_SYSVAR_ID, false),
             AccountMeta::new(vault(), false),
+            // The write-once, digest-pinned JoinSplit verifying-key registry the
+            // on-chain Transact reads its key from: readonly, never a signer.
+            AccountMeta::new_readonly(Pubkey::new_from_array([0x99; 32]), false),
         ]
     }
 
@@ -204,12 +207,12 @@ mod tests {
             "the third instruction is the Transact"
         );
 
-        // The Transact instruction carries the emitted data + all 9 accounts.
+        // The Transact instruction carries the emitted data + all 10 accounts.
         let VersionedMessage::V0(v0) = &message else {
             panic!("expected v0");
         };
         assert_eq!(v0.instructions[2].data[0], wire::tag::TRANSACT);
-        assert_eq!(v0.instructions[2].accounts.len(), 9);
+        assert_eq!(v0.instructions[2].accounts.len(), 10);
     }
 
     #[tokio::test]

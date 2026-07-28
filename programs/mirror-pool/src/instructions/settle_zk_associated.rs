@@ -41,7 +41,20 @@
 //! 4. system_program            for the create-account CPI
 //! 5. clock          sysvar     current slot for the window-closed gate
 //! 6. assoc          readonly   AssociationSet PDA; seeds [b"assoc", pool, curator]
+//! 7. vk_registry    readonly   write-once, digest-pinned ASSOCIATION verifying
+//!                              key; seeds [b"vk", CIRCUIT_ASSOCIATION]
 //! ```
+//!
+//! # Where the verifying key comes from
+//!
+//! Account 7, not this program's `.rodata`. It is a program-owned PDA that
+//! `INIT_VK` filled ONCE and that no instruction can rewrite, and step (8)
+//! re-checks its SHA-256 against [`crate::vk_digest::ASSOCIATION_VK_SHA256`]
+//! before the bytes reach the verifier. Because the registry PDA is keyed by
+//! circuit id, passing the MEMBERSHIP registry here fails on the PDA derivation:
+//! this instruction can only ever verify under the association key, exactly as
+//! it could when that key was a compile-time constant. See
+//! `docs/VK_REGISTRY.md`.
 //!
 //! The nullifier PDA uses the SAME seeds as `SETTLE_ZK`, so the two paths share
 //! one spent-set: a commitment cannot be settled once with an attestation and
@@ -58,7 +71,6 @@
 //! ASSOCIATION verifying key over all five public inputs; then (9) the action
 //! executes.
 
-use groth16_solana::groth16::Groth16Verifier;
 use pinocchio::{
     cpi::Seed,
     error::ProgramError,
@@ -68,10 +80,8 @@ use pinocchio::{
 use pinocchio_log::log;
 
 use crate::{
-    action,
-    association_vk::VERIFYINGKEY,
-    pda,
-    state::{association, nullifier, pool},
+    action, pda,
+    state::{association, nullifier, pool, vk_registry},
     wire, MirrorPoolError,
 };
 
@@ -131,7 +141,7 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         .try_into()
         .map_err(|_| MirrorPoolError::MalformedInstruction)?;
 
-    let [pool_account, authority, nullifier_account, recipient, _system_program, clock_account, assoc_account, ..] =
+    let [pool_account, authority, nullifier_account, recipient, _system_program, clock_account, assoc_account, vk_account, ..] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -270,14 +280,21 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     // membership proof can never satisfy this instruction, and vice versa).
     // `verify()` also rejects any public input that is not a canonical BN254
     // scalar.
+    //
+    // The key is READ FROM THE CHAIN, from the write-once VkRegistry PDA for
+    // CIRCUIT_ASSOCIATION, and re-pinned to the compile-time digest before it
+    // touches the verifier.
     let public_inputs: [[u8; 32]; wire::ASSOCIATION_N_PUBLIC_INPUTS] =
         [root, nullifier_hash, action_hash, epoch_pub, assoc_root];
-    let mut verifier =
-        Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public_inputs, &VERIFYINGKEY)
-            .map_err(|_| MirrorPoolError::ProofVerificationFailed)?;
-    verifier
-        .verify()
-        .map_err(|_| MirrorPoolError::ProofVerificationFailed)?;
+    vk_registry::verify_pinned(
+        vk_account,
+        program_id,
+        wire::CIRCUIT_ASSOCIATION,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &public_inputs,
+    )?;
 
     // (9) Execute the action: transfer the escrow from the pool to the fresh
     // recipient, keeping the pool rent-exempt.

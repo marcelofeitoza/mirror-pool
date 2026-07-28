@@ -57,6 +57,10 @@ pub fn process_instruction(
         wire::tag::SETTLE_ZK_ASSOCIATED => {
             instructions::settle_zk_associated::process(program_id, accounts, data)
         }
+        // Write-once install of a digest-pinned verifying key. Note what is NOT
+        // in this table: there is no UPDATE_VK tag, so once a registry PDA holds
+        // a key no instruction in this program can change it.
+        wire::tag::INIT_VK => instructions::init_vk::process(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

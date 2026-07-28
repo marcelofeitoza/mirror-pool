@@ -39,7 +39,16 @@
 //! 6. system_program            for the create-account / transfer CPIs
 //! 7. clock          sysvar     (accepted for wire stability; unused here)
 //! 8. vault          writable   ValuePool vault PDA; seeds [b"vvault", vpool]
+//! 9. vk_registry    readonly   write-once, digest-pinned JoinSplit verifying
+//!                              key; seeds [b"vk", CIRCUIT_TRANSACTION]
 //! ```
+//!
+//! # Where the verifying key comes from
+//!
+//! Account 9, not this program's `.rodata`. It is a program-owned PDA that
+//! `INIT_VK` filled ONCE and that no instruction can rewrite, and step (5)
+//! re-checks its SHA-256 against [`crate::vk_digest::TRANSACTION_VK_SHA256`]
+//! before the bytes reach the verifier. See `docs/VK_REGISTRY.md`.
 //!
 //! Checks run IN ORDER and fail closed: (1) authority is a signer and equals
 //! vpool.authority; (2) `root` is a known recent root; (3) the recomputed
@@ -51,7 +60,6 @@
 //! decoded `publicAmount`, keeping the vault rent-exempt; (8) enc0/enc1 are
 //! emitted as return data for client discovery.
 
-use groth16_solana::groth16::Groth16Verifier;
 use pinocchio::{
     cpi::Seed,
     error::ProgramError,
@@ -63,8 +71,7 @@ use pinocchio_system::instructions::Transfer;
 
 use crate::{
     pda,
-    state::{nullifier, value_pool},
-    transaction_vk::VERIFYINGKEY,
+    state::{nullifier, value_pool, vk_registry},
     wire, MirrorPoolError,
 };
 
@@ -126,7 +133,7 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         return Err(MirrorPoolError::MalformedInstruction.into());
     }
 
-    let [vpool_account, authority, nullifier0, nullifier1, recipient, depositor, _system_program, _clock, vault, ..] =
+    let [vpool_account, authority, nullifier0, nullifier1, recipient, depositor, _system_program, _clock, vault, vk_account, ..] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -230,6 +237,14 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     // [root, publicAmount, extDataHash, inNullifier0, inNullifier1,
     // outCommitment0, outCommitment1]. `verify()` also rejects any public input
     // that is not a canonical BN254 scalar.
+    //
+    // The JoinSplit verifying key is READ FROM THE CHAIN, not from this
+    // program's code: `verify_pinned` loads the write-once VkRegistry PDA for
+    // CIRCUIT_TRANSACTION and re-checks its SHA-256 against the digest pinned in
+    // `crate::vk_digest` before the key touches the verifier. This is the path
+    // that moves value, so it gets the same treatment as the others: the key in
+    // force is publicly readable, and is still exactly the key the bytecode
+    // committed to.
     let public_inputs: [[u8; 32]; wire::TRANSACT_N_PUBLIC_INPUTS] = [
         root,
         public_amount,
@@ -239,12 +254,15 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         out_commitment0,
         out_commitment1,
     ];
-    let mut verifier =
-        Groth16Verifier::new(&proof_a, &proof_b, &proof_c, &public_inputs, &VERIFYINGKEY)
-            .map_err(|_| MirrorPoolError::ProofVerificationFailed)?;
-    verifier
-        .verify()
-        .map_err(|_| MirrorPoolError::ProofVerificationFailed)?;
+    vk_registry::verify_pinned(
+        vk_account,
+        program_id,
+        wire::CIRCUIT_TRANSACTION,
+        &proof_a,
+        &proof_b,
+        &proof_c,
+        &public_inputs,
+    )?;
 
     // (6) Insert both output commitments into the value accumulator (updates the
     // root and pushes it to the recent-root ring).

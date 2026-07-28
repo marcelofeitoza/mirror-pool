@@ -101,8 +101,14 @@ const AUTHORITY_ACCOUNT_INDEX: usize = 1;
 /// occupies in a `Transact` account list.
 const RECIPIENT_ACCOUNT_INDEX: usize = 4;
 /// The number of accounts a `Transact` takes: vpool, authority, nf0, nf1,
-/// recipient, depositor, system, clock, vault.
-const TRANSACT_ACCOUNTS: usize = 9;
+/// recipient, depositor, system, clock, vault, vk_registry.
+///
+/// The last slot is the write-once, digest-pinned JoinSplit verifying-key
+/// registry the program reads its key from (see docs/VK_REGISTRY.md). It is
+/// readonly and never a signer, so the two index constants above are unchanged;
+/// this count is checked exactly so an emit that silently DROPS it is refused
+/// rather than submitted and failed on-chain.
+const TRANSACT_ACCOUNTS: usize = 10;
 
 /// Default funding-round length in slots. A quarter of the 600-slot epoch window
 /// the harness models, so a participant who funds and commits in the same epoch

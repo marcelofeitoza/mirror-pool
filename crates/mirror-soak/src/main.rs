@@ -595,6 +595,25 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow!("init_pool failed: {e}"))?;
     report.sig("init_pool", &sig);
 
+    // Publish the MEMBERSHIP verifying key into its write-once registry PDA.
+    // SETTLE_ZK reads its key from that account rather than from the program's
+    // code, and re-checks it against a compile-time digest on every verify, so a
+    // fresh deployment must publish it once before any ZK settle can land.
+    let sig = install_vk(
+        &cli_bin()?,
+        &root,
+        &args.rpc_url,
+        &program_id,
+        &keys_dir.join("payer.json"),
+        "membership",
+    )?;
+    report.check(
+        "membership verifying key published into its write-once registry PDA",
+        !sig.is_empty(),
+        format!("init_vk signature={sig}"),
+    );
+    report.sig("init_vk_membership", &sig);
+
     let pool_acc = client
         .get_account(&pool)
         .await?
@@ -970,6 +989,11 @@ async fn main() -> Result<()> {
     let settle_data = hex_decode(emit["settle_zk_data_hex"].as_str().unwrap())?;
     let zk_nf_pda = Pubkey::from_str(emit["nullifier_pda"].as_str().unwrap())?;
     let emit_authority = Pubkey::from_str(emit["authority"].as_str().unwrap())?;
+    let zk_vk_registry = Pubkey::from_str(
+        emit["vk_registry"]
+            .as_str()
+            .ok_or_else(|| anyhow!("prove emit is missing vk_registry"))?,
+    )?;
     report.check(
         "SettleZk authority == pool relay",
         emit_authority == relay.pubkey(),
@@ -986,6 +1010,9 @@ async fn main() -> Result<()> {
                 AccountMeta::new(recipient_key, false),
                 AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
                 AccountMeta::new_readonly(CLOCK_SYSVAR_ID, false),
+                // The write-once, digest-pinned MEMBERSHIP verifying key. The
+                // CLI emits its address so the driver never derives it itself.
+                AccountMeta::new_readonly(zk_vk_registry, false),
             ],
             data: settle_data.clone(),
         }
@@ -1153,6 +1180,40 @@ fn coordinator_rolls_forward_under_floor(epoch_slots: u64, k_floor: u32) -> Resu
     let outcomes = c.on_slot(epoch_slots)?;
     let rolled = matches!(outcomes.first(), Some(EpochOutcome::RolledForward { .. }));
     Ok(rolled && c.submitter().submitted.is_empty())
+}
+
+/// Publish a circuit's verifying key into its write-once, digest-pinned registry
+/// PDA, through the SHIPPED `mirror-cli init-vk`.
+///
+/// Every verifying instruction now reads its key from a registry account instead
+/// of from the program's own code, so a fresh deployment needs one of these per
+/// circuit it will use. Nothing here is a choice: the program hashes the bytes
+/// and accepts only the key its bytecode pins, so this is publication, not
+/// configuration. See docs/VK_REGISTRY.md.
+fn install_vk(
+    cli: &Path,
+    cwd: &Path,
+    rpc_url: &str,
+    program_id: &Pubkey,
+    payer_path: &Path,
+    circuit: &str,
+) -> Result<String> {
+    let out = run_cli(
+        cli,
+        cwd,
+        &[
+            "init-vk",
+            "--rpc-url",
+            rpc_url,
+            "--program-id",
+            &program_id.to_string(),
+            "--circuit",
+            circuit,
+            "--payer",
+            &payer_path.to_string_lossy(),
+        ],
+    )?;
+    Ok(parse_kv(&out, "signature:").unwrap_or_default().to_string())
 }
 
 /// Shell out to the shipped `mirror-cli`, returning stdout (fails on nonzero).

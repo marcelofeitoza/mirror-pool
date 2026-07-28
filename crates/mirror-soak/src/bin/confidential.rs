@@ -62,6 +62,8 @@ use solana_signer::Signer;
 
 const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::from_str_const("11111111111111111111111111111111");
 const VALUE_POOL_SEED: &[u8] = b"vpool";
+/// A circuit's write-once, digest-pinned verifying-key registry seed prefix.
+const VK_REGISTRY_SEED: &[u8] = b"vk";
 const VALUE_VAULT_SEED: &[u8] = b"vvault";
 const VALUE_NULLIFIER_SEED: &[u8] = b"vnf";
 
@@ -273,6 +275,40 @@ fn new_keypair(dir: &Path, name: &str) -> Result<Keypair> {
     std::fs::write(&path, serde_json::to_string(&kp.to_bytes().to_vec())?)
         .with_context(|| format!("writing keypair {}", path.display()))?;
     Ok(kp)
+}
+
+/// Publish a circuit's verifying key into its write-once, digest-pinned registry
+/// PDA, through the SHIPPED `mirror-cli init-vk`.
+///
+/// Every verifying instruction now reads its key from a registry account instead
+/// of from the program's own code, so a fresh deployment needs one of these per
+/// circuit it will use. Nothing here is a choice: the program hashes the bytes
+/// and accepts only the key its bytecode pins, so this is publication, not
+/// configuration. See docs/VK_REGISTRY.md.
+fn install_vk(
+    cli: &Path,
+    cwd: &Path,
+    rpc_url: &str,
+    program_id: &Pubkey,
+    payer_path: &Path,
+    circuit: &str,
+) -> Result<String> {
+    let out = run_cli(
+        cli,
+        cwd,
+        &[
+            "init-vk",
+            "--rpc-url",
+            rpc_url,
+            "--program-id",
+            &program_id.to_string(),
+            "--circuit",
+            circuit,
+            "--payer",
+            &payer_path.to_string_lossy(),
+        ],
+    )?;
+    Ok(parse_kv(&out, "signature:").unwrap_or_default().to_string())
 }
 
 /// Shell out to `mirror-cli`, returning stdout (bails on nonzero exit).
@@ -557,6 +593,26 @@ async fn main() -> Result<()> {
     let relay_path = keys_dir.join("value-relay.json");
     let relay2_path = keys_dir.join("value-relay2.json");
     let depositor_path = keys_dir.join("value-depositor.json");
+
+    // Publish the JoinSplit verifying key into its write-once registry PDA.
+    // TRANSACT reads its key from that account rather than from the program's
+    // code, and re-checks it against a compile-time digest on every verify, so a
+    // fresh deployment must publish it once before any shield/transfer/unshield
+    // can land. See docs/VK_REGISTRY.md.
+    let vk_sig = install_vk(
+        &cli,
+        &root,
+        &args.rpc_url,
+        &program_id,
+        &payer_path,
+        "transaction",
+    )?;
+    report.check(
+        "JoinSplit verifying key published into its write-once registry PDA",
+        !vk_sig.is_empty(),
+        format!("init_vk signature={vk_sig}"),
+    );
+    report.sig("init_vk_transaction", &vk_sig);
 
     let vpool = value_pool_pda(&program_id, &relay.pubkey());
     let vault = value_vault_pda(&program_id, &vpool);
@@ -1317,6 +1373,18 @@ fn build_denom_mismatch_transact(
             false,
         ),
         AccountMeta::new(*vault, false),
+        // The write-once, digest-pinned JoinSplit verifying key. Passed even
+        // though this request is expected to fail earlier: the account list must
+        // be the one a real client would send, or the rejection would prove
+        // nothing about the check under test.
+        AccountMeta::new_readonly(
+            Pubkey::find_program_address(
+                &[VK_REGISTRY_SEED, &[mirror_core::wire::CIRCUIT_TRANSACTION]],
+                program_id,
+            )
+            .0,
+            false,
+        ),
     ];
     ValueTransactRequest {
         program_id: *program_id,

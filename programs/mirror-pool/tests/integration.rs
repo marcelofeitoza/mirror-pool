@@ -81,6 +81,14 @@ fn custom(e: MirrorPoolError) -> ProgramError {
     ProgramError::Custom(e as u32)
 }
 
+/// Shared helpers for the write-once, digest-pinned verifying-key registry (see
+/// `fixtures/vk_install.rs`). Every settle path now reads its verifying key from
+/// a registry account, so every environment installs one first.
+#[allow(dead_code)]
+mod vk_fixture {
+    include!("fixtures/vk_install.rs");
+}
+
 /// A tiny stateful harness: owns the Mollusk instance, a persistent account
 /// map, and the slot clock. Resulting accounts are written back after every
 /// successful instruction so flows (init -> commit -> settle) compose.
@@ -103,18 +111,38 @@ impl Env {
         let mollusk = Mollusk::new(&program_id, "mirror_pool");
         let system_id = keyed_account_for_system_program().0;
         let clock_id = mollusk.sysvars.keyed_account_for_clock_sysvar().0;
-        Env {
+        let mut env = Env {
             mollusk,
             program_id,
             system_id,
             clock_id,
             accounts: HashMap::new(),
-        }
+        };
+        // Every verifying instruction reads its key from a registry account, so
+        // every environment installs the pinned key(s) it needs up front.
+        env.install_vk(mirror_pool::wire::CIRCUIT_MEMBERSHIP);
+        env
     }
 
     fn fund(&mut self, key: Pubkey, lamports: u64) {
         self.accounts
             .insert(key, Account::new(lamports, 0, &self.system_id));
+    }
+
+    /// Canonical PDA of a circuit's write-once verifying-key registry.
+    fn vk_registry_pda(&self, circuit_id: u8) -> Pubkey {
+        vk_fixture::vk_registry_pda(&self.program_id, circuit_id)
+    }
+
+    /// Install a circuit's pinned verifying key through the REAL `INIT_VK`
+    /// instruction, so every settle test also exercises the install path.
+    fn install_vk(&mut self, circuit_id: u8) -> Pubkey {
+        let payer = Pubkey::new_unique();
+        self.fund(payer, SOL);
+        let vk = vk_fixture::canonical_vk(circuit_id);
+        let ix = vk_fixture::init_vk_ix(&self.program_id, &self.system_id, &payer, circuit_id, &vk);
+        self.process(&ix, &[Check::success()]);
+        self.vk_registry_pda(circuit_id)
     }
 
     fn get(&self, key: &Pubkey) -> Account {
@@ -332,6 +360,11 @@ impl Env {
                 AccountMeta::new(*recipient, false),
                 AccountMeta::new_readonly(self.system_id, false),
                 AccountMeta::new_readonly(self.clock_id, false),
+                // The write-once, digest-pinned MEMBERSHIP verifying key.
+                AccountMeta::new_readonly(
+                    self.vk_registry_pda(mirror_pool::wire::CIRCUIT_MEMBERSHIP),
+                    false,
+                ),
             ],
             data,
         }

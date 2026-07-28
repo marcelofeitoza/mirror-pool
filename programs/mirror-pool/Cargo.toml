@@ -70,6 +70,11 @@ solana-program-error = "3"
 light-poseidon = "0.4"
 ark-bn254 = "0.5"
 ark-ff = "0.5"
+# Host-side SHA-256 for the verifying-key PIN provenance test: recompute the
+# digests in src/vk_digest.rs from the vendored key modules and assert they
+# match, so a key edit that forgets the digest fails the suite. On-chain the same
+# hash comes from the `sol_sha256` syscall. Dev-only; never in the .so.
+sha2 = "0.10"
 
 [lints.rust]
 # pinocchio macros expand cfg(target_os = "solana") / cfg(target_arch = "bpf")
