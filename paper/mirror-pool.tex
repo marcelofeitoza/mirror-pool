@@ -264,11 +264,11 @@ participant signature. This provides cryptographic who-initiated unlinkability:
 the deposit is visible, no participant signs at settle, and the coordinator is not
 in the trust base for attribution (it settles for \emph{some} member without
 learning which). The set that unlinkability is over is narrower than the proof
-alone: \code{SettleZk} publishes the epoch and the amount, so the covering set is
-the window's ZK deposits of the same amount, and the program enforces no floor on
-it, no denomination, and no recipient freshness. Section~\ref{sec:limits} states
-each of those and why none can be a settle-time check on a path whose escrow has
-no refund.
+alone: \code{SettleZk} publishes the epoch, so the covering set is the window's ZK
+deposits (the amount is public too, but a pool admits exactly one ZK size, so it
+separates nothing), and the program enforces no floor on it and no recipient
+freshness. Section~\ref{sec:limits} states each of those and why neither can be a
+settle-time check on a path whose escrow has no refund.
 
 \subsection{Why the design defeats the named attacks}
 
@@ -843,12 +843,12 @@ about 197K to 203K CU.}
 \end{table}
 
 \paragraph{Test suite.} Beyond the two live soaks, the repository ships
-\textbf{262 host tests} (\code{cargo test --workspace}, covering the Poseidon
+\textbf{264 host tests} (\code{cargo test --workspace}, covering the Poseidon
 scheme cross-check against the circuit, the wire layout, \code{KAnon} accounting,
 the coordinator batching, $k$-floor and funding-round logic, ECIES notes, the
-trusted-setup ceremony, and the effective-$k$ and funding-model functions; $7$
-further tests are environment-gated and skipped by default) and \textbf{44 on-chain
-program tests} (mollusk integration tests plus in-crate unit tests).
+trusted-setup ceremony, and the effective-$k$ and funding-model functions; $11$
+further tests are environment-gated and skipped by default) and \textbf{105
+on-chain program tests} (mollusk integration tests plus in-crate unit tests).
 \code{cargo build-sbf} is green and \code{cargo check --workspace} passes.
 
 \section{Honest limitations}

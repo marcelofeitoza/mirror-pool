@@ -75,21 +75,24 @@ A standalone Pinocchio program (its own `[workspace]`, built with
 `cargo build-sbf`) exposing six instructions across both paths, all with
 fail-closed parsing:
 
-- `InitPool` - fix `epoch_slots`, `k_floor`, `entry_fee`, `reward_bps`, and the
-  settle authority forever.
-- `Commit` (crowd) - append a commitment leaf, lazily create the Epoch PDA, bump
-  the commit count, collect the entry fee, optionally accrue dwell.
+- `InitPool` - fix `epoch_slots`, `k_floor`, `entry_fee`, `reward_bps`,
+  `zk_denomination` (the one ZK escrow size, non-zero) and the settle authority
+  forever.
+- `Commit` (crowd) - append `Poseidon(CROWD_LEAF_DOMAIN, commitment)`, the free
+  path's own leaf domain, lazily create the Epoch PDA, bump the commit count,
+  collect the entry fee, optionally accrue dwell.
 - `SettleEpoch` (crowd) - enforce authority + window-closed + on-chain k-floor,
   create one Nullifier PDA per spend (anti-replay), mark the epoch settled.
-- `CommitDeposit` (ZK opt-in) - escrow the action input and append a commitment
-  whose `actionHash` binds `(recipient, amount)`.
+- `CommitDeposit` (ZK opt-in) - escrow exactly one `zk_denomination` and append
+  the commitment VERBATIM (the ZK leaf domain), its `actionHash` binding
+  `(recipient, amount)`.
 - `SettleZk` (ZK opt-in) - verify a Groth16 membership proof on-chain
   (alt_bn128), check the root-history ring, the actionHash binding, and the
   nullifier, then release the escrow to the bound recipient with no participant
-  signature. It enforces no k-floor, no denomination and no recipient freshness;
-  `docs/THREAT_MODEL.md` section 4 gives the reason for each and names what
-  compensates, and "Denominated ZK deposits with per-leaf escrow" below is the
-  change that would let the program enforce them.
+  signature. It enforces the pool's fixed `zk_denomination`, but no k-floor and no
+  recipient freshness; `docs/THREAT_MODEL.md` section 4 gives the reason for each
+  remaining gap and names what compensates, and "Denominated ZK deposits with
+  per-leaf escrow" below records the escrow fix that shipped.
 - `ClaimReward` (crowd) - pay a dwell-proportional, drain-safe share of the reward
   pool.
 
@@ -240,25 +243,37 @@ init plus program-applied domain separation of crowd leaves
 crowd leaf is neither a valid preimage for the ZK spend statement nor able to draw an
 amount nobody deposited. See `docs/THREAT_MODEL.md` section 4 and residual 11.
 
-The fix is the same one Tornado-style pools use, and it is deliberately a v2
-because it is two coordinated breaking changes rather than a patch:
+The fix is the same one Tornado-style pools use, and it shipped as two coordinated
+breaking changes rather than a patch, because either half alone leaves the hole
+open:
 
-1. **A fixed denomination per pool.** `InitPool` pins it, `CommitDeposit` rejects
-   anything else, and `SettleZk` requires the released amount to equal it. Each
-   leaf is then worth exactly one denomination, so the pot balances by counting,
-   and the amount channel stops singling out deposits. The confidential-value
-   layer already ships this shape (`DenominationMismatch`, `ValuePool`), so the
-   pattern is proven in-tree. This changes the Pool layout.
+1. **A fixed denomination per pool.** `InitPool` pins it (non-zero, immutable),
+   `CommitDeposit` rejects anything else, and both `SettleZk` and
+   `SettleZkAssociated` require the released amount to equal it. Each leaf is then
+   worth exactly one denomination, so the pot balances by counting, and the amount
+   channel stops singling out deposits. The confidential-value layer already
+   shipped this shape (`DenominationMismatch`, `ValuePool`), so the pattern was
+   proven in-tree. This changed the Pool layout (`zk_denomination`, appended after
+   the incentive counters, so no existing offset moved) and the `InitPool` body.
 2. **Domain-separated leaves.** The crowd and ZK paths must not share a leaf
    space, so a crowd commit can never be a membership witness for an escrow.
-   Separating them at append (a distinct hash domain per path) is enough and does
-   not change the circuit; a separate accumulator per path is the heavier variant.
+   `Commit` appends `Poseidon(CROWD_LEAF_DOMAIN, commitment)` while
+   `CommitDeposit` appends its commitment verbatim, which separates them at append
+   and needs NO circuit change; a separate accumulator per path is the heavier
+   variant and buys nothing extra.
 
-Only with both does an on-chain floor mean what a reader would assume, which is
-why v1 does not ship a floor on this path instead of shipping half of this. Any
-version that adds a settle-time condition to `SettleZk` must ALSO add a refund or
-re-bind path, or it converts thin windows into stranded escrow (the reason the
-floor is a client check today).
+The direction that does NOT work, and the reason the tag lives on the crowd path:
+absorbing a domain tag into the DEPOSIT preimage, and having the circuit prove
+membership in the tagged domain, closes nothing. The deposit leaf is 32
+caller-supplied bytes, so an attacker would compute the tagged value and post it
+through the free `Commit`. The domain has to be enforced by something the caller
+cannot supply, which here is the program's own hash of the free path's input.
+
+Any version that adds a FURTHER settle-time condition to `SettleZk` must still ALSO
+add a refund or re-bind path, or it converts thin windows into stranded escrow
+(the reason the k-floor is a client check today). The denomination check is exempt
+from that rule because `CommitDeposit` enforces the same constant, so it can never
+refuse to pay an escrow that was allowed to exist.
 
 ### Anonymity-mining reward on the ZK path
 

@@ -33,8 +33,9 @@ one epoch clock, and one anti-Sybil economy:
    program checks the binding, not the freshness). This provides cryptographic
    who-initiated unlinkability within the set the settlement leaves standing: the
    deposit is visible, no participant signs at settle, and the link between them
-   is hidden by the proof. Because `SettleZk` publishes the epoch and the amount,
-   that set is the window's ZK deposits of the same amount, and the program
+   is hidden by the proof. Because `SettleZk` publishes the epoch, that set is the
+   window's ZK deposits (the amount is public too, but a pool admits exactly one
+   ZK size, so it separates nothing), and the program
    enforces no floor on it - `docs/THREAT_MODEL.md` section 4 states exactly what
    `SettleZk` does and does not check, and why the floor for this path is
    enforced by the client at proof time instead.
@@ -103,11 +104,11 @@ program's `wire` module (SBF parser) with compile-time size asserts on both side
 
 | tag | instruction | who submits | effect |
 |-----|-------------|-------------|--------|
-| `0` | `InitPool` | operator | create the Pool PDA and fix `epoch_slots`, `k_floor`, `entry_fee`, `reward_bps`, and the settle authority forever |
-| `1` | `Commit` | participant (crowd) | append one 32-byte commitment leaf, lazily create the Epoch PDA, bump its commit count, collect the entry fee, optionally accrue dwell |
+| `0` | `InitPool` | operator | create the Pool PDA and fix `epoch_slots`, `k_floor`, `entry_fee`, `reward_bps`, `zk_denomination`, and the settle authority forever |
+| `1` | `Commit` | participant (crowd) | append one leaf `Poseidon(CROWD_LEAF_DOMAIN, commitment)` (the free path's own leaf domain), lazily create the Epoch PDA, bump its commit count, collect the entry fee, optionally accrue dwell |
 | `2` | `SettleEpoch` | rotating relay | after the window closes, enforce authority + k-floor, create one Nullifier PDA per spend (anti-replay), mark the epoch settled |
-| `3` | `CommitDeposit` | participant (ZK opt-in) | escrow `amount` into the pool, append one commitment leaf whose `actionHash` binds `(recipient, amount)`, collect the entry fee |
-| `4` | `SettleZk` | rotating relay | verify a Groth16 membership proof on-chain, check the root/actionHash/nullifier, release the escrow to the bound recipient (no k-floor, no denomination, no freshness check: see 2.5) |
+| `3` | `CommitDeposit` | participant (ZK opt-in) | escrow exactly `pool.zk_denomination` into the pool, append the commitment leaf VERBATIM (the ZK leaf domain) with its `actionHash` binding `(recipient, amount)`, collect the entry fee |
+| `4` | `SettleZk` | rotating relay | verify a Groth16 membership proof on-chain, check the denomination/root/actionHash/nullifier, release exactly one denomination to the bound recipient (no k-floor and no freshness check: see 2.5) |
 | `5` | `ClaimReward` | participant (crowd) | pay a dwell-proportional, drain-safe share of the on-chain reward pool |
 | `6` | `InitValuePool` | operator | create the confidential ValuePool (its own value-note accumulator + 32-root ring) and its vault PDA, and fix `authority`, `fee`, and `denomination` forever |
 | `7` | `Transact` | rotating relay | verify one 2-in/2-out JoinSplit Groth16 proof on-chain, spend two input nullifiers, insert two output commitments, and move lamports per the signed `publicAmount` (shield / transfer / unshield) |
@@ -129,14 +130,15 @@ deliberately no pool-level flag making association proofs mandatory. The trust
 model, the censorship tradeoff, and the limits are in
 [`COMPLIANCE.md`](./COMPLIANCE.md).
 
-### 2.1 `InitPool` (tag 0, body 22 bytes)
+### 2.1 `InitPool` (tag 0, body 30 bytes)
 
 ```
 offset  size  field
-0       8     epoch_slots  (u64 LE)   slots per epoch window
-8       4     k_floor      (u32 LE)   minimum commits before an epoch may settle (>= 2)
-12      8     entry_fee    (u64 LE)   per-commit anti-Sybil deposit in lamports (0 disables)
-20      2     reward_bps   (u16 LE)   entry-fee share (bps, <= 10000) sent to the reward pool
+0       8     epoch_slots     (u64 LE)   slots per epoch window
+8       4     k_floor         (u32 LE)   minimum commits before an epoch may settle (>= 2)
+12      8     entry_fee       (u64 LE)   per-commit anti-Sybil deposit in lamports (0 disables)
+20      2     reward_bps      (u16 LE)   entry-fee share (bps, <= 10000) sent to the reward pool
+22      8     zk_denomination (u64 LE)   the ONE ZK opt-in escrow size in lamports (non-zero)
 ```
 
 Accounts: `0` pool (writable, PDA to create), `1` authority (signer; becomes the
@@ -146,12 +148,28 @@ lower the floor right before a targeted epoch settles and shrink the anonymity s
 on demand. The reward-split economy (`entry_fee`, `reward_bps`) is specified in
 `docs/INCENTIVES.md`.
 
+`zk_denomination` must be non-zero and is a soundness parameter before it is a
+privacy one. `CommitDeposit` takes exactly it and both ZK settle paths pay exactly
+it, which is what keeps the amount a settle draws equal to the amount its leaf
+escrowed: the leaf is one opaque field element, so no on-chain check can read the
+amount its `actionHash` bound. There is no "disabled" value; a pool that wants no
+ZK deposits simply never receives one, and a pool serving several sizes is several
+pools, which the fixed action shape already implies.
+
 ### 2.2 `Commit` (tag 1, body 32 bytes)
 
 ```
 offset  size  field
 0       32    commitment (Hash32)   Poseidon(secret, actionHash, epoch), computed client-side
 ```
+
+The value APPENDED is `crowd_leaf(commitment) = Poseidon(CROWD_LEAF_DOMAIN,
+commitment)`, not the posted bytes. This path is the cheap one, so appending
+verbatim would let a fee-only commit place a leaf of the ZK deposit shape into the
+accumulator and have `SettleZk` pay it out of a depositor's escrow. The wrap is
+applied here, on the FREE path, and by the program: a tag absorbed into the deposit
+preimage instead would be forgeable, since those 32 bytes are caller-supplied too.
+See [`THREAT_MODEL.md`](./THREAT_MODEL.md) section 4.
 
 Accounts: `0` pool (writable), `1` epoch (writable, created lazily; seeds
 `[b"epoch", pool, epoch_id LE]`), `2` participant (signer, writable; pays fee +
@@ -249,12 +267,17 @@ instead of a lamport transfer.
 That list is also complete in the other direction, and the gaps matter enough to
 name here rather than only in the threat model. `SettleZk` does **not** enforce a
 k-anonymity floor (it reads neither `pool.k_floor` nor any Epoch account and will
-settle a window holding one commitment), does **not** enforce a denomination or
-and does **not** check that the recipient is fresh (it checks
+settle a window holding one commitment), and does **not** check that the recipient
+is fresh (it checks
 only that the recipient matches the proof's `actionHash`; "fresh address" is a
-client convention). Each is deliberate and each is pinned by a test in
-`programs/mirror-pool/tests/integration.rs`. The reason none of them can be a
-settle-time check is the same in all three cases: the ZK escrow's only exit is a
+client convention). It DOES enforce the pool's fixed `zk_denomination`, which
+together with the crowd/ZK leaf-domain split is what bounds the escrow (see
+`docs/THREAT_MODEL.md` section 4); that check is safe to run at settle precisely
+because it can never surprise a depositor - `CommitDeposit` refused any other size
+in the first place, so no escrow can exist that a settle would then refuse to pay.
+Each remaining gap is deliberate and each is pinned by a test in
+`programs/mirror-pool/tests/integration.rs`. The reason neither can be a
+settle-time check is the same in both cases: the ZK escrow's only exit is a
 `SettleZk` bound to one `(recipient, amount, epoch)`, with no refund and no
 roll-forward, so any extra settle-time condition turns a privacy shortfall into
 permanently stranded funds - a dusted recipient address would be enough. The
@@ -301,7 +324,7 @@ rejected with `InvalidPda`. Ring slots start as an all-zero sentinel that
 `is_known_root` refuses, so a registered-but-never-published set vouches for
 nothing. See [`COMPLIANCE.md`](./COMPLIANCE.md).
 
-### 3.1 Pool account (1780 bytes)
+### 3.1 Pool account (1788 bytes)
 
 One anonymity set, one fixed action shape, one immutable config, plus the inline
 frontier accumulator, the recent-root ring, and the incentive counters.
@@ -322,6 +345,7 @@ offset  size       field                 meaning
 1762    2          reward_bps            entry-fee share (bps) sent to the reward pool
 1764    8          reward_pool_lamports  lamports earmarked for participation rewards
 1772    8          total_unclaimed_dwell reward-formula denominator
+1780    8          zk_denomination       the ONE ZK opt-in escrow size (lamports)
 ```
 
 The frontier accumulator (`DEPTH = 20`, up to about 1.05M leaves) is stored inline
@@ -329,9 +353,11 @@ so an append never touches a second account. The `root_ring` keeps the last
 `ROOT_HISTORY_SIZE = 32` roots: a membership proof is made against a root
 *snapshot*, so `SettleZk` must accept any recent root, not only the current one.
 Every append (both `Commit` and `CommitDeposit`) records the new root here. The
-last three fields are the incentive layer and are strictly additive: they sit
-after the root ring, so offsets `0 .. 1762` are byte-identical to the
-pre-incentive layout.
+`reward_bps` / `reward_pool_lamports` / `total_unclaimed_dwell` are the incentive
+layer and `zk_denomination` is the escrow-soundness parameter; all four are
+strictly additive, sitting after the root ring, so offsets `0 .. 1762` are
+byte-identical to the pre-incentive layout and adding the denomination moved no
+existing offset.
 
 ### 3.2 Epoch account (32 bytes)
 
@@ -445,9 +471,11 @@ The result is who-initiated unlinkability inside that set: the output lands at t
 address the committer bound at deposit time (fresh by client convention, not by an
 on-chain check), the relay cannot redirect it (actionHash binding), and no
 participant signature appears at settle. What the program does not do is guarantee
-the set is large: it enforces no floor, no denomination, and no freshness, for the
+the set is large: it enforces no floor and no recipient freshness, for the
 reasons in Section 2.5, so the participant checks the window before proving and
-the CLI refuses by default if they do not.
+the CLI refuses by default if they do not. It DOES enforce the pool's fixed
+`zk_denomination` on both sides of the escrow, which is what bounds the payout and
+which incidentally empties the amount channel.
 
 ---
 

@@ -15,13 +15,21 @@ Everything below is live on **public Solana devnet** and resolves in a browser
 
 - **Program (deployed + executable):** [`EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`](https://explorer.solana.com/address/EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq?cluster=devnet)
 
-> **The deployed program predates the verifying-key registry.** Every verifying
+> **The deployed program predates the verifying-key registry AND the escrow
+> fix.** Two changes have landed in source since that deploy. Every verifying
 > instruction now reads its key from a write-once, digest-pinned account instead
-> of from a compile-time constant ([`docs/VK_REGISTRY.md`](docs/VK_REGISTRY.md)).
-> The devnet bytecode above does not contain that change, so it no longer matches
+> of from a compile-time constant ([`docs/VK_REGISTRY.md`](docs/VK_REGISTRY.md));
+> and the ZK escrow-soundness hole is closed by crowd/ZK leaf-domain separation
+> plus a fixed ZK denomination ([`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
+> section 4). The devnet bytecode above contains NEITHER, so it no longer matches
 > this source tree, and the links in this section are records of the earlier
-> program. They have not been re-run; the registry's evidence is the mollusk
-> suite against the compiled SBF program.
+> program. Read plainly: **the escrow fix is source-only.** The deployed devnet
+> program is still vulnerable to the crowd-leaf attack, has no `zk_denomination`
+> field, and would reject this tree's 31-byte `InitPool` body; it has not been
+> redeployed because a fresh deploy needs roughly 0.83 SOL and the devnet faucet
+> is refusing. Nothing on that deployment holds value. The evidence for both
+> changes is the mollusk suite against the compiled SBF program, which is built
+> from exactly this source.
 - **Behavioral crowd settle** (N identical actions, one atomic tx, one timestamp): [tx](https://explorer.solana.com/tx/4tcgNnhbZe7YKM26F6SnXW1WctASqVEqQ9W4v4NQ85fDfkYe3eq7YqCr4n7bEogm7U5By17Lkc5Tqa7jmZx693NB?cluster=devnet)
 - **Confidential JoinSplit** (shield / private transfer with `publicAmount == 0` / unshield): see the signatures table in [`docs/PROOF.md`](docs/PROOF.md)
 - **Two live soaks, all assertions on-chain:** behavioral **17/17** + confidential **25/25** ([`docs/PROOF.md`](docs/PROOF.md))
@@ -122,8 +130,8 @@ honest against the tree.
 | Component | Path | Status |
 | --- | --- | --- |
 | Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` (circomlib Poseidon, cross-check-proven against the circuit), `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
-| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain crowd-path k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification, and a write-once, digest-pinned verifying-key registry (`InitVk`, no update path) that every verify re-validates. 99 program tests (mollusk integration + in-crate unit); `build-sbf` green. The public-devnet deployment predates the registry and is labelled historical in `docs/PROOF.md`. |
-| ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and releases the escrow to the address the member bound (clients bind a fresh one). A real proof verifies on-chain (fixture test) and live in the soak. `SettleZk` enforces no k-floor, no denomination and no recipient freshness, and the reasons are in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) section 4. |
+| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain crowd-path k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification, and a write-once, digest-pinned verifying-key registry (`InitVk`, no update path) that every verify re-validates. 105 program tests (mollusk integration + in-crate unit); `build-sbf` green. The public-devnet deployment predates both the registry and the escrow fix and is labelled historical in `docs/PROOF.md`. |
+| ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and releases the escrow to the address the member bound (clients bind a fresh one). A real proof verifies on-chain (fixture test) and live in the soak. `SettleZk` enforces the pool's fixed `zk_denomination` (which, with program-applied crowd/ZK leaf-domain separation, is what bounds the escrow), but no k-floor and no recipient freshness, and the reasons are in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) section 4. |
 | Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. Also prints an information-theoretic effective-k table (Serjantov-Danezis `2^H(p)` + min-entropy) whose mirror-pool provenance classes are DERIVED from the shipped funding mechanism, with funding-policy, adversary-strength, dwell and adoption ablations; see [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md). |
 | Funding-provenance path | `crates/mirror-cli` + `crates/mirror-coordinator` | **Implemented + soaked** - `fund-commit` funds a FRESH commit wallet by unshielding from the value pool (vault is the sender, relay the only signer, denomination enforced); `funding_service::FundingService` + `DirectoryIntake` ingest those emits, and `funding::FundingRounds` batches them to a round boundary with a minimum-round floor and an arrival-independent release order. Soak-proven end to end on local Surfpool, 25/25 on-chain assertions, including that each fresh commit wallet's ONLY inbound transfer is from the pool vault and that each funding transaction carries exactly one signature, the relay's ([`docs/PROOF.md`](docs/PROOF.md)). The residual it leaves (public boundary amounts and slots) is measured, not assumed. |
 | Gasless coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window batching, `k_floor` gate, rotating fee-payer, and real atomic crowd settlement (ComputeBudget + `SettleEpoch` + N participant behaviors, shared accounts in an ALT). |
@@ -140,8 +148,8 @@ honest against the tree.
 
 "Implemented" means the component's core logic is complete and tested. It does
 not mean "deployed": the ceremony row above is the one place where that
-distinction bites, and it is labelled. The 262 host workspace tests
-(10 more are environment-gated and skipped by default), 99 on-chain program tests,
+distinction bites, and it is labelled. The 264 host workspace tests
+(11 more are environment-gated and skipped by default), 105 on-chain program tests,
 `build-sbf`, and the two live Surfpool soaks (behavioral 17/17 + confidential
 25/25 on-chain assertions) are all green. See the roadmap for future work
 (swap/stake-from-pool via CPI, confidential deposits, wiring and soaking the

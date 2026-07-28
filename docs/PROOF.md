@@ -25,6 +25,22 @@ Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
 > in [`VK_REGISTRY.md`](VK_REGISTRY.md) section 8 and deliberately NOT merged
 > into the tables below, which belong to the earlier program.
 
+> **The ZK escrow fix is likewise SOURCE-ONLY.** A second change has landed since
+> the deploy: the crowd `Commit` leaf is now domain-separated from the ZK deposit
+> leaf by the program (`crowd_leaf = Poseidon(CROWD_LEAF_DOMAIN, commitment)`),
+> and a pool fixes one `zk_denomination` at init that `CommitDeposit`, `SettleZk`
+> and `SettleZkAssociated` all require. Together they close a fund-theft hole in
+> which a fee-only crowd commit could spend a depositor's escrow
+> ([`THREAT_MODEL.md`](THREAT_MODEL.md) section 4). The devnet bytecode below has
+> NEITHER: it still appends crowd commitments verbatim, has no `zk_denomination`
+> field, and takes a 23-byte `InitPool` body where this tree sends 31. So the
+> deployed program remains exploitable by the original attack, and none of the
+> runs below can be reproduced against it with the current drivers. Nothing on
+> that deployment holds value, and it has not been redeployed for the same
+> funding reason stated next. The fix's evidence is the mollusk suite against the
+> compiled SBF program built from this source, including the inverted attack test
+> `settle_zk_rejects_a_fee_only_crowd_leaf_spending_a_depositors_escrow`.
+
 > **Reproducing any of this on a public cluster is blocked right now, on
 > funding.** All three soak drivers publish their verifying key through
 > `init-vk` before they settle, so every one of them needs the CURRENT bytecode

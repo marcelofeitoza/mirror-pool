@@ -391,9 +391,12 @@ Precision here prevents overclaiming. The two paths hide different things.
   suggests.
 
 **What the ZK anonymity set actually is.** The proof hides the member among
-**every leaf under the proven root** - crowd `Commit` leaves included, since both
-paths append the same `Poseidon(secret, actionHash, epoch)` shape to one
-accumulator. Two public values then narrow the set an observer has to consider:
+**every ZK deposit leaf under the proven root**. Crowd `Commit` leaves are NOT in
+that set: since the escrow fix they live in a separate hash domain
+(`crowd_leaf = Poseidon(CROWD_LEAF_DOMAIN, commitment)`), so no membership proof
+can be made for one. Do not count them. Two public values then bear on what an
+observer has to consider, and since the fix only one of them still narrows
+anything:
 
 1. **The epoch.** `SettleZk` publishes it, and the leaf binds it, so only leaves
    committed to that epoch can be the source. This narrowing is the deliberate
@@ -401,15 +404,22 @@ accumulator. Two public values then narrow the set an observer has to consider:
    window to wait for the same close, which is what denies the FIFO matching of
    Section 3.1. A Tornado-style global set would be wider and would hand that
    attack back.
-2. **The amount.** Escrow amounts are public at `CommitDeposit` and the settled
-   amount is public at `SettleZk`, so amount matching (Section 3.2) excludes every
-   deposit of a different size.
+2. **The amount, which no longer discriminates.** Escrow amounts are public at
+   `CommitDeposit` and the settled amount is public at `SettleZk`, so amount
+   matching (Section 3.2) used to exclude every deposit of a different size. A
+   pool now admits exactly one ZK size, so every deposit and every settle carry
+   byte-identical amounts and this channel is empty. The denomination was adopted
+   for soundness, but this is a genuine privacy gain and it is the standard
+   Tornado argument for denominations.
 
-So the honest statement of the set is: **the window's ZK deposits of the same
-amount**, and a participant should count exactly that, not the pool's total
-deposits and not the window's commit count.
+So the honest statement of the set is: **the window's ZK deposits**, and a
+participant should count exactly that, not the pool's total deposits and not the
+window's commit count. Net of the fix the set did not shrink: it was already
+"same-window, same-amount deposits", because crowd leaves that could satisfy the
+circuit were exactly the free leaves the fix removes, and the amount channel that
+split deposits by size is exactly the one the denomination closes.
 
-**What `SettleZk` does not check, and why not.** All three are pinned by tests in
+**What `SettleZk` does not check, and why not.** Both are pinned by tests in
 `programs/mirror-pool/tests/integration.rs`, so this section cannot quietly drift
 away from the program.
 
@@ -451,6 +461,21 @@ away from the program.
   `crowd_commit_leaf_is_domain_separated_from_the_zk_deposit_leaf` pins that the
   pre-hashing dodge fails too. Note the fix needed NO circuit change, so no
   verifying key was regenerated.
+
+  Two things this does NOT give, stated so the fix is not read as more than it
+  is. First, the bound is **aggregate, not per-leaf**: there is still no on-chain
+  ledger saying "this leaf is worth this much", and a settle still pays out of the
+  pool's whole balance. What holds is that total settled cannot exceed total
+  escrowed, because distinct settles burn distinct nullifier PDAs, `nullifierHash
+  = Poseidon(secret, epoch)` is fixed by the same `(secret, epoch)` the leaf
+  commits to, so distinct settles spend distinct leaves - and every leaf in the ZK
+  domain paid exactly one denomination. A per-leaf ledger is impossible here by
+  construction: it is the same opacity that makes a settle unlinkable to a
+  deposit. Second, `CommitDeposit` cannot check the `epoch` inside the leaf (the
+  leaf is one field element), so a depositor may bind an already-closed epoch and
+  settle without waiting for a window. That costs the depositor their own timing
+  cover and nobody else's, and it cannot draw more than their own denomination, so
+  it is an anonymity footgun rather than a soundness break - residual 13.
 - **No recipient freshness.** "The output goes to a fresh address" is a **client
   convention**, not a program guarantee: `SettleZk` only requires the recipient to
   match the proof's `actionHash`. Nor is freshness meaningfully enforceable here.
@@ -791,7 +816,11 @@ because a threat model that only enumerates its wins is untrustworthy.
     fixed ZK denomination set at init, and program-applied domain separation of
     crowd leaves from deposit leaves (Section 4, with the test that pins the
     original attack now failing). No circuit change was needed, so no verifying
-    key moved.
+    key moved. What remains, and is not a hole: the bound is aggregate (total
+    settled <= total escrowed) rather than a per-leaf escrow ledger, which is
+    unavoidable on a path whose whole point is that a settle is unlinkable to a
+    deposit. **This fix is source-only** - the public devnet program predates it
+    and is still exploitable by the original attack; see `docs/PROOF.md`.
 12. **Confidential-value boundary and TVL (optional layer only).** When the
     confidential-value layer is enabled, amounts are hidden *inside* the pool, but
     the public boundary is not: a shield exposes the deposited amount and depositor,
@@ -803,18 +832,29 @@ because a threat model that only enumerates its wins is untrustworthy.
     and, as with the ZK path, a user who sweeps an unshield output into a wallet
     clusterable to their deposit wallet re-links themselves. This residual exists
     only for deployments that opt into the layer.
+13. **A depositor can bind a stale epoch into its own leaf (anonymity, not
+    funds).** `CommitDeposit` appends one opaque field element, so it cannot read
+    the `epoch` the leaf commits to and cannot require it to be the current
+    window. A depositor may therefore commit a leaf bound to an already-closed
+    epoch and settle it immediately instead of waiting for a window to close. This
+    cannot draw more than that depositor's own denomination (residual 11's bound
+    is unaffected), and it forfeits only the depositor's own timing cover: the
+    settle lands alone in a window nobody else is settling, which is the exact
+    FIFO-matching exposure of Section 3.1, self-inflicted. The compensating
+    control is the client (`mirror-cli deposit-commit` derives the epoch from the
+    chain's current slot). A program-side check would require the epoch to be a
+    public input at deposit time, which would publish it.
 
 None of these residuals reintroduce the property each path sells: within a settled
 epoch that met its floor, the crowd path keeps every participant's action
 indistinguishable *as a signal* from the rest of the crowd, the ZK path keeps the
 depositor-to-output bijection hidden at the 1/k bound over the set of Section 4,
 and the confidential-value layer keeps in-pool amounts and internal-transfer
-initiators hidden. Residuals 10 and 11 are the exceptions worth naming twice: they
-are not erosion around the set, they are conditions on when the ZK path's claim
-holds at all (a window that met the floor, with matching amounts) and on what a v1
-pool may safely hold. Every other one erodes the context around the set rather than
-the indistinguishability inside it, and each is either measured by the harness or
-has a named roadmap mitigation.
+initiators hidden. Residual 10 is the one worth naming twice: it is not erosion
+around the set, it is a condition on when the ZK path's claim holds at all (a
+window that met the floor). Every other one erodes the context around the set
+rather than the indistinguishability inside it, and each is either measured by the
+harness or has a named roadmap mitigation.
 
 ---
 
