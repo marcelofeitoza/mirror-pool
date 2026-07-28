@@ -25,6 +25,18 @@ Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
 > in [`VK_REGISTRY.md`](VK_REGISTRY.md) section 8 and deliberately NOT merged
 > into the tables below, which belong to the earlier program.
 
+> **Reproducing any of this on a public cluster is blocked right now, on
+> funding.** All three soak drivers publish their verifying key through
+> `init-vk` before they settle, so every one of them needs the CURRENT bytecode
+> deployed. That build is 119,072 bytes and costs about 0.83 SOL of rent to
+> deploy or to stage in an upgrade buffer, and the devnet faucet is refusing
+> this address (a 2 SOL request and a 1 SOL request were both rejected while
+> this note was written), against a funder holding 0.4498 SOL. So the
+> public-cluster tables below stay exactly as captured, and new public-cluster
+> work is limited to the paths the already-deployed bytecode has. One such
+> measurement, a multi-hour sustained crowd-path run with its topology delta
+> stated, is recorded in [`DEVNET.md`](DEVNET.md).
+
 > **These are records of runs, not descriptions of the current tree.** Both runs
 > predate the move to in-process pure-Rust Groth16 proving, so several assertion
 > rows below say the proof was generated and verified by `snarkjs`. That is what
@@ -698,6 +710,15 @@ skips, which is what CI does.
 
 Your digests from step 0 onward will differ from the table above (different entropy);
 the phase-1 digest, the r1cs digest and the initial-key digest will not.
+
+> **The funding-round evidence below is local-validator only, and cannot be
+> reproduced on a public cluster today.** `mirror-soak-funding` publishes the
+> JoinSplit verifying key through `init-vk` before it releases anything, and the
+> deployed devnet program predates the registry and has no such instruction, so
+> the soak needs a fresh deployment of current bytecode. That deployment is
+> blocked on faucet funding (see the note at the top of this file). Nothing
+> below is corrected by this: the numbers are exactly as captured against a
+> local Surfpool, which is where they were always claimed to come from.
 
 <!-- funding-round-soak:begin -->
 ## Funding-round soak
