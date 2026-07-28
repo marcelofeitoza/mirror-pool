@@ -54,6 +54,22 @@ That run does a Groth16 setup, produces a proof, and verifies it with
 `groth16_solana::groth16::Groth16Verifier` - the crate the on-chain program
 links - with no circom artifact on disk.
 
+### One residual coupling, stated up front
+
+`mirror-circuits` depends on `mirror-ceremony` so it can reuse that crate's
+verifying-key exporter and its big-endian G1/G2 point encodings instead of
+adding a third copy of the same byte format. `mirror-ceremony` in turn depends
+on `ark-circom`, because importing the snarkjs `.zkey` is how the ceremony gets
+its initial key. So `cargo build -p mirror-circuits` still *compiles*
+`ark-circom` and its `wasmer` runtime, even though nothing on the arkworks path
+calls either.
+
+That is a Rust crate already in the lockfile, not a JavaScript toolchain
+dependency: `circom`, `snarkjs`, `node` and `npm` are genuinely absent from this
+path. Cutting the last Rust link would mean duplicating the encoder, which this
+repo deliberately avoids elsewhere, so the coupling is documented rather than
+traded for a copy.
+
 ---
 
 ## 3. The Poseidon gadget, and what the cross-checks actually prove
