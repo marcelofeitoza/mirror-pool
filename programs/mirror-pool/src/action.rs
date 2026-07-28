@@ -1,9 +1,10 @@
 //! On-chain `actionHash` derivation for the ZK opt-in settlement action.
 //!
-//! The v1 opt-in action is "transfer `amount` lamports to `recipient`" (a fresh
-//! address). `actionHash` binds BOTH so the settling relay cannot redirect the
-//! escrow, and it is the value the membership proof commits to as a public
-//! input:
+//! The v1 opt-in action is "transfer `amount` lamports to `recipient`", where
+//! clients bind a freshly generated address (a convention the program cannot
+//! check; see the `settle_zk` module header). `actionHash` binds BOTH the
+//! recipient and the amount so the settling relay cannot redirect the escrow,
+//! and it is the value the membership proof commits to as a public input:
 //!
 //! ```text
 //! actionHash = Poseidon(recipientHi128, recipientLo128, amount)

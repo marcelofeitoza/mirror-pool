@@ -85,8 +85,11 @@ fail-closed parsing:
   whose `actionHash` binds `(recipient, amount)`.
 - `SettleZk` (ZK opt-in) - verify a Groth16 membership proof on-chain
   (alt_bn128), check the root-history ring, the actionHash binding, and the
-  nullifier, then release the escrow to a fresh recipient with no participant
-  signature.
+  nullifier, then release the escrow to the bound recipient with no participant
+  signature. It enforces no k-floor, no denomination and no recipient freshness;
+  `docs/THREAT_MODEL.md` section 4 gives the reason for each and names what
+  compensates, and "Denominated ZK deposits with per-leaf escrow" below is the
+  change that would let the program enforce them.
 - `ClaimReward` (crowd) - pay a dwell-proportional, drain-safe share of the reward
   pool.
 
@@ -217,7 +220,7 @@ existing, shipped pattern rather than introducing new cryptography.
 
 ### Swap-from-pool and stake-from-pool via CPI
 
-The ZK opt-in path today releases the escrow to a fresh recipient (a lamport
+The ZK opt-in path today releases the escrow to the bound recipient (a lamport
 transfer). The identical pattern (membership proof + root history + nullifier +
 recipient/action binding) supports executing a *different* action from the pool
 authority via CPI: a Jupiter swap or a jitoSOL stake-pool deposit from the pool,
@@ -225,6 +228,35 @@ landing in a fresh account. The behavior adapters already build these instructio
 for the crowd path; the CPI step slots into `SettleZk` step (8) without changing
 the anonymity mechanics. The `SettleEpoch` handler carries the matching hook for
 program-side crowd execution.
+
+### Denominated ZK deposits with per-leaf escrow
+
+The v1 ZK escrow is a pool-wide pot: the leaf is opaque, so nothing on-chain ties
+the `amount` a settle releases to the `amount` its owner escrowed, and because both
+paths append the same leaf shape to one accumulator, a fee-only crowd `Commit` leaf
+satisfies the membership circuit too (`docs/THREAT_MODEL.md` section 4 and residual
+11, with the test that demonstrates it). The consequence is the disclosed limit that
+a v1 pool must not hold value it cannot afford to lose.
+
+The fix is the same one Tornado-style pools use, and it is deliberately a v2
+because it is two coordinated breaking changes rather than a patch:
+
+1. **A fixed denomination per pool.** `InitPool` pins it, `CommitDeposit` rejects
+   anything else, and `SettleZk` requires the released amount to equal it. Each
+   leaf is then worth exactly one denomination, so the pot balances by counting,
+   and the amount channel stops singling out deposits. The confidential-value
+   layer already ships this shape (`DenominationMismatch`, `ValuePool`), so the
+   pattern is proven in-tree. This changes the Pool layout.
+2. **Domain-separated leaves.** The crowd and ZK paths must not share a leaf
+   space, so a crowd commit can never be a membership witness for an escrow.
+   Separating them at append (a distinct hash domain per path) is enough and does
+   not change the circuit; a separate accumulator per path is the heavier variant.
+
+Only with both does an on-chain floor mean what a reader would assume, which is
+why v1 does not ship a floor on this path instead of shipping half of this. Any
+version that adds a settle-time condition to `SettleZk` must ALSO add a refund or
+re-bind path, or it converts thin windows into stranded escrow (the reason the
+floor is a client check today).
 
 ### Anonymity-mining reward on the ZK path
 

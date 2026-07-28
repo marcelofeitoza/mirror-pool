@@ -15,6 +15,17 @@ Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
 > Nothing else about the runs changed: every signature, compute-unit figure and
 > on-chain assertion below is exactly as captured.
 
+**What the ZK step in these runs does and does not show.** Each behavioral soak
+makes exactly ONE ZK deposit, into a freshly opened window, so the window it
+settles holds a single deposit. Those assertions therefore prove the mechanism -
+the proof verifies on-chain, the `actionHash` binding holds, the nullifier
+prevents replay, the escrow moves - and prove **nothing about anonymity**: a set
+of one is not an anonymity set. `SettleZk` has no on-chain k-floor and would
+settle that window regardless; why that is deliberate, and where the floor is
+enforced instead, is in [`THREAT_MODEL.md`](THREAT_MODEL.md) section 4. The
+crowd-path assertions are the ones that exercise a floor (`k_floor = 3`,
+including the under-floor epoch that correctly does not settle).
+
 ---
 
 # Public devnet deployment (browser-verifiable)

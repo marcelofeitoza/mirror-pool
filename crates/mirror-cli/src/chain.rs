@@ -198,6 +198,71 @@ impl PoolState {
 }
 
 // ---------------------------------------------------------------------------
+// Epoch account layout, byte-identical to the on-chain `state::epoch` module.
+// (LE integers; see programs/mirror-pool/src/state/epoch.rs.)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+mod epoch_off {
+    pub const VERSION: usize = 0;
+    pub const EPOCH_ID: usize = 1;
+    pub const NOMINAL_K: usize = 9;
+    pub const SETTLED: usize = 13;
+    pub const BUMP: usize = 14;
+    /// Everything the CLI decodes lives in the prefix ending here; the program
+    /// keeps 17 reserved bytes after it, so the decoder accepts any account at
+    /// least this long and keeps working as reserved fields are claimed.
+    pub const MIN_LEN: usize = BUMP + 1; // 15
+}
+
+/// A decoded snapshot of an Epoch account, as read over RPC.
+#[derive(Clone, Debug)]
+pub struct EpochState {
+    pub epoch_id: u64,
+    /// The window's raw commit count: every `Commit` AND `CommitDeposit` that
+    /// landed in it, of any amount. An UPPER bound on the real anonymity set
+    /// (operator and Sybil commits cannot be subtracted on-chain), which is why
+    /// the program's own module docs call it `nominal_k`.
+    pub nominal_k: u32,
+    /// Whether the CROWD half of this window has settled. Decoded to keep this
+    /// a faithful mirror of the account (the same reason `epoch_off` keeps every
+    /// offset); the ZK path never consults it, since `SettleZk` neither reads
+    /// the Epoch account nor is blocked by a settled crowd epoch.
+    #[allow(dead_code)]
+    pub settled: bool,
+}
+
+impl EpochState {
+    /// Decode the raw Epoch account bytes. Fails closed on a short account or an
+    /// uninitialized one.
+    pub fn decode(data: &[u8]) -> Result<EpochState> {
+        if data.len() < epoch_off::MIN_LEN {
+            bail!(
+                "epoch account is {} bytes, expected at least {} (layout drift or not an epoch account)",
+                data.len(),
+                epoch_off::MIN_LEN
+            );
+        }
+        if data[epoch_off::VERSION] == 0 {
+            bail!("epoch account is not initialized (version 0)");
+        }
+        Ok(EpochState {
+            epoch_id: u64::from_le_bytes(
+                data[epoch_off::EPOCH_ID..epoch_off::EPOCH_ID + 8]
+                    .try_into()
+                    .expect("8 bytes in range"),
+            ),
+            nominal_k: u32::from_le_bytes(
+                data[epoch_off::NOMINAL_K..epoch_off::NOMINAL_K + 4]
+                    .try_into()
+                    .expect("4 bytes in range"),
+            ),
+            settled: data[epoch_off::SETTLED] != 0,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ValuePool account layout, byte-identical to the on-chain `state::value_pool`.
 // (LE integers; see programs/mirror-pool/src/state/value_pool.rs.)
 // ---------------------------------------------------------------------------
@@ -314,6 +379,22 @@ impl Chain {
             .get_account(pool)
             .with_context(|| format!("reading pool account {pool}"))?;
         PoolState::decode(&account.data)
+    }
+
+    /// Read and decode an Epoch account, or `None` when the window has no Epoch
+    /// PDA at all (nothing was ever committed into it). `None` is a real answer,
+    /// not an error: it means the window's commit count is zero.
+    pub fn epoch_state(&self, epoch_pda: &Pubkey) -> Result<Option<EpochState>> {
+        let account = self
+            .rpc
+            .get_account_with_commitment(epoch_pda, self.rpc.commitment())
+            .with_context(|| format!("reading epoch account {epoch_pda}"))?
+            .value;
+        match account {
+            None => Ok(None),
+            Some(account) if account.data.is_empty() => Ok(None),
+            Some(account) => EpochState::decode(&account.data).map(Some),
+        }
     }
 
     /// Read and decode a ValuePool account.
@@ -521,6 +602,39 @@ mod tests {
         assert_eq!(pool_off::ROOT_RING, 738);
         // The additive incentive tail (documented; not read by the CLI).
         assert_eq!(pool_off::LEN, 1780);
+    }
+
+    #[test]
+    fn epoch_layout_offsets_match_program() {
+        // Mirrors `programs/mirror-pool/src/state/epoch.rs`.
+        assert_eq!(epoch_off::EPOCH_ID, 1);
+        assert_eq!(epoch_off::NOMINAL_K, 9);
+        assert_eq!(epoch_off::SETTLED, 13);
+        assert_eq!(epoch_off::MIN_LEN, 15);
+    }
+
+    /// The epoch decoder reads the window's commit count, tolerates the
+    /// program's reserved tail, and fails closed on a short or uninitialized
+    /// account (a wrong count silently read as 0 would understate, but a wrong
+    /// count read as large would OVERSTATE an anonymity set, so this decode is
+    /// never allowed to guess).
+    #[test]
+    fn epoch_state_decodes_and_fails_closed() {
+        let mut data = vec![0u8; 32]; // program LEN, including the reserved tail
+        data[epoch_off::VERSION] = 1;
+        data[epoch_off::EPOCH_ID..epoch_off::EPOCH_ID + 8].copy_from_slice(&7u64.to_le_bytes());
+        data[epoch_off::NOMINAL_K..epoch_off::NOMINAL_K + 4].copy_from_slice(&5u32.to_le_bytes());
+        data[epoch_off::SETTLED] = 1;
+        let state = EpochState::decode(&data).expect("valid epoch account");
+        assert_eq!(state.epoch_id, 7);
+        assert_eq!(state.nominal_k, 5);
+        assert!(state.settled);
+
+        // Uninitialized (version 0) and short accounts are rejected, not guessed.
+        let mut zeroed = data.clone();
+        zeroed[epoch_off::VERSION] = 0;
+        assert!(EpochState::decode(&zeroed).is_err());
+        assert!(EpochState::decode(&data[..epoch_off::MIN_LEN - 1]).is_err());
     }
 
     #[test]

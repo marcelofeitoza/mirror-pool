@@ -146,8 +146,11 @@ The anonymity-preserving equivalent, for a future version, mirrors the membershi
   membership claims at most once, exactly like `SETTLE_ZK`), and the payout amount derived
   from the proven dwell against the on-chain reward-pool accounting.
 - **Why it does not deanonymize.** The claim carries a proof and a fresh nullifier, never an
-  identity, and pays out to a fresh address, so it has the same unlinkability as `SETTLE_ZK`.
-  The reward is a function of proven dwell, not of who is claiming.
+  identity, and pays out to a client-generated fresh address, so it has the same
+  unlinkability as `SETTLE_ZK` - including the same limits, since it would hide the
+  claimant only among the members its own public inputs leave standing (see
+  `docs/THREAT_MODEL.md` section 4). The reward is a function of proven dwell, not of who
+  is claiming.
 
 This is a real extension of the existing pattern (proof + root-history + nullifier +
 fresh-recipient binding), not new cryptography. It is described here so the ZK path's

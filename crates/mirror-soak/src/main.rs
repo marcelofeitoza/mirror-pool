@@ -16,7 +16,10 @@
 //!    shipped `mirror-cli deposit-commit`; after the window closes `mirror-cli
 //!    prove` produces a verified Groth16 SettleZk, submitted by the relay.
 //!    Verified: the escrow landed at the fresh recipient, the nullifier PDA
-//!    exists, and a replay is rejected (nullifier spent).
+//!    exists, and a replay is rejected (nullifier spent). The soak makes ONE ZK
+//!    deposit, so this window's nominal set is 1 and `prove`'s anonymity floor
+//!    is waived on purpose (`--accept-thin-set`): the step proves the mechanism,
+//!    not anonymity.
 //! 4. **Adversarial** - an under-floor epoch does not settle (on-chain
 //!    BelowKFloor + off-chain coordinator roll-forward); a duplicate crowd
 //!    nullifier is rejected (NullifierSpent); a re-settle is rejected
@@ -932,6 +935,14 @@ async fn main() -> Result<()> {
     wait_until_slot(client.as_ref(), settle_slot_c).await?;
 
     // Generate + verify the Groth16 proof and emit the SettleZk instruction.
+    //
+    // `--accept-thin-set` is passed DELIBERATELY and is worth reading twice: this
+    // soak makes exactly ONE ZK deposit, so the window it settles into has a
+    // nominal set of 1 and `prove` would otherwise refuse (correctly). What this
+    // step demonstrates is that the proof, the binding, and the settlement work
+    // end to end; it demonstrates NOTHING about anonymity, because a set of one
+    // is not an anonymity set. A real deployment must not pass this flag. The
+    // emitted bundle records the waived count in its `anonymity` block.
     let emit_path = root.join(".soak/zk-emit.json");
     run_cli(
         &cli,
@@ -946,6 +957,7 @@ async fn main() -> Result<()> {
             &snarkjs,
             "--out",
             &emit_path.to_string_lossy(),
+            "--accept-thin-set",
         ],
     )?;
     report.check(
@@ -1297,6 +1309,26 @@ fn write_proof_md(
         "   membership proof and the relay submits `SettleZk`, moving the escrow to the"
     )?;
     writeln!(s, "   fresh recipient.")?;
+    writeln!(
+        s,
+        "   This soak makes ONE ZK deposit, so its ZK window has a nominal set of 1 and the"
+    )?;
+    writeln!(
+        s,
+        "   `prove` floor is waived with `--accept-thin-set`. It proves the proof, the"
+    )?;
+    writeln!(
+        s,
+        "   binding, and the settlement, and proves NOTHING about anonymity: a set of one"
+    )?;
+    writeln!(
+        s,
+        "   is not an anonymity set. `SettleZk` has no on-chain floor, by design and for"
+    )?;
+    writeln!(
+        s,
+        "   the reason given in `docs/THREAT_MODEL.md` section 4."
+    )?;
     writeln!(
         s,
         "4. **Adversarial** - under-floor epoch does not settle (on-chain `BelowKFloor` +"

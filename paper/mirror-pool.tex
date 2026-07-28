@@ -54,8 +54,9 @@ this path destroys is the per-actor \emph{signal} (timing, ordering, size, gas
 payer, fingerprint, parseable intent) and not the on-chain signer, which is
 collective intent-deniability rather than who-initiated unlinkability. A
 \textbf{zero-knowledge opt-in path} is the one that hides WHO: it proves membership
-on-chain via Groth16 and settles to a fresh output with no participant signature at
-settle, so no wallet is linked to the settled instance. An optional
+on-chain via Groth16 and settles with no participant signature at settle, so no
+wallet is linked to the settled instance, within the set its own public inputs
+leave standing (Section~\ref{sec:limits}). An optional
 \textbf{confidential-value layer} adds a 2-in/2-out Tornado-Nova JoinSplit that
 hides HOW MUCH inside encrypted notes. Running the ZK path with the value layer
 composes the two privacy axes; both are proven on-chain on public Solana devnet. We
@@ -257,12 +258,17 @@ escrows the action input at commit time, binding a \emph{fresh} output through
 $\text{actionHash} = \text{Poseidon}(\text{recipientHi128},
 \text{recipientLo128}, \text{amount})$. At settlement the relay verifies a
 Groth16 membership proof on-chain that an output corresponds to \emph{some}
-committed member without revealing which, checks the \code{actionHash} binding and
-nullifier, and releases the escrow to the fresh address with no participant
-signature. This provides cryptographic who-initiated unlinkability: the deposit
-is visible, the output goes to a fresh address, and the coordinator is not in the
-trust base for attribution (it settles for \emph{some} member without learning
-which).
+member of the accumulator without revealing which, checks the \code{actionHash}
+binding and nullifier, and releases the escrow to the bound address with no
+participant signature. This provides cryptographic who-initiated unlinkability:
+the deposit is visible, no participant signs at settle, and the coordinator is not
+in the trust base for attribution (it settles for \emph{some} member without
+learning which). The set that unlinkability is over is narrower than the proof
+alone: \code{SettleZk} publishes the epoch and the amount, so the covering set is
+the window's ZK deposits of the same amount, and the program enforces no floor on
+it, no denomination, and no recipient freshness. Section~\ref{sec:limits} states
+each of those and why none can be a settle-time check on a path whose escrow has
+no refund.
 
 \subsection{Why the design defeats the named attacks}
 
@@ -309,7 +315,7 @@ between the host builder and the SBF parser with compile-time size asserts on bo
 1 & \code{Commit} & participant & append one 32-byte leaf, bump commit count, collect fee, accrue dwell \\
 2 & \code{SettleEpoch} & rotating relay & enforce authority $+$ $k$-floor, one Nullifier PDA per spend, mark settled \\
 3 & \code{CommitDeposit} & participant & escrow \code{amount}, append leaf whose \code{actionHash} binds (recipient, amount) \\
-4 & \code{SettleZk} & rotating relay & verify Groth16 membership on-chain, release escrow to a fresh recipient \\
+4 & \code{SettleZk} & rotating relay & verify Groth16 membership on-chain, release escrow to the bound recipient \\
 5 & \code{ClaimReward} & participant & dwell-proportional, drain-safe reward-pool payout \\
 6 & \code{InitValuePool} & operator & create the confidential ValuePool $+$ vault; fix authority, fee, denomination \\
 7 & \code{Transact} & rotating relay & verify one 2-in/2-out JoinSplit on-chain; shield / transfer / unshield \\
@@ -775,7 +781,9 @@ A fresh pool per run (\code{epoch\_slots}$=128$, \code{k\_floor}$=3$,
 commit the \emph{same} \code{PlainTransfer} into one shared epoch, settled by one
 atomic gasless transaction (the sink is credited $4\times10^7$ lamports, i.e.\
 $4\times$ the $10^7$ bucket); a ZK opt-in escrow of $5\times10^7$ is settled by an
-on-chain Groth16 \code{SettleZk} to a fresh recipient. The adversarial cases all
+on-chain Groth16 \code{SettleZk}. The run makes one ZK deposit, so that settle
+exercises the mechanism (proof, binding, nullifier, escrow move) and not
+anonymity: its window holds a single deposit. The adversarial cases all
 fail closed on-chain: under-floor no-settle (\code{BelowKFloor}, custom error
 \code{0x2}), duplicate nullifier (\code{NullifierSpent}, \code{0x3}), re-settle
 (\code{EpochAlreadySettled}, \code{0x6}), mismatched recipient
@@ -909,6 +917,29 @@ leaks and what we do not claim.
         observable; and a participant who sweeps a fresh output into a clusterable
         wallet re-links themselves. Compliance and association-set tooling is
         future work.
+  \item \textbf{The ZK path's set is per-window and per-amount, and no on-chain
+        floor bounds it.} \code{SettleZk} publishes the epoch and the amount, so
+        the covering set is that window's ZK deposits of the same amount, and the
+        program will settle into a set of one: it reads neither \code{k\_floor}
+        nor any Epoch account. This asymmetry with \code{SettleEpoch} is
+        deliberate. A crowd epoch below the floor \emph{rolls forward} at no cost
+        to anyone, whereas the ZK escrow's only exit is a \code{SettleZk} bound to
+        one (recipient, amount, epoch), with no refund and no re-binding, so a
+        settle-time floor would convert thin anonymity into permanently stranded
+        escrow. Only the secret holder can produce the proof, so no third party
+        can force a thin settle, and the floor is enforced at proof time instead
+        (the CLI refuses below \code{k\_floor} unless explicitly waived). For the
+        same reason recipient \emph{freshness} is a client convention rather than
+        a check: a dusted recipient address would otherwise strand the escrow.
+        Both properties are pinned by mollusk tests.
+  \item \textbf{The ZK escrow is a shared pot (v1 soundness).} The leaf is opaque,
+        so nothing on-chain ties a settled amount to what its owner escrowed, and
+        because both paths append the same leaf shape to one accumulator, a
+        fee-only crowd \code{Commit} leaf satisfies the membership circuit too (a
+        test demonstrates exactly this). A v1 pool must therefore not hold value it
+        cannot afford to lose. Closing it needs a fixed denomination plus
+        domain-separated leaves, a layout and circuit change; a partial fix would
+        read like a full one.
 \end{itemize}
 
 \section{Related work}

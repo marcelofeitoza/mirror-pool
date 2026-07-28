@@ -8,13 +8,19 @@
 //! 2. Rebuild the Merkle inclusion path off-chain (walk the frontier snapshot the
 //!    note captured at commit time, or rebuild the whole tree from `--leaves`) and
 //!    confirm the resulting root is a root the Pool currently accepts.
-//! 3. Generate the Groth16 proof IN-PROCESS in pure Rust (the default) via
+//! 3. Size the anonymity set this settle would land in ([`AnonymitySet`]) and
+//!    refuse to prove into a window below the pool's `k_floor` unless the
+//!    participant waives it explicitly. This is the ZK path's floor: the program
+//!    cannot enforce one at settle without stranding escrow (that path has no
+//!    refund and no roll-forward), and the participant is the only party who can
+//!    produce the proof, so refusing here is both free and sufficient.
+//! 4. Generate the Groth16 proof IN-PROCESS in pure Rust (the default) via
 //!    [`crate::prove_rust`]: `ark-circom` runs the compiled `membership.wasm`
 //!    witness calculator under the `wasmer` VM, reads the proving key from
 //!    `membership_final.zkey`, and `ark-groth16` produces + verifies the proof - no
 //!    Node/snarkjs process is spawned. A `--use-snarkjs` fallback still shells out
 //!    to `snarkjs groth16 fullprove` + `verify` for parity checks.
-//! 4. Serialize the proof + public inputs into the exact `SettleZk` instruction
+//! 5. Serialize the proof + public inputs into the exact `SettleZk` instruction
 //!    data (proof_a pre-negated) and emit it for the relay/coordinator to submit.
 //!
 //! The circuit artifacts (`membership.r1cs`, `membership_js/membership.wasm`,
@@ -67,6 +73,50 @@ pub struct ProveOpts {
     pub work_dir: Option<PathBuf>,
     /// Optional path to also write the emitted `SettleZk` JSON to.
     pub out: Option<PathBuf>,
+    /// Settle even though the window's commit count is below the pool's
+    /// `k_floor` (see [`AnonymitySet`]). Off by default: a thin window is the
+    /// one condition the participant, and only the participant, can still
+    /// refuse. Turning it on is a deliberate, informed trade of anonymity for
+    /// getting the escrow out.
+    pub accept_thin_set: bool,
+}
+
+/// What the client can see, from on-chain state alone, about the anonymity set a
+/// `SettleZk` would land in.
+///
+/// `SettleZk` publishes the proof's `epoch` and the settled `amount`. The proof
+/// itself hides the member among every leaf under the proven root, but those two
+/// public values narrow what an observer has to consider: the leaf binds the
+/// epoch (`commitment = Poseidon(secret, actionHash, epoch)`), and the escrow
+/// amounts are public at deposit. So the set that actually covers an output is
+/// the window's ZK deposits of the SAME amount, and `nominal_k` is an upper
+/// bound on it in three separate ways: it counts crowd `Commit`s as well as ZK
+/// `CommitDeposit`s, it counts every amount rather than the matching one, and it
+/// counts operator and Sybil commits that add no anonymity at all.
+///
+/// The floor is checked HERE, in the client, and not on-chain, because the ZK
+/// escrow's only exit is `SettleZk`: an on-chain floor would strand the escrow
+/// of any window that never reaches it, and there is no refund and no
+/// roll-forward on this path. The participant is also the only party who can
+/// produce the proof at all, so declining is both free and sufficient.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct AnonymitySet {
+    /// The epoch the note's leaf binds, i.e. the window this settle publishes.
+    pub epoch: u64,
+    /// The window's raw commit count (0 when the window has no Epoch account).
+    pub nominal_k: u32,
+    /// The pool's declared floor, fixed at `InitPool`.
+    pub k_floor: u32,
+    /// True only when the floor was actually missed AND the participant waived
+    /// it, so a run that met the floor never records a waiver it did not use.
+    pub accepted_below_floor: bool,
+}
+
+impl AnonymitySet {
+    /// Whether the window's nominal count reaches the pool's floor.
+    pub fn meets_floor(&self) -> bool {
+        self.nominal_k >= self.k_floor
+    }
 }
 
 /// The `SettleZk` bundle `prove` emits: instruction data plus the accounts the
@@ -88,6 +138,10 @@ pub struct SettleZkEmit {
     pub action_hash_hex: String,
     /// The full `SettleZk` instruction data (tag + body), hex, `SETTLE_ZK_LEN` bytes.
     pub settle_zk_data_hex: String,
+    /// The anonymity set this settle lands in, as the client measured it. The
+    /// program does not check any of this (see [`AnonymitySet`]), so it is
+    /// recorded here to keep the number that was accepted on the record.
+    pub anonymity: AnonymitySet,
 }
 
 pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
@@ -154,7 +208,62 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
         );
     }
 
-    // (3) Generate + verify the Groth16 proof. Default: in-process pure Rust
+    // (3) The anonymity gate. `SettleZk` publishes the epoch and the amount, so
+    // the set that covers this output is the window's same-amount ZK deposits;
+    // `nominal_k` bounds it from above. The program cannot enforce a floor here
+    // without stranding escrow (there is no refund and no roll-forward on this
+    // path), and the participant is the only party who can produce this proof,
+    // so the floor is enforced at proof time and can be waived only here.
+    let epoch_pda = chain::epoch_pda(&program_id, &pool, note.epoch);
+    let nominal_k = match chain
+        .epoch_state(&epoch_pda)
+        .context("reading the epoch account to size the anonymity set")?
+    {
+        // No Epoch account means nothing was ever committed in that window.
+        None => 0,
+        Some(state) => {
+            // The PDA seeds already bind the id; disagreeing state means layout
+            // drift, and sizing an anonymity set off drifted state is exactly
+            // the number nobody should trust. Fail closed instead.
+            if state.epoch_id != note.epoch {
+                bail!(
+                    "epoch account {} reports epoch {} but the note binds epoch {} (layout drift)",
+                    epoch_pda,
+                    state.epoch_id,
+                    note.epoch
+                );
+            }
+            state.nominal_k
+        }
+    };
+    let mut anonymity = AnonymitySet {
+        epoch: note.epoch,
+        nominal_k,
+        k_floor: pool_state.k_floor,
+        accepted_below_floor: false,
+    };
+    // One predicate for the gate and for the unit test that pins it.
+    let below_floor = !anonymity.meets_floor();
+    anonymity.accepted_below_floor = below_floor && opts.accept_thin_set;
+    if below_floor && !opts.accept_thin_set {
+        bail!(
+            "epoch {} holds {} commitment(s), below this pool's k_floor of {}: settling now would \
+             publish an output into an anonymity set small enough to attribute by elimination.\n\
+             The window is closed, so this count can no longer grow. Your options are to leave the \
+             escrow where it is (it stays in the pool; there is no refund instruction) or to accept \
+             the thin set explicitly with --accept-thin-set.\n\
+             Note that {} is an UPPER bound on your real cover: it counts crowd commits as well as \
+             ZK deposits, every amount rather than the {} lamports this settle publishes, and any \
+             operator or Sybil commits in the window.",
+            note.epoch,
+            nominal_k,
+            pool_state.k_floor,
+            nominal_k,
+            amount,
+        );
+    }
+
+    // (4) Generate + verify the Groth16 proof. Default: in-process pure Rust
     // (no Node process). Fallback: shell out to snarkjs behind `--use-snarkjs`.
     let proof_bytes = if opts.use_snarkjs {
         prove_with_snarkjs(
@@ -176,7 +285,7 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
         )?
     };
 
-    // (4) Serialize into SettleZk instruction data.
+    // (5) Serialize into SettleZk instruction data.
     let data = groth16::settle_zk_data(
         note.epoch,
         amount,
@@ -208,6 +317,7 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
         nullifier_hash_hex: to_hex(&nullifier_hash),
         action_hash_hex: to_hex(&action_hash),
         settle_zk_data_hex: to_hex(&data),
+        anonymity,
     };
 
     if let Some(out) = &opts.out {
@@ -550,6 +660,28 @@ fn cross_check_public(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ZK path's k-floor lives here, so the decision itself is a unit under
+    /// test: at or above the floor settles, below it does not, and a window with
+    /// no Epoch account at all (nominal_k = 0) is the thinnest case there is.
+    #[test]
+    fn anonymity_set_floor_decision() {
+        let set = |nominal_k, k_floor| AnonymitySet {
+            epoch: 7,
+            nominal_k,
+            k_floor,
+            accepted_below_floor: false,
+        };
+        assert!(set(3, 3).meets_floor(), "exactly at the floor settles");
+        assert!(set(9, 3).meets_floor());
+        assert!(!set(2, 3).meets_floor(), "below the floor must not settle");
+        assert!(
+            !set(0, 3).meets_floor(),
+            "a window with no commits at all is the thinnest case"
+        );
+        // A floor of 0 or 1 is no floor: a set of one is one member, itself.
+        assert!(set(1, 1).meets_floor());
+    }
 
     /// DECISIVE offline check: `prove`'s client-side building blocks reproduce the
     /// committed circuit fixture's root, nullifierHash, and actionHash EXACTLY.

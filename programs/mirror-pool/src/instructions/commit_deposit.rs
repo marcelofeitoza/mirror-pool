@@ -3,13 +3,22 @@
 //! Like the crowd `COMMIT`, a participant posts a 32-byte commitment leaf into
 //! the current epoch's frontier accumulator. UNLIKE the crowd path, the
 //! participant also ESCROWS `amount` lamports into the pool: the ZK opt-in
-//! action (settled later by `SETTLE_ZK`) transfers that escrow to a fresh
-//! address, and the commitment's `actionHash` binds `(recipient, amount)` (see
-//! `mirror_core::transfer_action_hash`) so the relay cannot redirect it.
+//! action (settled later by `SETTLE_ZK`) transfers that escrow to the bound
+//! recipient (clients bind a fresh address), and the commitment's `actionHash`
+//! binds `(recipient, amount)` (see `mirror_core::transfer_action_hash`) so the
+//! relay cannot redirect it.
 //!
 //! The commitment is `Poseidon(secret, actionHash, epoch)` computed client-side;
 //! on-chain it is an opaque leaf appended to the SAME accumulator the crowd path
-//! uses, so both paths share one anonymity set and one recent-root history.
+//! uses, so both paths share one accumulator and one recent-root history.
+//!
+//! Two consequences of that sharing, both stated in full in the `settle_zk`
+//! module header because they bound what this path promises: the escrow is a
+//! POOL-WIDE POT (the leaf is opaque, so nothing on-chain can tie the `amount`
+//! escrowed here to the `amount` the leaf's `actionHash` binds, and a fee-only
+//! crowd leaf satisfies the membership circuit too), and the set that actually
+//! covers a settled output is this window's ZK deposits OF THE SAME AMOUNT,
+//! since `SETTLE_ZK` publishes both the epoch and the amount.
 //!
 //! Like the crowd `COMMIT`, this path also collects the pool's anti-Sybil entry
 //! fee (on top of the escrow) and splits its `reward_bps` share into the reward
