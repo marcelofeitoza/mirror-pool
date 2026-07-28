@@ -20,8 +20,11 @@ use ark_snark::SNARK;
 use ark_std::rand::{CryptoRng, RngCore};
 
 use crate::membership::{MembershipCircuit, MembershipWitness, N_PUBLIC_INPUTS};
+use crate::transaction::{
+    TransactionCircuit, TransactionWitness, N_PUBLIC_INPUTS as TRANSACTION_N_PUBLIC_INPUTS,
+};
 
-/// The R1CS shape of the membership circuit, measured by synthesizing it.
+/// The R1CS shape of a circuit, measured by synthesizing it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
     /// Constraints arkworks emits. Every one is a genuine multiplication
@@ -35,11 +38,11 @@ pub struct Shape {
     pub instance_variables: usize,
 }
 
-/// Synthesize the circuit and report its shape. Takes a populated witness so the
-/// result is a system that is actually satisfied, not just allocated.
-pub fn shape(witness: &MembershipWitness) -> Result<(Shape, bool), SynthesisError> {
+/// Synthesize any circuit in this crate and report its shape, plus whether the
+/// resulting system is satisfied.
+pub fn shape_of<C: ConstraintSynthesizer<Fr>>(circuit: C) -> Result<(Shape, bool), SynthesisError> {
     let cs = ConstraintSystem::<Fr>::new_ref();
-    witness.circuit.clone().generate_constraints(cs.clone())?;
+    circuit.generate_constraints(cs.clone())?;
     let satisfied = cs.is_satisfied()?;
     Ok((
         Shape {
@@ -50,6 +53,18 @@ pub fn shape(witness: &MembershipWitness) -> Result<(Shape, bool), SynthesisErro
         },
         satisfied,
     ))
+}
+
+/// Synthesize the membership circuit and report its shape. Takes a populated
+/// witness so the result is a system that is actually satisfied, not just
+/// allocated.
+pub fn shape(witness: &MembershipWitness) -> Result<(Shape, bool), SynthesisError> {
+    shape_of(witness.circuit.clone())
+}
+
+/// Synthesize the JoinSplit circuit and report its shape.
+pub fn transaction_shape(witness: &TransactionWitness) -> Result<(Shape, bool), SynthesisError> {
+    shape_of(witness.circuit.clone())
 }
 
 /// Run a single-party Groth16 setup over the membership circuit.
@@ -85,6 +100,42 @@ pub fn prove<R: RngCore + CryptoRng>(
 pub fn verify(
     vk: &VerifyingKey<Bn254>,
     public_inputs: &[Fr; N_PUBLIC_INPUTS],
+    proof: &Proof<Bn254>,
+) -> Result<bool, SynthesisError> {
+    let pvk = Groth16::<Bn254>::process_vk(vk)?;
+    Groth16::<Bn254>::verify_with_processed_vk(&pvk, public_inputs, proof)
+}
+
+/// Run a single-party Groth16 setup over the JoinSplit circuit.
+///
+/// The same trust statement as [`setup`]: NOT a ceremony, and nothing here
+/// should secure value. See the module docs.
+pub fn transaction_setup<R: RngCore + CryptoRng>(
+    rng: &mut R,
+) -> Result<ProvingKey<Bn254>, SynthesisError> {
+    let (pk, _vk) = Groth16::<Bn254>::circuit_specific_setup(TransactionCircuit::blank(), rng)?;
+    Ok(pk)
+}
+
+/// Prove a JoinSplit witness under `pk`, and verify the proof in-process against
+/// `pk.vk` before returning it, for the same reason [`prove`] does.
+pub fn transaction_prove<R: RngCore + CryptoRng>(
+    pk: &ProvingKey<Bn254>,
+    witness: &TransactionWitness,
+    rng: &mut R,
+) -> Result<Proof<Bn254>, SynthesisError> {
+    let proof = Groth16::<Bn254>::prove(pk, witness.circuit.clone(), rng)?;
+    if !transaction_verify(&pk.vk, &witness.public_inputs, &proof)? {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    Ok(proof)
+}
+
+/// Verify a JoinSplit proof with arkworks' own verifier (the in-process
+/// cross-check; the on-chain verifier is exercised separately in `tests/`).
+pub fn transaction_verify(
+    vk: &VerifyingKey<Bn254>,
+    public_inputs: &[Fr; TRANSACTION_N_PUBLIC_INPUTS],
     proof: &Proof<Bn254>,
 ) -> Result<bool, SynthesisError> {
     let pvk = Groth16::<Bn254>::process_vk(vk)?;
