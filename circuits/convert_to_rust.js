@@ -7,13 +7,17 @@
 //   artifacts/vk.rs             pub const VERIFYINGKEY: Groth16Verifyingkey
 //   artifacts/proof_fixture.rs  PROOF_A / PROOF_B / PROOF_C / PUBLIC_INPUTS
 //
-// Two circuits share this converter:
+// Three circuits share this converter:
 //   (default)              membership  -> verification_key.json, proof_fixture.json,
 //                                         fixture_meta.json -> vk.rs, proof_fixture.rs
 //   --circuit=transaction  transaction -> transaction_verification_key.json,
 //                                         transaction_proof_fixture.json,
 //                                         transaction_fixture_meta.json ->
 //                                         transaction_vk.rs, transaction_proof_fixture.rs
+//   --circuit=association  association -> association_verification_key.json,
+//                                         association_proof_fixture.json,
+//                                         association_fixture_meta.json ->
+//                                         association_vk.rs, association_proof_fixture.rs
 //
 // Byte layout (all big-endian, uncompressed - as the alt_bn128 syscalls expect):
 //   G1 point  = x_be(32) || y_be(32)                       (64 bytes)
@@ -75,19 +79,46 @@ function fmtBytes(bytes, indent) {
 
 function main() {
   // Optional --circuit=<name>. Default (membership) keeps the original filenames;
-  // --circuit=transaction reads/writes the transaction-prefixed artifacts.
+  // --circuit=transaction / --circuit=association read/write the prefixed artifacts.
   const circuitArg = process.argv.slice(2).find((a) => a.startsWith("--circuit="));
   const circuit = circuitArg ? circuitArg.slice("--circuit=".length) : "membership";
-  const isTx = circuit === "transaction";
 
-  const vkFile = isTx ? "transaction_verification_key.json" : "verification_key.json";
-  const fixtureFile = isTx ? "transaction_proof_fixture.json" : "proof_fixture.json";
-  const metaFile = isTx ? "transaction_fixture_meta.json" : "fixture_meta.json";
-  const vkRsFile = isTx ? "transaction_vk.rs" : "vk.rs";
-  const proofRsFile = isTx ? "transaction_proof_fixture.rs" : "proof_fixture.rs";
-  const label = isTx
-    ? "mirror-pool transaction (2-in/2-out JoinSplit)"
-    : "mirror-pool membership";
+  // One table instead of nested ternaries, so adding a fourth circuit is a row.
+  const CIRCUITS = {
+    membership: {
+      vkFile: "verification_key.json",
+      fixtureFile: "proof_fixture.json",
+      metaFile: "fixture_meta.json",
+      vkRsFile: "vk.rs",
+      proofRsFile: "proof_fixture.rs",
+      label: "mirror-pool membership",
+    },
+    transaction: {
+      vkFile: "transaction_verification_key.json",
+      fixtureFile: "transaction_proof_fixture.json",
+      metaFile: "transaction_fixture_meta.json",
+      vkRsFile: "transaction_vk.rs",
+      proofRsFile: "transaction_proof_fixture.rs",
+      label: "mirror-pool transaction (2-in/2-out JoinSplit)",
+    },
+    association: {
+      vkFile: "association_verification_key.json",
+      fixtureFile: "association_proof_fixture.json",
+      metaFile: "association_fixture_meta.json",
+      vkRsFile: "association_vk.rs",
+      proofRsFile: "association_proof_fixture.rs",
+      label: "mirror-pool association (opt-in curated-set membership)",
+    },
+  };
+
+  const spec = CIRCUITS[circuit];
+  if (!spec) {
+    console.error(
+      `unknown --circuit=${circuit}; expected one of ${Object.keys(CIRCUITS).join(", ")}`
+    );
+    process.exit(1);
+  }
+  const { vkFile, fixtureFile, metaFile, vkRsFile, proofRsFile, label } = spec;
 
   const vk = JSON.parse(fs.readFileSync(path.join(ARTIFACTS, vkFile), "utf8"));
   const fixture = JSON.parse(fs.readFileSync(path.join(ARTIFACTS, fixtureFile), "utf8"));

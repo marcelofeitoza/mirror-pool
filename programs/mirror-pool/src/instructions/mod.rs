@@ -16,8 +16,11 @@
 pub mod claim_reward;
 pub mod commit;
 pub mod commit_deposit;
+pub mod init_association;
 pub mod init_pool;
 pub mod init_value_pool;
 pub mod settle_epoch;
 pub mod settle_zk;
+pub mod settle_zk_associated;
 pub mod transact;
+pub mod update_association_root;

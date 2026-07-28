@@ -336,6 +336,12 @@ reasoning, and the set the ZK path actually gives, are in
   participants also dwell two rounds - dwell being a recommendation the protocol
   cannot enforce. Both residuals are published rather than rounded away, and the
   same pool used naively measures 7.66.
+- [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) - the OPT-IN association-set layer
+  (Privacy Pools): prove your deposit is in a curator's curated set without
+  revealing which deposit it is, enforced on-chain in the execute path. Includes
+  the curator trust assumption, the censorship tradeoff (and why there is
+  deliberately no mandatory mode), what an excluded user can still do, how it
+  composes with the viewing keys, and the limits.
 - [`docs/CEREMONY.md`](docs/CEREMONY.md) - the multi-party Groth16 phase-2
   trusted-setup ceremony: how to contribute, how to verify somebody else's, why a
   beacon is final and how that is enforced, how the independent-contributor count

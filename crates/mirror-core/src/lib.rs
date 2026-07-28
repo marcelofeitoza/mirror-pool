@@ -424,6 +424,15 @@ pub mod wire {
         /// settlement (shield / transfer / unshield). See
         /// [`super::TRANSACT_HEADER_LEN`].
         pub const TRANSACT: u8 = 7;
+        /// Opt-in compliance layer: register a curator's association set (seeds
+        /// `["assoc", pool, curator]`). See [`super::INIT_ASSOCIATION_LEN`].
+        pub const INIT_ASSOCIATION: u8 = 8;
+        /// Opt-in compliance layer: publish a new curated-set Merkle root. See
+        /// [`super::UPDATE_ASSOCIATION_ROOT_LEN`].
+        pub const UPDATE_ASSOCIATION_ROOT: u8 = 9;
+        /// Opt-in compliance layer: settle one membership that ALSO carries a
+        /// curated-set inclusion proof. See [`super::SETTLE_ZK_ASSOCIATED_LEN`].
+        pub const SETTLE_ZK_ASSOCIATED: u8 = 10;
     }
 
     /// INIT_POOL layout:
@@ -476,6 +485,42 @@ pub mod wire {
     /// commits to; the program requires the two encodings to agree. MUST stay
     /// byte-identical to the program's `wire::SETTLE_ZK_LEN`.
     pub const SETTLE_ZK_LEN: usize = 1 + 8 + 8 + 64 + 128 + 64 + 32 + 32 + 32 + 32;
+
+    /// One Groth16 public input (a canonical big-endian BN254 scalar), shared by
+    /// the membership and association layouts.
+    pub const PUBLIC_INPUT_LEN: usize = 32;
+
+    // --- Opt-in compliance layer (ADDITIVE): AssociationSet + SettleZkAssociated.
+    // Kept byte-identical to the on-chain program's mirrored `wire` module; the
+    // compile-time asserts below (and the program's) pin the numbers. ---
+
+    /// INIT_ASSOCIATION layout: `[tag(1)]`. The pool and the curator are both
+    /// accounts (the curator signs for itself), so there is no body. MUST stay
+    /// byte-identical to the program's `wire::INIT_ASSOCIATION_LEN`.
+    pub const INIT_ASSOCIATION_LEN: usize = 1;
+
+    /// UPDATE_ASSOCIATION_ROOT layout: `[tag(1)][root(32)]` - the curator posts
+    /// the Merkle root of its curated commitment list. MUST stay byte-identical to
+    /// the program's `wire::UPDATE_ASSOCIATION_ROOT_LEN`.
+    pub const UPDATE_ASSOCIATION_ROOT_LEN: usize = 1 + 32;
+
+    /// Number of association public inputs, in the fixed order
+    /// [root, nullifierHash, actionHash, epoch, associationRoot]. The first four
+    /// are byte-for-byte the membership circuit's four, in the same order.
+    pub const ASSOCIATION_N_PUBLIC_INPUTS: usize = 5;
+
+    /// SETTLE_ZK_ASSOCIATED layout (ONE membership per call):
+    ///
+    /// ```text
+    /// [tag(1)][epoch(8 LE)][amount(8 LE)]
+    ///   [proof_a(64)][proof_b(128)][proof_c(64)]
+    ///   [root(32)][nullifierHash(32)][actionHash(32)][epoch(32 BE)][associationRoot(32)]
+    /// ```
+    ///
+    /// A strict EXTENSION of [`SETTLE_ZK_LEN`]: identical bytes through the first
+    /// four public inputs, with the curated-set root appended. MUST stay
+    /// byte-identical to the program's `wire::SETTLE_ZK_ASSOCIATED_LEN`.
+    pub const SETTLE_ZK_ASSOCIATED_LEN: usize = SETTLE_ZK_LEN + PUBLIC_INPUT_LEN;
 
     // --- Confidential-value layer (ADDITIVE): ValuePool + Transact. Kept
     // byte-identical to the on-chain program's mirrored `wire` module; the
@@ -560,6 +605,13 @@ pub mod wire {
     const _: () = assert!(TRANSACT_PROOF_B_OFF == 288);
     const _: () = assert!(TRANSACT_PROOF_C_OFF == 416);
     const _: () = assert!(TRANSACT_FEE_OFF == 480);
+    // Opt-in compliance layer: pin the association sizes in lockstep with the
+    // program's mirrored `wire` module (which asserts the same numbers).
+    const _: () = assert!(INIT_ASSOCIATION_LEN == 1);
+    const _: () = assert!(UPDATE_ASSOCIATION_ROOT_LEN == 33);
+    const _: () = assert!(ASSOCIATION_N_PUBLIC_INPUTS == 5);
+    const _: () = assert!(SETTLE_ZK_ASSOCIATED_LEN == 433);
+    const _: () = assert!(PUBLIC_INPUT_LEN == 32);
 }
 
 /// Encrypted output-notes and client-side discovery (host-side only). ADDITIVE:

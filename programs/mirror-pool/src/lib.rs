@@ -63,6 +63,24 @@
 //!   Swap/stake-from-pool are documented extensions of the same pattern (execute
 //!   a different action from the pool authority via CPI).
 //!
+//! Opt-in compliance layer (additive; see `docs/COMPLIANCE.md`). A curator may
+//! register an `AssociationSet` (`INIT_ASSOCIATION`, seeds
+//! `["assoc", pool, curator]`) and publish the Merkle root of a CURATED subset of
+//! this pool's commitments (`UPDATE_ASSOCIATION_ROOT`). A user may then settle via
+//! `SETTLE_ZK_ASSOCIATED`, which verifies a DIFFERENT circuit
+//! (`circuits/association.circom`, its own verifying key in `src/association_vk.rs`)
+//! proving the settling commitment is in the pool tree AND in that curator's set,
+//! still without revealing which commitment it is. This is the Privacy Pools
+//! association-set idea, enforced in the execute path rather than checked
+//! off-chain.
+//!
+//! It is strictly OPT-IN and there is deliberately no pool-level switch making it
+//! mandatory: `SETTLE_ZK` is untouched, so a curator can decline to vouch for
+//! someone but cannot stop them settling. Registration is permissionless and the
+//! set PDA is keyed by curator, so competing curators can coexist and the user
+//! chooses. What an attestation is WORTH is an off-chain judgement about that
+//! curator; the program only proves the inclusion proof really was verified.
+//!
 //! Build:
 //!
 //! ```text
@@ -85,6 +103,16 @@ pub mod vk;
 /// `circuits/artifacts/transaction_vk.rs`). Consumed only by the TRANSACT
 /// handler.
 pub mod transaction_vk;
+
+/// Vendored Groth16 verifying key for the opt-in association circuit
+/// (`src/association_vk.rs`, copied verbatim from
+/// `circuits/artifacts/association_vk.rs`). Consumed only by the
+/// SETTLE_ZK_ASSOCIATED handler.
+///
+/// This is a DIFFERENT key from [`vk`]: the association statement is a different
+/// circuit with 5 public inputs, so a plain membership proof can never satisfy
+/// the association path and vice versa.
+pub mod association_vk;
 
 #[cfg(not(feature = "no-entrypoint"))]
 mod entrypoint;
@@ -120,6 +148,15 @@ pub mod wire {
         /// Confidential-value layer: settle one 2-in/2-out JoinSplit (see
         /// [`super::TRANSACT_HEADER_LEN`]).
         pub const TRANSACT: u8 = 7;
+        /// Opt-in compliance layer: register a curator's association set (see
+        /// [`super::INIT_ASSOCIATION_LEN`]).
+        pub const INIT_ASSOCIATION: u8 = 8;
+        /// Opt-in compliance layer: publish a new curated-set root (see
+        /// [`super::UPDATE_ASSOCIATION_ROOT_LEN`]).
+        pub const UPDATE_ASSOCIATION_ROOT: u8 = 9;
+        /// Opt-in compliance layer: settle one membership that ALSO carries a
+        /// curated-set inclusion proof (see [`super::SETTLE_ZK_ASSOCIATED_LEN`]).
+        pub const SETTLE_ZK_ASSOCIATED: u8 = 10;
     }
 
     /// COMMIT layout: `[tag(1)][commitment(32)]`.
@@ -223,6 +260,38 @@ pub mod wire {
     pub const TRANSACT_HEADER_LEN: usize =
         7 * PUBLIC_INPUT_LEN + PROOF_A_LEN + PROOF_B_LEN + PROOF_C_LEN + 8;
 
+    // --- Opt-in compliance layer (ADDITIVE): AssociationSet + SettleZkAssociated.
+    // REDEFINED here for the same reason the rest of this module is, and pinned by
+    // the compile-time asserts below in lockstep with `mirror_core::wire`. ---
+
+    /// INIT_ASSOCIATION layout: `[tag(1)]` (no body). The pool and the curator are
+    /// both accounts, so nothing needs encoding.
+    /// MUST match `mirror_core::wire::INIT_ASSOCIATION_LEN`.
+    pub const INIT_ASSOCIATION_LEN: usize = 1;
+
+    /// UPDATE_ASSOCIATION_ROOT layout: `[tag(1)][root(32)]`.
+    /// MUST match `mirror_core::wire::UPDATE_ASSOCIATION_ROOT_LEN`.
+    pub const UPDATE_ASSOCIATION_ROOT_LEN: usize = 1 + 32;
+
+    /// Number of association public inputs, in the fixed order
+    /// [root, nullifierHash, actionHash, epoch, associationRoot]. The first four
+    /// are byte-for-byte the membership circuit's, in the same order.
+    /// MUST match `mirror_core::wire::ASSOCIATION_N_PUBLIC_INPUTS`.
+    pub const ASSOCIATION_N_PUBLIC_INPUTS: usize = 5;
+
+    /// SETTLE_ZK_ASSOCIATED layout (ONE membership per call).
+    /// MUST match `mirror_core::wire::SETTLE_ZK_ASSOCIATED_LEN`.
+    ///
+    /// ```text
+    /// [tag(1)][epoch(8 LE)][amount(8 LE)]
+    ///   [proof_a(64)][proof_b(128)][proof_c(64)]
+    ///   [root(32)][nullifierHash(32)][actionHash(32)][epoch(32 BE)][associationRoot(32)]
+    /// ```
+    ///
+    /// A strict EXTENSION of [`SETTLE_ZK_LEN`]: identical through the first four
+    /// public inputs, with `associationRoot` appended.
+    pub const SETTLE_ZK_ASSOCIATED_LEN: usize = SETTLE_ZK_LEN + PUBLIC_INPUT_LEN;
+
     /// Hard upper bound on nullifiers per SETTLE_EPOCH call. Bounds the
     /// `n * 32` length arithmetic (no overflow) and keeps a single settle
     /// inside transaction and compute limits. Larger epochs settle in
@@ -248,6 +317,21 @@ pub mod wire {
     const _: () = assert!(TRANSACT_PROOF_C_OFF == 416);
     const _: () = assert!(TRANSACT_FEE_OFF == 480);
     const _: () = assert!(TRANSACT_N_PUBLIC_INPUTS == 7);
+    // Opt-in compliance layer: pin the association sizes in lockstep with
+    // `mirror_core::wire` (which asserts the same numbers).
+    const _: () = assert!(INIT_ASSOCIATION_LEN == 1);
+    const _: () = assert!(UPDATE_ASSOCIATION_ROOT_LEN == 33);
+    const _: () = assert!(ASSOCIATION_N_PUBLIC_INPUTS == 5);
+    const _: () = assert!(SETTLE_ZK_ASSOCIATED_LEN == 433);
+    const _: () = assert!(
+        SETTLE_ZK_ASSOCIATED_LEN
+            == 1 + 8
+                + 8
+                + PROOF_A_LEN
+                + PROOF_B_LEN
+                + PROOF_C_LEN
+                + ASSOCIATION_N_PUBLIC_INPUTS * PUBLIC_INPUT_LEN
+    );
 }
 
 /// Program-local error codes, surfaced on-chain as `ProgramError::Custom`.
@@ -334,6 +418,20 @@ pub enum MirrorPoolError {
     /// == 0) move no public value and are exempt. Fail closed: the check runs before
     /// the Groth16 proof is verified, so a mismatch is rejected with no state change.
     DenominationMismatch = 23,
+    /// INIT_ASSOCIATION on an AssociationSet PDA that is already registered.
+    AssociationAlreadyInitialized = 24,
+    /// The referenced AssociationSet account has not been registered, is not
+    /// program-owned, or does not parse as an association set.
+    AssociationNotInitialized = 25,
+    /// SETTLE_ZK_ASSOCIATED: the passed AssociationSet curates a DIFFERENT pool
+    /// than the one being settled. Fail closed: a curator's attestation is scoped
+    /// to the pool it registered against and must not be reusable across pools.
+    AssociationPoolMismatch = 26,
+    /// SETTLE_ZK_ASSOCIATED: the proof's `associationRoot` is not in the
+    /// AssociationSet's recent-root ring. Either the curator never published it,
+    /// or it has aged out behind newer publications. Fail closed: no nullifier is
+    /// created and no escrow moves.
+    AssociationRootNotKnown = 27,
     /// Skeleton guard: reserved for handlers whose logic has not landed yet.
     /// Unused in v1 (all five instructions are implemented) but kept so the
     /// off-chain error mapping stays stable.

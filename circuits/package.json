@@ -7,8 +7,10 @@
   "scripts": {
     "build": "bash build.sh",
     "build:transaction": "bash build_transaction.sh",
+    "build:association": "bash build_association.sh",
     "fixture": "node gen_fixture.js",
-    "fixture:transaction": "node gen_transaction_fixture.js"
+    "fixture:transaction": "node gen_transaction_fixture.js",
+    "fixture:association": "node gen_association_fixture.js"
   },
   "dependencies": {
     "circomlib": "^2.0.5",

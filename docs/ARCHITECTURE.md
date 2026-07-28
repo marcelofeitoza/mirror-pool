@@ -111,6 +111,16 @@ program's `wire` module (SBF parser) with compile-time size asserts on both side
 | `5` | `ClaimReward` | participant (crowd) | pay a dwell-proportional, drain-safe share of the on-chain reward pool |
 | `6` | `InitValuePool` | operator | create the confidential ValuePool (its own value-note accumulator + 32-root ring) and its vault PDA, and fix `authority`, `fee`, and `denomination` forever |
 | `7` | `Transact` | rotating relay | verify one 2-in/2-out JoinSplit Groth16 proof on-chain, spend two input nullifiers, insert two output commitments, and move lamports per the signed `publicAmount` (shield / transfer / unshield) |
+| `8` | `InitAssociation` | any curator | create a curator's AssociationSet PDA for a pool (permissionless; seeds include the curator so curators compete) |
+| `9` | `UpdateAssociationRoot` | that curator | publish a new curated-set Merkle root into the set's 8-root ring |
+| `10` | `SettleZkAssociated` | rotating relay | as `SettleZk`, but verifies the ASSOCIATION circuit (5 public inputs, its own verifying key) so the settlement additionally proves curated-set inclusion; shares the `SettleZk` nullifier namespace |
+
+Tags `8`-`10` are the OPT-IN compliance layer (Privacy-Pools-style association
+sets). They are strictly additive: `SettleZk` is unchanged and never reads an
+association account, so no curator can block a settlement, and there is
+deliberately no pool-level flag making association proofs mandatory. The trust
+model, the censorship tradeoff, and the limits are in
+[`COMPLIANCE.md`](./COMPLIANCE.md).
 
 ### 2.1 `InitPool` (tag 0, body 22 bytes)
 
@@ -272,7 +282,17 @@ Pool PDA       seeds = [b"pool",  authority(32)]
 Epoch PDA      seeds = [b"epoch", pool(32), epoch_id(8 LE)]
 Nullifier PDA  seeds = [b"nf",    pool(32), epoch_id(8 LE), nullifier(32)]
 Dwell PDA      seeds = [b"dwell", pool(32), participant(32)]
+AssociationSet seeds = [b"assoc", pool(32), curator(32)]
 ```
+
+The AssociationSet (334 bytes: version, pool, curator, bump, `update_count`, and
+an 8-slot published-root ring) belongs to the opt-in compliance layer. Its seeds
+include the curator so several curators can publish competing curated sets over
+one pool; `SettleZkAssociated` re-derives the PDA from the account's OWN stored
+pool and curator, so a hand-built program-owned account at some other address is
+rejected with `InvalidPda`. Ring slots start as an all-zero sentinel that
+`is_known_root` refuses, so a registered-but-never-published set vouches for
+nothing. See [`COMPLIANCE.md`](./COMPLIANCE.md).
 
 ### 3.1 Pool account (1780 bytes)
 
