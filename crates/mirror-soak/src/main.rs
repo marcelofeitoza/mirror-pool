@@ -949,9 +949,9 @@ async fn main() -> Result<()> {
         ],
     )?;
     report.check(
-        "Groth16 membership proof generated + verified (snarkjs)",
+        "Groth16 membership proof generated + verified (in-process ark-groth16)",
         true,
-        "mirror-cli prove produced a snarkjs-verified SettleZk",
+        "mirror-cli prove produced a SettleZk whose proof it generated and verified in-process",
     );
     let emit: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&emit_path)?).context("read emit")?;
@@ -1290,7 +1290,7 @@ fn write_proof_md(
     )?;
     writeln!(
         s,
-        "   after the window closes `mirror-cli prove` generates a snarkjs-verified Groth16"
+        "   after the window closes `mirror-cli prove` generates an in-process-verified Groth16"
     )?;
     writeln!(
         s,
@@ -1373,7 +1373,7 @@ fn write_proof_md(
     writeln!(s)?;
     writeln!(
         s,
-        "# 3. (ZK path) ensure snarkjs + the circuit artifacts are present"
+        "# 3. (ZK path) ensure the circuit artifacts are present (proving is in-process\n#    pure Rust; circom/snarkjs are only needed to BUILD these artifacts)"
     )?;
     writeln!(
         s,

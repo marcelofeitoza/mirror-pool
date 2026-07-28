@@ -1,7 +1,7 @@
 # mirror-pool
 
-**Tornado Cash for behavior, not funds.** An anonymity set over the *initiators*
-of an action, not over denominations.
+**Tornado Cash for behavior, not funds.** An anonymity set over *behavior*, not
+over denominations: two paths with two different, clearly-labelled strengths.
 
 > **Design paper:** a skimmable overview of the two-axis composition (who + how
 > much), the effective-k metric, on-chain Groth16 verification, and the public
@@ -22,12 +22,31 @@ To build and run it yourself: `cargo test --workspace` (host) and
 `cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml` (program); the
 full reproduce recipe is in [`docs/PROOF.md`](docs/PROOF.md).
 
-A mixer hides *how much* moved and *from whom*. mirror-pool hides *who started
-an action that everyone can see happened*. N participants voluntarily pool one
-identical action into a synchronized round; the action executes on-chain in full
-view, but which wallet initiated any given instance cannot be attributed. The
-anonymity set is the set of participants in the round, exactly as a mixer's
-anonymity set is the set of deposits of one denomination.
+A mixer hides *how much* moved and *from whom*. mirror-pool attacks what a mixer
+leaves untouched: the *behavioral* signal an action gives off. It ships two
+behavioral paths. They are not the same guarantee, and the difference is the
+first thing you should read, not a footnote:
+
+- **Crowd path (`Commit` / `SettleEpoch`) - hides the per-actor SIGNAL, not the
+  signer.** N participants pool one identical action into a synchronized round
+  that settles in a single atomic transaction on one block timestamp, paid by a
+  rotating relay. Each participant still signs their own action, so the
+  settlement carries N+1 signatures and the action **stays attributable to that
+  wallet on-chain**. What is destroyed is everything an attacker uses to single
+  one participant out: timing, ordering, size, gas payer, wallet fingerprint,
+  and parseable intent. That defeats copy-trading and FIFO temporal matching and
+  gives the round collective intent-deniability. It is not who-initiated
+  unlinkability, and this README will not call it that.
+- **ZK opt-in path (`CommitDeposit` / `SettleZk`) - hides WHO initiated,
+  cryptographically.** A participant escrows the action input; at settlement the
+  relay verifies a Groth16 membership proof on-chain that an output belongs to
+  *some* committed member without revealing which, and the action executes to a
+  *fresh* output with **no participant signature at settle**. This is the path
+  that makes the initiator unattributable, and even the relay cannot learn which
+  committer acted.
+
+On both paths the anonymity set is the set of real participants in the round,
+exactly as a mixer's anonymity set is the set of deposits of one denomination.
 
 This is behavioral obscurity for the Superteam Brasil "Privacy-Through-Noise"
 theme: the core goal is to make on-chain *behavior* hard for automated
@@ -53,9 +72,15 @@ one shared timestamp**, revealing an epoch-scoped nullifier per participant to
 prevent acting twice. Because every action in the epoch has the same observable
 shape (same `ActionClass`, same size bucket) and settles at the same instant
 paid by a rotating relay fee-payer, an observer sees N identical actions occur
-but cannot link any of them back to the wallet that committed it. Shared-epoch
-batching is the specific defense against FIFO temporal matching, the single
-strongest empirical attack on mixers.
+with nothing to tell them apart: no ordering, no timing spread, no amount
+variance, no fee-payer or fingerprint difference. On the crowd path the observer
+*can* still see which wallet signed which action, because each participant signs
+their own; what they cannot do is pick the one worth copying, front-running, or
+attributing a strategy to. Shared-epoch batching is the specific defense against
+FIFO temporal matching, the single strongest empirical attack on mixers. The ZK
+opt-in path is the one that removes the signature too: `SettleZk` carries a
+Groth16 membership proof and releases to a fresh output with no participant
+signature at settle, so no wallet is linked to the instance at all.
 
 ---
 
@@ -70,21 +95,29 @@ component is implemented and tested, and a live Surfpool soak exercises both
 paths plus the adversarial cases with 17/17 on-chain assertions passing (see
 [`docs/PROOF.md`](docs/PROOF.md)). A separate confidential-value layer (JoinSplit
 shield / private-transfer / unshield, hiding amounts) is also built and
-soak-proven live with 25/25 on-chain assertions. That value layer also carries the
-FUNDING leg: a commit wallet is credited by an unshield in a denominated, batched
-funding round instead of by a transfer from a main wallet, which is the one
-mechanism aimed at the strongest real-world deanonymizer (common funding source).
-That path is implemented and unit-tested but not yet in the live soaks, and the
-residual it leaves is measured rather than assumed. The status table below is kept
+soak-proven live with 25/25 on-chain assertions.
+
+The FUNDING leg is the one part of the design that is **not** wired end to end,
+and the status table says so. The idea is that a commit wallet is credited by an
+unshield from the value pool in a denominated, batched funding round instead of
+by a transfer from a main wallet, which is the one mechanism aimed at the
+strongest real-world deanonymizer (common funding source). What exists today is
+library-grade: `mirror-cli fund-commit` proves an unshield to a fresh wallet and
+**prints the request**, and `mirror_coordinator::funding::FundingRounds` is a
+unit-tested batcher type that can hold those requests to a round boundary. No
+shipped service ingests one into the other - the coordinator binary is an
+in-memory scheduler demo - so there is no running funding round and no live soak
+of this leg. The residual it would leave is measured rather than assumed, but the
+measurement is of the design, not of a deployment. The status table below is kept
 honest against the tree.
 
 | Component | Path | Status |
 | --- | --- | --- |
 | Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` (circomlib Poseidon, cross-check-proven against the circuit), `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
-| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification. 42 mollusk tests; `build-sbf` green; deployed + exercised on public devnet. |
+| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification. 44 program tests (mollusk integration + in-crate unit); `build-sbf` green; deployed + exercised on public devnet. |
 | ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and executes to a fresh output. A real proof verifies on-chain (fixture test) and live in the soak. |
-| Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. Also prints an information-theoretic effective-k table (Serjantov-Danezis `2^H(p)` + min-entropy) whose mirror-pool provenance classes are DERIVED from the shipped funding mechanism, with funding-policy, adversary-strength, dwell and adoption ablations; see [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md). |
-| Funding-provenance path | `crates/mirror-cli` + `crates/mirror-coordinator` | **Implemented, not yet soaked** - `fund-commit` funds a FRESH commit wallet by unshielding from the value pool (vault is the sender, relay the only signer, denomination enforced), and `funding::FundingRounds` batches those withdrawals to a round boundary with a minimum-round floor and an arrival-independent release order. Covered by unit tests (including that a released withdrawal is relay-only signed and a thin round never reaches the chain) but NOT by the live soaks, which predate it. The residual it leaves (public boundary amounts and slots) is measured, not assumed. |
+| Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. Also prints an information-theoretic effective-k table (Serjantov-Danezis `2^H(p)` + min-entropy) whose mirror-pool provenance classes are DERIVED from the funding mechanism's rules rather than assumed, with funding-policy, adversary-strength, dwell and adoption ablations; see [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md). |
+| Funding-provenance path | `crates/mirror-cli` + `crates/mirror-coordinator` | **Library + CLI only; NOT wired, NOT soaked** - the two halves exist and are unit-tested, but nothing connects them. `fund-commit` creates a fresh commit wallet, proves an unshield to it out of the value pool (vault is the sender, relay the only signer, denomination enforced client-side and on-chain) and **prints the emitted request**; `funding::FundingRounds` is a batcher type that accepts such requests, holds them to a round boundary, enforces a minimum-round floor with roll-forward, and releases in an arrival-independent order. There is no shipped ingestion path from the first to the second (the coordinator binary is an in-memory scheduler demo), so no funding round has ever run and the live soaks do not exercise this leg. Unit tests cover the pieces (a released withdrawal is relay-only signed; a thin round never reaches the chain). Dwell is participant behaviour, not enforced anywhere. The residual the design would leave (public boundary amounts and slots) is measured in the harness model, not observed in a deployment. |
 | Gasless coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window batching, `k_floor` gate, rotating fee-payer, and real atomic crowd settlement (ComputeBudget + `SettleEpoch` + N participant behaviors, shared accounts in an ALT). |
 | Participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool` / `commit` / `deposit-commit` / `prove` (rebuilds the path + generates and verifies a Groth16 proof in-process in pure Rust via ark-circom/ark-groth16, no Node; `--use-snarkjs` is an optional legacy fallback) / `fund-commit` / `status`. |
 | Pooled behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + pooled-action adapters: PlainTransfer (soak baseline), Jupiter swap, jitoSOL stake. |
@@ -96,11 +129,14 @@ honest against the tree.
 | Confidential soak | `crates/mirror-soak` | **Implemented** - live shield -> hidden-amount transfer -> unshield + fixed-denom + adversarial, 25/25 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
 | Trusted-setup ceremony | `crates/mirror-ceremony` + `mirror-cli ceremony` | **Implemented** - distributable multi-party Groth16 phase-2 ceremony for both circuits: public phase-1 import + provenance reader, delta re-randomization, Schnorr proof of knowledge bound to the contributor id, the position in the chain and the step's kind and provenance, SHA-256 transcript chain, an enforced beacon-is-final rule, reproducible verification (rejects tampered deltas, forged/replayed proofs, reordered and truncated chains, post-beacon steps and relabelled beacons - each tested), and an independent-contributor count that refuses to count self-runs. `ceremony prove-check` proves the membership circuit under a ceremony key and the on-chain `groth16-solana` verifier accepts it; `ceremony verify-transcript` checks a published transcript with no key files. The demonstration run's transcripts are committed under `docs/ceremony-run/`. **No production ceremony has been run: the deployed keys are still dev-setup keys.** See [`docs/CEREMONY.md`](docs/CEREMONY.md). |
 
-"Implemented" means the component's core logic is complete and tested. The host
-workspace tests, 42 on-chain mollusk tests, `build-sbf`, and the two live Surfpool
-soaks (behavioral 17/17 + confidential 25/25 on-chain assertions) are all green.
-See the roadmap for future work (swap/stake-from-pool via CPI, confidential
-deposits, and the ZK-path anonymity-mining incentive). The multi-party phase-2
+"Implemented" means the component's core logic is complete and tested. It does
+not mean "wired into a running service": the funding row above is the one place
+where that distinction bites, and it is labelled. The 220 host workspace tests
+(7 more are environment-gated and skipped by default), 44 on-chain program tests,
+`build-sbf`, and the two live Surfpool soaks (behavioral 17/17 + confidential
+25/25 on-chain assertions) are all green. See the roadmap for future work
+(swap/stake-from-pool via CPI, confidential deposits, wiring and soaking the
+funding leg, and the ZK-path anonymity-mining incentive). The multi-party phase-2
 trusted-setup ceremony is built and tested; what remains there is *running* one
 with external contributors and redeploying with its key, because the currently
 committed and deployed verifying keys are still dev-setup keys.
@@ -184,9 +220,17 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
 
 **What mirror-pool defends against**
 
-- **Initiator attribution of a pooled action.** Within one settled epoch, the
-  initiator of any given action instance is indistinguishable from the other
-  real participants. This is the whole point.
+- **Per-actor signal extraction (crowd path).** Within one settled epoch every
+  action carries the same timestamp, the same size bucket, the same fee shape
+  and the same relay envelope, so nothing distinguishes one participant's
+  instance from another's. The wallet that signed each action is still visible;
+  what an attacker cannot recover is which one is worth copying, front-running,
+  or attributing a strategy to. That is collective intent-deniability.
+- **Initiator attribution (ZK opt-in path only).** On `CommitDeposit` /
+  `SettleZk` the settled output is released to a fresh address with no
+  participant signature, behind an on-chain Groth16 membership proof, so the
+  initiator of a given instance is indistinguishable from the other real
+  committers, including to the relay. The crowd path does **not** provide this.
 - **FIFO temporal matching.** All actions in an epoch settle on one shared
   timestamp, so there is no earliest-later ordering to exploit. Per-actor random
   delay does not achieve this and leaves a heavy-tailed timing signature; shared
@@ -201,14 +245,19 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   limit, priority fee, tx version, account ordering, and ALT are normalized to
   one pool-wide standard so per-round transactions are not separable by their
   wallet-software settings.
-- **Common funding source, the dominant real-world anchor - reduced, and
-  measured.** `fund-commit` funds a fresh commit wallet by unshielding from the
-  value pool, released in denominated batched funding rounds, so no public edge
-  links a main wallet to the wallet that commits. This is the one defense with a
-  published residual instead of a clean close: the boundary amounts and slots stay
-  public, which leaves an observer a deposit-to-withdrawal matching problem worth
-  about 10% of nominal k in our model, and much more than that if the pool is
-  free-amount or adoption is low. Numbers, ablations and limits in
+- **Common funding source, the dominant real-world anchor - a designed answer
+  with a measured residual, not yet a running one.** `fund-commit` funds a fresh
+  commit wallet by unshielding from the value pool, and `FundingRounds` would
+  release those withdrawals in denominated batches, so no public edge links a
+  main wallet to the wallet that commits. This is the one defense with a
+  published residual instead of a clean close: the boundary amounts and slots
+  stay public, which leaves an observer a deposit-to-withdrawal matching problem.
+  In the harness model, the part the protocol can actually **enforce**
+  (denomination + batching, no voluntary dwell, full adoption) retains 75.8% of
+  nominal k at k=32; cooperative participants who also dwell two rounds push it
+  to 90.0%. Partial adoption is much worse (42.4% at 50%), and a free-amount pool
+  worse still. Read those as design numbers: this leg is not wired into a running
+  service (see the status table). Ablations and limits in
   [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md).
 
 **What mirror-pool does NOT do (explicit non-goals)**
@@ -219,8 +268,16 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   optional confidential-value layer *does* hide amounts, via the JoinSplit
   `Transact`; see the status table and `docs/ARCHITECTURE.md`. The public
   deposit/withdraw magnitude and the pool TVL remain visible even there.)
+- **The crowd path does not hide the on-chain signer.** Each participant signs
+  their own action, so the settlement transaction names every participant and
+  the action stays attributable to the wallet that performed it. The crowd path
+  destroys the per-actor *signal*; it does not give who-initiated unlinkability.
+  Only the ZK opt-in path does, and only for the instances settled through it.
+  The crowd-path coordinator also learns the participant-to-intent mapping while
+  composing settlement, though it learns nothing the signed on-chain action did
+  not already reveal.
 - **The behavioral pool does not provide value-transfer privacy or unlinkable
-  payments.** It anonymizes *who initiated a shared action*, not *who paid whom*.
+  payments.** It anonymizes *behavior within a round*, not *who paid whom*.
 - **It does not manufacture anonymity from operator-owned cover traffic.**
   Decoys the operator controls inflate the nominal count and add zero real
   anonymity to anyone who clusters the operator; they are excluded from
@@ -256,9 +313,12 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
 - [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md) - the information-theoretic effective
   anonymity-set size (Serjantov-Danezis `2^H(p)` + min-entropy): advertised k is
   not effective k. A naive pool advertising k=32 has effective k ~7.5 (worst-case
-  1) under funding-provenance partitioning; mirror-pool's shielded funding rounds
-  measure 28.80 (90.0% of nominal), with the residual 10% published rather than
-  rounded away, and 7.66 if you use the same pool naively.
+  1) under funding-provenance partitioning. mirror-pool's shielded funding design
+  measures **24.25 (75.8% of nominal) from the enforced rules alone** (denominated
+  pool + batched rounds, dwell 0, full adoption) and 28.80 (90.0%) once
+  participants also dwell two rounds - dwell being a recommendation the protocol
+  cannot enforce. Both residuals are published rather than rounded away, and the
+  same pool used naively measures 7.66.
 - [`docs/CEREMONY.md`](docs/CEREMONY.md) - the multi-party Groth16 phase-2
   trusted-setup ceremony: how to contribute, how to verify somebody else's, why a
   beacon is final and how that is enforced, how the independent-contributor count

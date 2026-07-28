@@ -19,31 +19,63 @@ cargo run -p mirror-harness --release
 
 ## The headline, up front
 
-Every number below is measured by the harness at a fixed seed. The one that
-matters:
+Every number below is measured by the harness at a fixed seed. Two of them
+matter, and quoting only the larger one would be dishonest, so both are here:
 
 | what | effective k at nominal 32 | retained |
 | --- | --- | --- |
 | naive pool: commit wallet topped up by a public transfer | 7.51 (worst case 1.00) | 23.5% |
 | mirror-pool with **naive** shielded funding (pass-through) | 7.66 (worst case 1.00) | 23.9% |
-| mirror-pool with **denominated pool + batched funding rounds** | 28.80 (worst case 3.00) | 90.0% |
+| **what the enforced rules deliver**: denominated pool + batched rounds, **dwell 0** | **24.25** (worst case 3.00) | **75.8%** |
+| what it reaches with cooperative participants: the same, **dwell 2** | 28.80 (worst case 3.00) | 90.0% |
 
-Two readings, both honest and both important:
+**Both of the last two rows assume 100% adoption**, i.e. that every committer in
+the round funded through the pool. They differ only in *dwell*: how many funding
+rounds a participant leaves value shielded before asking for the withdrawal.
+
+The distinction is not cosmetic, because the two rows have different
+enforceability:
+
+- **Denomination and batching are enforced by code.** The program rejects an
+  off-denomination `Transact` (`DenominationMismatch`), the CLI refuses it
+  client-side first, and `FundingRounds` holds withdrawals to the round boundary,
+  rolls a thin round forward, and releases in an arrival-independent order.
+- **Dwell is not enforced by anything.** There is no dwell field in
+  `FundingRoundConfig` and no on-chain check. It is how long a *participant*
+  chooses to wait, and a participant in a hurry sets it to zero.
+
+So the honest reading is: **the rules the protocol enforces deliver 24.25 of 32
+(75.8%)**, and **28.80 (90.0%) is what a fully-adopted pool of cooperative
+participants who dwell two rounds reaches**. Anything that quotes 28.80 as "the
+number" is quoting a best case as a default.
+
+Three further readings, all honest and all important:
 
 1. Routing the funding leg through a shielded pool and then behaving naively
    (deposit the amount you need, withdraw it immediately) buys almost nothing:
    `7.51 -> 7.66`, about 2%. The pool does not save a user from a pass-through
    pattern.
-2. Uniform denominations plus batched funding rounds move it to `28.80`, a
-   **3.8x** improvement over the naive shielded flow and **90.0%** of nominal.
-   The remaining **10.0%** is a real residual leak that this document measures
-   rather than hides, and the worst-placed committer in that configuration is
-   anonymous among `3.00`, not among 32.
+2. Even the enforced-only configuration is a large win over the naive shielded
+   flow: `7.66 -> 24.25`, a **3.2x** improvement, rising to **3.8x** at dwell 2.
+   The residual (24.2% at dwell 0, 10.0% at dwell 2) is a real leak that this
+   document measures rather than hides, and in both configurations the
+   worst-placed committer is anonymous among `3.00`, not among 32.
+3. Adoption dominates everything. At 50% adoption the dwell-2 configuration
+   drops to 13.56 (42.4%) and the worst case returns to 1.00. See the adoption
+   sweep below before quoting any of these numbers about a real pool.
+
+One more scoping caveat that applies to this whole document: this leg is
+**not wired into a running service** (see the status table in the README). The
+CLI emits a funding request and `FundingRounds` can batch one, but nothing
+connects them and no funding round has ever run. Every number here is a
+measurement of the design's rules under a modeled population, not an observation
+of a deployment.
 
 Every mirror-pool number here is scored against the strongest attacker this repo
 implements: one that solves the whole deposit-to-withdrawal assignment at once.
 The weaker per-withdrawal attacker is also measured and published (it leaves
-`28.87` instead of `28.80` at nominal 32), because a defender who only ever
+`28.87` instead of `28.80` at nominal 32 and dwell 2, and exactly the same `24.25`
+at dwell 0, where the two readings coincide), because a defender who only ever
 evaluates the weak attacker is grading their own homework.
 
 ## The metric
@@ -168,7 +200,7 @@ Two honesty notes on this, both pinned by tests:
   more", because "always strictly less" is an observation about this population,
   not a theorem. Either way, the joint attacker is the one the tables quote.
 - It is an approximation, not a bound. In a single measured epoch (`k = 16`,
-  shipped default policy) the Sinkhorn marginals put slightly LESS mass on the
+  denominated + rounds at dwell 2) the Sinkhorn marginals put slightly LESS mass on the
   true funder than the independent reading does. That instance is pinned by
   `sinkhorn_is_an_approximation_not_a_bound` so nobody upgrades "measured
   stronger on our grid" into "provably stronger".
@@ -190,23 +222,32 @@ bit-for-bit with `cargo run -p mirror-harness --release`.
 
 Shannon effective size, with min-entropy and the single worst-placed committer:
 
+Every row assumes **100% adoption**. The dwell-2 rows additionally assume every
+participant voluntarily leaves value shielded for two funding rounds, which the
+protocol recommends but cannot enforce; the dwell-0 row is what the enforced
+rules alone deliver. Each `k` is
+shown at both dwells; the full dwell sweep at `k = 32` is further down.
+
 | nominal k | scenario / funding policy | Shannon | min-entropy | worst case | retained |
 | --- | --- | --- | --- | --- | --- |
 | 16 | Baseline: public funding edge | 5.98 | 5.98 | 1.00 | 37.4% |
 | 16 | pass-through shielded funding | 6.05 | 5.98 | 1.00 | 37.8% |
 | 16 | denominated only | 6.77 | 6.00 | 1.00 | 42.3% |
 | 16 | batched rounds only | 6.96 | 6.01 | 1.00 | 43.5% |
-| 16 | **denominated + rounds (default)** | **14.30** | 10.77 | 2.00 | **89.4%** |
+| 16 | **denominated + rounds, dwell 0 (enforced only)** | **12.22** | 9.22 | 2.00 | **76.4%** |
+| 16 | **denominated + rounds, dwell 2** | **14.30** | 10.77 | 2.00 | **89.4%** |
 | 32 | Baseline: public funding edge | 7.51 | 7.51 | 1.00 | 23.5% |
 | 32 | pass-through shielded funding | 7.66 | 7.51 | 1.00 | 23.9% |
 | 32 | denominated only | 10.19 | 7.65 | 1.00 | 31.8% |
 | 32 | batched rounds only | 10.93 | 7.66 | 1.00 | 34.2% |
-| 32 | **denominated + rounds (default)** | **28.80** | 21.00 | 3.00 | **90.0%** |
+| 32 | **denominated + rounds, dwell 0 (enforced only)** | **24.25** | 18.42 | 3.00 | **75.8%** |
+| 32 | **denominated + rounds, dwell 2** | **28.80** | 21.00 | 3.00 | **90.0%** |
 | 64 | Baseline: public funding edge | 9.47 | 9.47 | 1.00 | 14.8% |
 | 64 | pass-through shielded funding | 9.92 | 9.47 | 1.00 | 15.5% |
 | 64 | denominated only | 17.33 | 10.08 | 1.00 | 27.1% |
 | 64 | batched rounds only | 18.35 | 9.94 | 1.00 | 28.7% |
-| 64 | **denominated + rounds (default)** | **56.85** | 41.17 | 10.00 | **88.8%** |
+| 64 | **denominated + rounds, dwell 0 (enforced only)** | **47.11** | 35.93 | 10.00 | **73.6%** |
+| 64 | **denominated + rounds, dwell 2** | **56.85** | 41.17 | 10.00 | **88.8%** |
 
 What the rows say:
 
@@ -217,9 +258,11 @@ What the rows say:
   causal window (only a handful of deposits can have funded a given withdrawal);
   batching alone leaves the amount, which identifies the deposit directly. Both
   land around 27 to 44% of nominal.
-- **Together they work, and they do not close the channel.** 88.8 to 89.4 to
-  90.0% of nominal on the Shannon measure. The min-entropy measure is harsher
-  (65.6% of nominal at `k = 32`), and the worst-placed committer is at 3.00.
+- **Together they work, and they do not close the channel.** On the enforced
+  rules alone (dwell 0) they retain 73.6 to 76.4% of nominal on the Shannon
+  measure; cooperative dwell-2 participants push that to 88.8 to 90.0%. The
+  min-entropy measure is harsher still (at `k = 32`: 57.6% of nominal at dwell 0,
+  65.6% at dwell 2), and the worst-placed committer is at 3.00 either way.
 
 ### All channels (provenance + timing + amount + fingerprint)
 
@@ -227,13 +270,16 @@ What the rows say:
 | --- | --- | --- | --- | --- |
 | 16 | Baseline: public funding edge | 1.01 | 1.00 | 6.3% |
 | 16 | pass-through shielded funding | 6.05 | 5.98 | 37.8% |
-| 16 | denominated + rounds (default) | 14.30 | 10.77 | 89.4% |
+| 16 | denominated + rounds, dwell 0 (enforced only) | 12.22 | 9.22 | 76.4% |
+| 16 | denominated + rounds, dwell 2 | 14.30 | 10.77 | 89.4% |
 | 32 | Baseline: public funding edge | 1.02 | 1.01 | 3.2% |
 | 32 | pass-through shielded funding | 7.66 | 7.51 | 23.9% |
-| 32 | denominated + rounds (default) | 28.80 | 21.00 | 90.0% |
+| 32 | denominated + rounds, dwell 0 (enforced only) | 24.25 | 18.42 | 75.8% |
+| 32 | denominated + rounds, dwell 2 | 28.80 | 21.00 | 90.0% |
 | 64 | Baseline: public funding edge | 1.01 | 1.00 | 1.6% |
 | 64 | pass-through shielded funding | 9.92 | 9.47 | 15.5% |
-| 64 | denominated + rounds (default) | 56.85 | 41.17 | 88.8% |
+| 64 | denominated + rounds, dwell 0 (enforced only) | 47.11 | 35.93 | 73.6% |
+| 64 | denominated + rounds, dwell 2 | 56.85 | 41.17 | 88.8% |
 
 With every channel composed, the naive pool is effectively deanonymizable (the
 effective set is barely above 1 at any nominal size). mirror-pool's numbers are
@@ -254,23 +300,26 @@ harder-working attacker left the defender less anonymity.
 | 16 | pass-through funding | 6.07 | 6.05 | -0.02 |
 | 16 | denominated only | 7.10 | 6.77 | -0.33 |
 | 16 | batched rounds only | 7.20 | 6.96 | -0.24 |
-| 16 | denominated + rounds (default) | 14.47 | 14.30 | -0.18 |
+| 16 | denominated + rounds, dwell 0 | 12.22 | 12.22 | 0.00 |
+| 16 | denominated + rounds, dwell 2 | 14.47 | 14.30 | -0.18 |
 | 32 | pass-through funding | 7.74 | 7.66 | -0.08 |
 | 32 | denominated only | 11.24 | 10.19 | -1.06 |
 | 32 | batched rounds only | 11.40 | 10.93 | -0.47 |
-| 32 | denominated + rounds (default) | 28.87 | 28.80 | -0.07 |
+| 32 | denominated + rounds, dwell 0 | 24.25 | 24.25 | 0.00 |
+| 32 | denominated + rounds, dwell 2 | 28.87 | 28.80 | -0.07 |
 | 64 | pass-through funding | 10.15 | 9.92 | -0.23 |
 | 64 | denominated only | 19.57 | 17.33 | -2.24 |
 | 64 | batched rounds only | 19.24 | 18.35 | -0.89 |
-| 64 | denominated + rounds (default) | 56.94 | 56.85 | -0.08 |
+| 64 | denominated + rounds, dwell 0 | 47.11 | 47.11 | 0.00 |
+| 64 | denominated + rounds, dwell 2 | 56.94 | 56.85 | -0.08 |
 
-The constraint is worth most exactly where the causal window is narrowest: a
-denominated pool with immediate withdrawals loses up to `2.24` effective
-committers at `k = 64` when the attacker stops double-spending its hypotheses.
-Under the shipped default the window is wide (three rounds of deposits are
-candidates), so the same constraint buys the attacker very little, `0.07` at
-`k = 32`. That is the shape one should expect, and it is measured rather than
-argued.
+The constraint is worth most against the un-batched mitigations: a denominated
+pool with immediate withdrawals loses up to `2.24` effective committers at
+`k = 64` when the attacker stops double-spending its hypotheses. Once rounds are
+batched the constraint buys the attacker very little (`0.07` at `k = 32`, dwell
+2) and, at dwell 0, nothing measurable at all: the joint and independent readings
+are identical to two decimals in all three `k`. We report that as measured, not
+as a proof that the two are equal there.
 
 ### The mitigation, swept: dwell (nominal k = 32, denominated, batched)
 
@@ -284,18 +333,25 @@ shielded before their withdrawal is released. It is unrelated to the incentive
 | --- | --- | --- | --- | --- |
 | 0 | 24.25 | 18.42 | 3.00 | 75.8% |
 | 1 | 27.43 | 20.43 | 3.00 | 85.7% |
-| 2 (default) | 28.80 | 21.00 | 3.00 | 90.0% |
+| 2 (harness default) | 28.80 | 21.00 | 3.00 | 90.0% |
 | 4 | 30.01 | 21.55 | 3.00 | 93.8% |
 | 8 | 30.88 | 22.66 | 3.00 | 96.5% |
 
 Dwell has diminishing returns and costs the participant latency (a funding round
 is 150 slots by default, so dwell 8 is over 20 minutes of waiting before the
-commit wallet is usable). The default of 2 is the middle of the curve, not the
-best number on it. Note what this row is: dwell is how long the participant leaves
-value sitting shielded before asking for the withdrawal, so it is a recommendation
-the protocol can make and measure but cannot enforce.
+commit wallet is usable). The harness default of 2 is the middle of the curve,
+not the best number on it.
 
-### Adoption sensitivity (nominal k = 32, default policy)
+**Read the dwell-0 row as the guarantee.** Dwell is how long a participant chooses
+to leave value shielded before asking for the withdrawal. There is no dwell field
+in `FundingRoundConfig`, no on-chain check, and no way for the coordinator to make
+a participant wait; it is a recommendation the protocol can publish and measure but
+not enforce. So `24.25` (75.8%) is what the mechanism delivers on its own rules,
+and everything above that row is what cooperative participants can add to it.
+Anywhere this repository quotes 28.80, it should say "dwell 2, full adoption"
+alongside it, and it does.
+
+### Adoption sensitivity (nominal k = 32, denominated + rounds, dwell 2)
 
 The mechanism only protects the people who use it. A committer who tops up
 directly is fully re-linked, and an adversary that can place them elsewhere
@@ -347,7 +403,7 @@ reviewer with one command):
   belief matrix; `effective_k.rs` consumes it);
 - that the Baseline column is untouched by the funding model, pinned by a test
   (`baseline_numbers_are_independent_of_the_funding_policy`);
-- that the default policy lands strictly below nominal, pinned by a test
+- that the dwell-2 policy lands strictly below nominal, pinned by a test
   (`uniform_rounds_shrink_the_residual_but_do_not_close_it`), so this repo cannot
   drift back into claiming a perfect score without a test failing;
 - that the published column is the one scored against the STRONGER attacker,
@@ -404,9 +460,11 @@ numbers were seen and stated here so a reviewer can attack them):
   [`ROADMAP.md`](ROADMAP.md)); until it lands, every number here is a model
   result on a modeled population.
 
-## The mechanism as shipped
+## The mechanism as it exists in the tree
 
-The funding path is code, not a recommendation in a document:
+The funding path is code rather than a recommendation in a document, but it is
+**library code plus a CLI, not a wired-up service**. Read this section as "what
+exists", not "what runs":
 
 - `mirror-cli fund-commit` generates a fresh commit-wallet keypair, reads the
   value pool's denomination from chain, refuses any other amount (the on-chain
@@ -423,11 +481,17 @@ The funding path is code, not a recommendation in a document:
 
 Both are unit-tested (a thin round never reaches the chain; a released withdrawal
 carries exactly one signature, the relay's; an off-denomination request is refused
-before it is proved). Neither is exercised by the live soaks in
-[`PROOF.md`](PROOF.md), which predate this path: the underlying `Transact` unshield
-is soak-proven on devnet, the funding-round orchestration on top of it is not. A
-funding-round soak is the obvious next step and is named as such rather than
-implied.
+before it is proved).
+
+**Nothing connects the two.** `fund-commit` prints its emitted request; no shipped
+component feeds that request into a `FundingRounds` instance, and the coordinator
+binary is an in-memory scheduler demo rather than a service. So no funding round
+has ever released a real withdrawal, and neither half is exercised by the live
+soaks in [`PROOF.md`](PROOF.md), which predate this path: the underlying `Transact`
+unshield is soak-proven on devnet, the funding-round orchestration on top of it is
+not. Wiring the ingestion path and then soaking a funding round is the obvious next
+step, and it is named as such rather than implied. Until that happens, every number
+in this document describes a design, not a deployment.
 
 ## Why this matters
 

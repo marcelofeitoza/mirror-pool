@@ -112,8 +112,15 @@ fn print_effective_header() {
 
 /// The MirrorPool funding policies reported in every table, in ablation order:
 /// the naive one first (so the leak is not buried), then each mitigation alone,
-/// then the shipped default with both.
-fn reported_policies() -> [(&'static str, FundingPolicy); 4] {
+/// then both together at two dwells.
+///
+/// Both-together is reported TWICE on purpose. Denomination and batching are
+/// enforced by code (the program rejects an off-denomination Transact; the
+/// batcher holds a round and rolls a thin one forward), but dwell is how long a
+/// participant chooses to sit shielded and nothing enforces it. So the dwell-0
+/// row is what the mechanism can guarantee and the dwell-2 row is what
+/// cooperative participants reach; quoting only the second would overstate.
+fn reported_policies() -> [(&'static str, FundingPolicy); 5] {
     [
         (
             "MirrorPool: pass-through funding",
@@ -128,7 +135,11 @@ fn reported_policies() -> [(&'static str, FundingPolicy); 4] {
             FundingPolicy::batched_only(),
         ),
         (
-            "MirrorPool: denominated + rounds (default)",
+            "MirrorPool: den. + rounds, dwell 0",
+            FundingPolicy::uniform_rounds_with_dwell(0),
+        ),
+        (
+            "MirrorPool: den. + rounds, dwell 2",
             FundingPolicy::uniform_rounds(),
         ),
     ]
@@ -187,6 +198,14 @@ fn print_effective_k_section() {
         "publicAmount and slot are visible on both crossings, and how much that leaks is what"
     );
     println!("these rows measure. It is DERIVED from the funding mechanism, not assumed.");
+    println!();
+    println!(
+        "Read the two 'den. + rounds' rows as different claims. Denomination and batching are"
+    );
+    println!("ENFORCED by code, so the dwell-0 row is what the mechanism guarantees. Dwell is how");
+    println!("long a participant chooses to sit shielded and nothing enforces it, so the dwell-2");
+    println!("row is what cooperative participants reach. Both assume 100% adoption; block (e)");
+    println!("prices partial adoption, and it dominates.");
     println!("Every MirrorPool row is scored against the STRONGEST attacker implemented here: one");
     println!(
         "that solves the whole deposit-to-withdrawal assignment jointly (block (c) prices the"
@@ -251,8 +270,8 @@ fn print_effective_k_section() {
         println!();
     }
 
-    // (d) The mitigation, swept: how much dwell buys, holding everything else at
-    // the shipped default.
+    // (d) The mitigation, swept: how much dwell buys, holding denomination and
+    // batching fixed. Dwell 0 is the enforceable floor; the rest is cooperation.
     println!("(d) Dwell sweep at nominal k=32 (denominated pool, batched rounds):");
     println!("{}", "-".repeat(TABLE_WIDTH));
     println!(
@@ -279,7 +298,7 @@ fn print_effective_k_section() {
 
     // (e) Adoption sensitivity: the mechanism only protects the people who use
     // it, and non-users shrink the crowd for everyone else.
-    println!("(e) Adoption sensitivity at nominal k=32 (shipped default policy):");
+    println!("(e) Adoption sensitivity at nominal k=32 (denominated + rounds, dwell 2):");
     println!("{}", "-".repeat(TABLE_WIDTH));
     println!(
         "committers who top up directly instead of unshielding are fully re-linked AND can be"
@@ -339,7 +358,14 @@ fn print_effective_k_section() {
             &[Channel::FundingProvenance],
             FundingPolicy::pass_through(),
         );
-        let (_, default) = run_effective_k_with_funding(
+        let (_, enforced) = run_effective_k_with_funding(
+            k,
+            N_PARTICIPANTS,
+            DEFAULT_SEED,
+            &[Channel::FundingProvenance],
+            FundingPolicy::uniform_rounds_with_dwell(0),
+        );
+        let (_, cooperative) = run_effective_k_with_funding(
             k,
             N_PARTICIPANTS,
             DEFAULT_SEED,
@@ -348,13 +374,16 @@ fn print_effective_k_section() {
         );
         println!(
             "  k={k:<3} advertised -> public funding edge {:.1} (worst-case {:.0}) | \
-             pass-through shielded funding {:.1} | denominated + batched rounds {:.1}",
+             pass-through shielded funding {:.1} | denominated + batched rounds {:.1} \
+             (dwell 0, what the protocol enforces) / {:.1} (dwell 2, cooperative)",
             base.shannon_effective_k,
             base.worst_case_k,
             naive.shannon_effective_k,
-            default.shannon_effective_k,
+            enforced.shannon_effective_k,
+            cooperative.shannon_effective_k,
         );
     }
+    println!("  every MirrorPool number above assumes 100% adoption; see block (e).");
 }
 
 fn main() -> Result<()> {

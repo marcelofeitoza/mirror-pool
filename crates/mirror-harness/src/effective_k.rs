@@ -254,7 +254,7 @@ fn funder_ids(batch: &EpochBatch, seed: u64, n_funders: usize) -> Vec<usize> {
 ///
 /// This is the one channel that differs structurally between the two scenarios,
 /// and it is the reason the metric is not circular: the MirrorPool variant is
-/// computed from the shipped funding mechanism, not asserted.
+/// computed from the funding mechanism's rules, not asserted.
 enum Provenance {
     /// The funding edge is public (an ordinary transfer from the main wallet), so
     /// provenance is an EXACT partition: committer `i` is in class `funders[i]`.
@@ -475,8 +475,9 @@ fn dominant_class(provenance: &[usize]) -> usize {
 
 /// Compute the effective anonymity accounting for a modeled population under a
 /// set of adversary channels, with MirrorPool funding under
-/// [`FundingModel::default`] (the shipped recommendation - a denominated pool
-/// plus batched funding rounds - against the strongest implemented attacker).
+/// [`FundingModel::default`] (the recommended cooperative configuration - a
+/// denominated pool plus batched funding rounds at dwell 2 - against the
+/// strongest implemented attacker).
 ///
 /// Deterministic in `(population, channels, seed)`.
 pub fn effective_k(pop: &Population, channels: &[Channel], seed: u64) -> EffectiveK {

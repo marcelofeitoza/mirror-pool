@@ -33,12 +33,20 @@
 //!    client-side first so a bad request never burns a relay signature). Every
 //!    withdrawal in the round is then the same number, and the amount channel
 //!    carries zero bits.
-//! 2. **Batching plus dwell.** Withdrawals are held until the round's release
+//! 2. **Batching.** Withdrawals are held until the round's release
 //!    slot and submitted together in an order derived from the round, not from
 //!    arrival ([`FundingRounds::release_order`]), so per-request arrival time
 //!    never reaches the chain. A round below [`FundingRoundConfig::min_round_size`]
 //!    rolls forward instead of releasing, exactly like the epoch `k_floor`: a
 //!    round of one is a direct link, no matter how good the cryptography is.
+//!
+//! A third property, **dwell** (how many rounds a participant leaves value
+//! shielded before asking for the withdrawal), also widens the matching problem,
+//! and this module does NOT implement it: there is no dwell field in
+//! [`FundingRoundConfig`] and nothing here can make a participant wait. It is a
+//! recommendation the protocol can publish and the harness can measure, not a
+//! rule it enforces, which is why `docs/EFFECTIVE_K.md` reports the dwell-0
+//! number as the guarantee.
 //!
 //! The residual that survives both is the round window itself (an observer still
 //! learns which round a withdrawal belongs to, and the deposits that could have
@@ -51,6 +59,12 @@
 //! It does not hide that the pool exists, and it does not launder history: the
 //! shield leg is still the participant's own transaction from their own wallet.
 //! What it removes is the *edge* from that wallet to the commit wallet.
+//!
+//! It is also not a running service. This is a library type: something has to
+//! construct it, feed it [`FundingRequest`]s (the CLI's `fund-commit` prints one
+//! rather than posting it anywhere), and drive [`FundingRounds::on_slot`] from a
+//! slot clock. Nothing in this repository does that yet, so no funding round has
+//! ever released a withdrawal on any cluster.
 //!
 //! # Failure behavior
 //!

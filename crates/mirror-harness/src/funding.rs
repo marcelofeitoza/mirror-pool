@@ -146,11 +146,13 @@ impl FundingPolicy {
         }
     }
 
-    /// The shipped recommendation: a denominated pool plus batched funding rounds,
+    /// The recommended configuration: a denominated pool plus batched funding rounds,
     /// with participants dwelling a couple of rounds before their withdrawal is
     /// released. Both channels are attacked at once. Denomination and batching are
-    /// enforced by code (the program and the coordinator); dwell is participant
-    /// behaviour the protocol can recommend and measure but not enforce.
+    /// enforced by code (the program and the batcher type); dwell is participant
+    /// behaviour the protocol can recommend and measure but NOT enforce, so this is
+    /// the cooperative case, not the guaranteed one. For the guarantee use
+    /// [`Self::uniform_rounds_with_dwell`] with `0`.
     pub const fn uniform_rounds() -> Self {
         Self {
             denomination: Some(BUCKET_AMOUNT),
@@ -203,7 +205,7 @@ impl FundingPolicy {
 }
 
 impl Default for FundingPolicy {
-    /// The shipped recommendation ([`Self::uniform_rounds`]).
+    /// The recommended (cooperative, dwell-2) configuration ([`Self::uniform_rounds`]).
     fn default() -> Self {
         Self::uniform_rounds()
     }
@@ -301,7 +303,8 @@ impl FundingModel {
 }
 
 impl Default for FundingModel {
-    /// The shipped recommendation against the strongest implemented attacker.
+    /// The recommended (cooperative, dwell-2) configuration against the strongest
+    /// implemented attacker.
     fn default() -> Self {
         Self::joint(FundingPolicy::default())
     }
@@ -771,7 +774,7 @@ mod tests {
         // it. Sinkhorn scaling approximates the marginals of the matching
         // distribution; it is not guaranteed to put MORE mass on the truth in
         // every single instance. Here is a measured instance where it puts
-        // slightly less: k=16 under the shipped default policy.
+        // slightly less: k=16 under denominated rounds at dwell 2.
         //
         // The aggregate claim the tables make is still the one that is tested,
         // in `effective_k::tests::joint_adversary_never_leaves_more_effective_k`:

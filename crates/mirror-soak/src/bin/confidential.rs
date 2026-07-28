@@ -7,7 +7,9 @@
 //!
 //! - the participant CLI (`mirror-cli value-keygen | init-value-pool | shield |
 //!   transfer | unshield | scan`) for keygen, pool creation, and off-chain
-//!   Groth16 proving (snarkjs), which EMITS each `Transact` bundle; and
+//!   Groth16 proving (in-process, pure Rust via ark-circom/ark-groth16; the
+//!   `--snarkjs` path below is only used when `--use-snarkjs` is passed), which
+//!   EMITS each `Transact` bundle; and
 //! - the gasless coordinator (`mirror_coordinator::submit_transact`) for the
 //!   gasless relay submit (transfer/unshield are relay-only signed; a shield is
 //!   co-signed by the depositor who funds the deposit).
@@ -515,7 +517,9 @@ async fn main() -> Result<()> {
     println!("mirror-soak-value: confidential-value end-to-end soak against Surfpool");
     println!("  rpc:      {}", args.rpc_url);
     println!("  program:  {program_id}");
-    println!("  snarkjs:  {snarkjs}");
+    // Passed through to the CLI but only consulted if `--use-snarkjs` is set;
+    // proving is in-process pure Rust by default.
+    println!("  snarkjs:  {snarkjs} (legacy fallback only; proving is in-process)");
     println!(
         "  amounts:  shield={} transfer={} denomination={} fee={}",
         args.shield_amount, args.transfer_amount, args.denomination, args.fee
@@ -703,9 +707,9 @@ async fn main() -> Result<()> {
     )?;
     let shield = Emit::load(&shield_emit_path)?;
     report.check(
-        "shield proof generated + verified (snarkjs) and emitted",
+        "shield proof generated + verified (in-process ark-groth16) and emitted",
         true,
-        "mirror-cli shield produced a snarkjs-verified Transact",
+        "mirror-cli shield produced a Transact whose proof it generated and verified in-process",
     );
 
     let before = read_vpool(client.as_ref(), &vpool).await?;
@@ -1406,7 +1410,7 @@ fn append_proof_md(
     )?;
     writeln!(
         s,
-        "participant CLI (`mirror-cli`, which proves with snarkjs and emits each Transact) and"
+        "participant CLI (`mirror-cli`, which proves in-process in pure Rust and emits each Transact) and"
     )?;
     writeln!(
         s,
@@ -1584,7 +1588,7 @@ fn append_proof_md(
     writeln!(s)?;
     writeln!(
         s,
-        "# 3. ensure snarkjs + the transaction-circuit artifacts are present"
+        "# 3. ensure the transaction-circuit artifacts are present (proving is in-process\n#    pure Rust; circom/snarkjs are only needed to BUILD these artifacts)"
     )?;
     writeln!(
         s,

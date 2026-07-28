@@ -1080,7 +1080,7 @@ fn run_fund_commit(args: FundCommitArgs) -> Result<()> {
         println!("  - {note}");
     }
     println!();
-    println!("next: `mirror-cli commit --keypair {}` (or `deposit-commit`) from the funded wallet, once the coordinator's funding round has released this withdrawal.", keypair_path.display());
+    println!("next: `mirror-cli commit --keypair {}` (or `deposit-commit`) from the funded wallet, once a coordinator funding round has released this withdrawal. No shipped service ingests this request yet: releasing it is currently the operator's job.", keypair_path.display());
     Ok(())
 }
 

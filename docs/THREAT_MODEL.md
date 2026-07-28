@@ -1,9 +1,9 @@
 # mirror-pool threat model
 
-mirror-pool is an anonymity system over the **initiators** of an action, not over
-funds. It offers two settlement paths that share one accumulator, one epoch clock,
-one k-floor, and one anti-Sybil economy, and deliver two distinct strengths of the
-same idea:
+mirror-pool is an anonymity system over on-chain **behavior**, not over funds. It
+offers two settlement paths that share one accumulator, one epoch clock, one
+k-floor, and one anti-Sybil economy, and deliver two clearly different strengths.
+Only one of them hides who initiated:
 
 - **Crowd path** (`Commit` / `SettleEpoch`). N participants each sign their own
   identical action; the coordinator composes them into one atomic transaction that
@@ -26,8 +26,10 @@ funds" theme: a Tornado-Nova-style shielded pool (`ValuePool` + `Transact`) that
 hides amounts inside the pool and, for internal transfers and withdrawals, unlinks
 the initiator as well. It is a separate, opt-in subsystem, not a change to the
 behavioral guarantee; Section 4 states exactly what it hides and Non-goal 1 and
-Section 8 state honestly what it does not. A deployment that runs it can hide both
-who initiated an action and how much moved.
+Section 8 state honestly what it does not. A deployment that runs it *together with
+the ZK opt-in path* can hide both who initiated an action and how much moved; run
+on top of the crowd path it hides how much, while the action itself stays
+attributable to the wallet that signed it.
 
 This document defines who we defend against, what an observer actually sees on
 Solana, which attacks each path defeats (with the empirical numbers that justify
@@ -285,6 +287,12 @@ re-linking itself:
    have funded a given withdrawal, and the harness measures what each amount of it
    is worth.
 
+**Status: designed and unit-tested, NOT wired and NOT soaked.** `fund-commit`
+proves the unshield and prints the emitted request; `FundingRounds` is a batcher
+type that can accept one. No shipped component connects them (the coordinator
+binary is an in-memory scheduler demo), so no funding round has ever run. Read
+everything below as a property of the design, not of a running deployment.
+
 **Limits, measured not asserted.** `publicAmount` is public on both crossings, so
 the funding edge is not erased, it is downgraded to a matching problem: an observer
 sees the deposits and the withdrawals and has to guess which produced which.
@@ -292,9 +300,13 @@ sees the deposits and the withdrawals and has to guess which produced which.
 ([`EFFECTIVE_K.md`](EFFECTIVE_K.md)). Headline at nominal `k = 32`: a public
 funding edge leaves an effective set of `7.51`; routing through the pool but
 passing value straight through leaves `7.66` (the pool does not save a naive
-user); denominated rounds leave `28.80`, i.e. **90.0% of nominal, and a real
-`10.0%` residual**. Adoption matters too: at 50% adoption the same configuration
-leaves `13.56`. The pool still cannot rewrite a participant's funding history
+user); denominated rounds leave **`24.25`, i.e. 75.8% of nominal, on the rules
+the protocol actually enforces** (denomination + batching, no voluntary dwell,
+100% adoption), rising to `28.80` (90.0%) if every participant also dwells two
+rounds - which the protocol can recommend and measure but cannot enforce. Both
+leave a real residual (24.2% and 10.0%). Adoption matters at least as much: at
+50% adoption the dwell-2 configuration leaves `13.56` (42.4%) and the worst case
+returns to 1.00. The pool still cannot rewrite a participant's funding history
 before the deposit, cross-epoch common-funding clustering is still a named harness
 extension, and Section 8 keeps the residual on the record.
 
@@ -350,7 +362,8 @@ Both paths keep membership public, exactly as Tornado did for funds: the *link
 inside the set* is what is protected, and on the ZK path that protection is
 cryptographic.
 
-**Funding leg (`fund-commit` + funding rounds, optional but recommended).** This is
+**Funding leg (`fund-commit` + funding rounds, optional but recommended; designed
+and unit-tested, not wired into a running service and not soaked).** This is
 what a participant does *before* either path, and it is where the strongest
 real-world identity anchor lives.
 
@@ -363,8 +376,10 @@ real-world identity anchor lives.
   round the withdrawal was released in. The pairing between the two is what is
   hidden, so this is a matching problem for the observer, not an erasure.
 - **Measured, not asserted:** how much of that matching an observer can still
-  solve. Denominated rounds leave 90.0% of nominal effective-k at `k = 32`; a
-  pass-through pattern in a free-amount pool leaves 23.9%. See
+  solve. On the enforced rules alone (denomination + batching, dwell 0, full
+  adoption) denominated rounds leave 75.8% of nominal effective-k at `k = 32`,
+  rising to 90.0% if participants voluntarily dwell two rounds; a pass-through
+  pattern in a free-amount pool leaves 23.9%. See
   [`EFFECTIVE_K.md`](EFFECTIVE_K.md).
 
 **Confidential-value layer (`InitValuePool` / `Transact`, optional).** This is the
@@ -458,8 +473,10 @@ provenance (plus the timing / amount / fingerprint channels). `crates/mirror-har
 prints this table alongside the attack table. At nominal `k = 32`: a naive pool
 (commit wallet topped up by a public transfer) has an effective set of about
 **7.5, worst case 1**; mirror-pool's shielded funding path with denominated
-funding rounds leaves **28.80, i.e. 90.0% of nominal**, worst case 3. The missing
-10% is not rounding, it is the residual amount/timing channel of the public
+funding rounds leaves **24.25, i.e. 75.8% of nominal** on the rules the protocol
+enforces (dwell 0, 100% adoption), worst case 3, and **28.80 (90.0%)** if
+participants also voluntarily dwell two rounds. The missing 24.2% (or 10.0%) is
+not rounding, it is the residual amount/timing channel of the public
 boundary crossings, and it is derived from the funding mechanism rather than
 assumed away: naive pass-through use of the same pool measures **7.66**, barely
 better than no pool at all. The table also shows the Sybil-dominance case where the
@@ -603,11 +620,14 @@ because a threat model that only enumerates its wins is untrustworthy.
    clean close: the pool's boundary crossings publish (funder, amount, slot) on the
    way in and (fresh wallet, amount, slot) on the way out, so an observer is left
    with a deposit-to-withdrawal matching problem instead of an edge. Under
-   denominated funding rounds the harness measures **90.0% of nominal** effective-k
-   at `k = 32` (a `10.0%` residual), and under naive pass-through use of the same
-   pool it measures **23.9%**, which is barely better than no pool at all. The
+   denominated funding rounds the harness measures **75.8% of nominal** effective-k
+   at `k = 32` on the enforced rules alone (a `24.2%` residual), **90.0%** if every
+   participant also dwells two rounds voluntarily, and under naive pass-through use
+   of the same pool **23.9%**, which is barely better than no pool at all. The
    mechanism is only as good as its configuration and its adoption, and both are
-   quantified in [`EFFECTIVE_K.md`](EFFECTIVE_K.md). A participant whose deposit
+   quantified in [`EFFECTIVE_K.md`](EFFECTIVE_K.md). It is also, today, only as
+   good as a design: the funding leg is not wired into a running service and has
+   never been soaked. A participant whose deposit
    into the value pool is itself the first hop out of a KYC'd exchange is still
    identified as a pool user; what the mechanism removes is the link to the wallet
    they commit from, not the fact that they funded something.

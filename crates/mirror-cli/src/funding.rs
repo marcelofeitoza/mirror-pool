@@ -25,13 +25,22 @@
 //!    ([`resolve_funding_amount`]) every withdrawal is the same number, so the
 //!    amount carries no information. The on-chain program enforces it too
 //!    (`DenominationMismatch`); refusing here just saves a failed transaction.
-//! 2. **Let the coordinator batch the release.** The emitted `Transact` is handed
-//!    to the coordinator's funding round
+//! 2. **Let the coordinator batch the release.** The emitted `Transact` is meant
+//!    to be handed to the coordinator's funding round
 //!    (`mirror_coordinator::funding::FundingRounds`), which holds it to the round
 //!    boundary and submits it in an order that is not the arrival order. A
 //!    withdrawal submitted the instant it is proved re-links itself by timing.
 //!
-//! What survives both is measured, not assumed: see `docs/EFFECTIVE_K.md`.
+//! # What is NOT wired
+//!
+//! This command PRINTS the emitted request; it does not post it anywhere. No
+//! shipped component ingests it into a `FundingRounds` instance, and the
+//! coordinator binary is an in-memory scheduler demo, so today rule 2 is a
+//! recommendation to whoever operates the pool rather than something the tree
+//! performs. Rule 1 (denomination) is enforced here and on-chain regardless.
+//!
+//! What survives both is measured, not assumed: see `docs/EFFECTIVE_K.md`. Those
+//! numbers describe the design, not an observed deployment.
 
 use anyhow::{anyhow, bail, Context, Result};
 use solana_keypair::Keypair;
@@ -111,8 +120,9 @@ pub fn load_commit_wallet(path: &Path) -> Result<Keypair> {
 pub fn funding_notes(denominated: bool) -> Vec<&'static str> {
     let mut notes = vec![
         "this withdrawal is signed by the relay alone: your main wallet never appears on it.",
-        "hand the emitted Transact to the coordinator's funding round; do NOT submit it \
-         yourself the moment it is proved (an immediate withdrawal re-links itself by timing).",
+        "hand the emitted Transact to a coordinator funding round; do NOT submit it \
+         yourself the moment it is proved (an immediate withdrawal re-links itself by timing). \
+         NOTE: no shipped service ingests this request today, so batching is on the operator.",
         "never top this wallet up from your main wallet afterwards: one direct transfer \
          undoes the whole funding path.",
     ];

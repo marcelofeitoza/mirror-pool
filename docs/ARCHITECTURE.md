@@ -1,16 +1,19 @@
 # mirror-pool architecture
 
 mirror-pool is "Tornado Cash for behavior, not funds." A classic mixer breaks the
-link between a deposit and a withdrawal of *value*. mirror-pool breaks the link
-between an on-chain *action* and the *identity that initiated it*. N participants
-voluntarily pool the same action into one synchronized epoch; an observer sees N
-identical actions land together and cannot extract the per-initiator signal that
-chain-analysis tools rely on: timing, amount, gas payer, and wallet fingerprint.
+link between a deposit and a withdrawal of *value*. mirror-pool attacks the
+*behavioral* legibility of an on-chain action instead. N participants voluntarily
+pool the same action into one synchronized epoch; an observer sees N identical
+actions land together and cannot extract the per-initiator signal that
+chain-analysis tools rely on: timing, ordering, amount, gas payer, and wallet
+fingerprint.
 
 The funds are visible, the action is visible, the aggregate is visible. What is
-destroyed is *which participant initiated which instance*. mirror-pool delivers
-this with two settlement paths that share one accumulator, one epoch clock, and
-one anti-Sybil economy, and offer two distinct strengths of the same guarantee:
+destroyed depends on the path, and the two are not equivalent: the crowd path
+destroys the per-actor *signal* while leaving each action attributable to the
+wallet that signed it, and the ZK opt-in path destroys the attribution itself.
+mirror-pool delivers this with two settlement paths that share one accumulator,
+one epoch clock, and one anti-Sybil economy:
 
 1. **Crowd path** (`Commit` / `SettleEpoch`). Participants each sign their own
    identical action, and the coordinator composes them into one atomic
@@ -588,15 +591,19 @@ four key-level checks are not third-party reproducible for that run
 
 ## 9. Confidential-value layer
 
-Everything above hides *who initiated* an action while leaving every amount public
-(Non-goal 1 of the threat model). The confidential-value layer is the optional
-complement: a Tornado-Nova-style shielded pool that hides *how much* moves. It is a
+Everything above works on the *behavioral* axis (the crowd path removing the
+per-actor signal, the ZK opt-in path removing the attribution) while leaving every
+amount public (Non-goal 1 of the threat model). The confidential-value layer is the
+optional complement: a Tornado-Nova-style shielded pool that hides *how much*
+moves. It is a
 SEPARATE subsystem from the behavioral Pool (its own account, its own accumulator,
 its own two instructions), so a deployment can run the behavioral pool, the
-confidential pool, or both. When the two combine, mirror-pool hides both axes at
-once: a confidential transfer settles through the same gasless relay with no user
-signature and carries `publicAmount == 0`, so an observer learns neither which
-wallet initiated it nor how much it moved. The value lives only in the on-chain
+confidential pool, or both. A confidential transfer settles through the same
+gasless relay with no user signature and carries `publicAmount == 0`, so an
+observer learns neither which wallet initiated *that transfer* nor how much it
+moved. Composing the two axes into one action means pairing this layer with the ZK
+opt-in path; paired with the crowd path it hides the amounts, but the pooled action
+itself still carries the participant's signature. The value lives only in the on-chain
 commitments and the encrypted note payloads. The layer is a clean-room
 implementation of the public, open-source Tornado-Nova transaction circuit (the
 standard Poseidon JoinSplit), cited as prior art.
@@ -799,8 +806,20 @@ relay's, so the participant's main wallet appears on no transaction in the path.
 The residual is stated rather than hidden: `publicAmount` is public on both
 crossings, so an observer sees the deposits and the withdrawals and is left with a
 matching problem. `crates/mirror-harness` measures how much of that matching
-survives (`docs/EFFECTIVE_K.md`); under denominated batched rounds it is about 10%
-of nominal `k`, and under naive pass-through use of the same pool it is most of it.
+survives (`docs/EFFECTIVE_K.md`); under denominated batched rounds the residual is
+about 24% of nominal `k` on the rules the protocol enforces (dwell 0, full
+adoption) and about 10% if participants also voluntarily dwell two rounds, and
+under naive pass-through use of the same pool it is most of it.
+
+**Wiring status.** The two halves above are library primitives, not a running
+pipeline. `fund-commit` prints the emitted request and stops there; `FundingRounds`
+is a type that a service would drive with a slot clock. No shipped component
+connects them - the coordinator binary (`crates/mirror-coordinator/src/main.rs`) is
+an in-memory scheduler demo - so no funding round has ever released a withdrawal,
+and the live soaks in `docs/PROOF.md` do not exercise this leg. Dwell is not
+implemented anywhere: `FundingRoundConfig` has no dwell field, and how long a
+participant sits shielded before requesting the withdrawal is entirely their
+choice.
 
 ---
 
@@ -815,8 +834,8 @@ of nominal `k`, and under naive pass-through use of the same pool it is most of 
 | gasless batch coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window scheduler, real-k floor gate, rotating fee-payer, normalized `TxProfile`, atomic crowd-tx composition (N+1 signer, ALT, `plan_settlements`), mockable RPC boundary |
 | pooled-action behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + `PlainTransfer` (soak baseline), Jupiter swap, jitoSOL stake adapters; bucketed amounts |
 | participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`fund-commit`/`status`/`ceremony`; prove rebuilds the path, proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback, `--proving-key` proves under a ceremony key), emits `SettleZk` |
-| adversarial harness | `crates/mirror-harness` | **Implemented** - FIFO, amount, gas-payer, and wallet-fingerprint attacks measuring attacker advantage over 1/k, Baseline vs mirror-pool; FIFO advantage collapses to about 0 under shared-epoch batching; plus the effective-k metric whose funding-provenance classes are derived from the shipped funding mechanism (`funding.rs`) with policy, adversary-strength, dwell and adoption ablations |
-| funding rounds (funding-provenance path) | `crates/mirror-coordinator` + `crates/mirror-cli` | **Implemented, not yet soaked** - `fund-commit` (fresh commit wallet funded by unshield, denomination enforced client-side, relay-only signature) + `FundingRounds` (round batching, minimum-round floor with roll-forward, arrival-independent release order); unit-tested against the mock RPC boundary, but the live soaks in `docs/PROOF.md` predate it and do not exercise it; residual measured in `docs/EFFECTIVE_K.md` |
+| adversarial harness | `crates/mirror-harness` | **Implemented** - FIFO, amount, gas-payer, and wallet-fingerprint attacks measuring attacker advantage over 1/k, Baseline vs mirror-pool; FIFO advantage collapses to about 0 under shared-epoch batching; plus the effective-k metric whose funding-provenance classes are derived from the funding mechanism's rules (`funding.rs`) with policy, adversary-strength, dwell and adoption ablations |
+| funding rounds (funding-provenance path) | `crates/mirror-coordinator` + `crates/mirror-cli` | **Library + CLI only; NOT wired, NOT soaked** - `fund-commit` (fresh commit wallet, proves the unshield, denomination enforced client-side and on-chain, relay-only signature, prints the emitted request) + `FundingRounds` (round batching, minimum-round floor with roll-forward, arrival-independent release order); unit-tested against the mock RPC boundary. Nothing ingests a `fund-commit` request into a `FundingRounds` instance, so no funding round has run and the live soaks in `docs/PROOF.md` do not exercise it. Dwell is participant behaviour with no field and no enforcement. Residual modelled in `docs/EFFECTIVE_K.md` |
 | anti-Sybil entry fee + dwell reward | `programs/mirror-pool` + `docs/INCENTIVES.md` | **Implemented** (crowd path) - entry-fee split, reward pool, dwell accrual, drain-safe `ClaimReward`; ZK-path reward is designed, not implemented |
 | confidential-value program (ValuePool + Transact) | `programs/mirror-pool` | **Implemented** - `InitValuePool`/`Transact`; separate ValuePool value-note accumulator + 32-root ring + vault PDA; on-chain 2-in/2-out JoinSplit Groth16 (alt_bn128), value nullifier PDAs, `publicAmount` lamport moves, fixed-denomination enforcement (`DenominationMismatch`) |
 | confidential JoinSplit circuit + setup + verifying key | `circuits/` | **Implemented** - depth-20 2-in/2-out Tornado-Nova transaction circuit (7 public inputs), dev/test Groth16 setup, committed shield/transfer/unshield fixtures + vendored `transaction_vk.rs` |

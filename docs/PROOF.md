@@ -4,6 +4,17 @@ This file has two independent, honestly-labeled proofs of the same program:
 a **public Solana devnet deployment** (top, browser-verifiable on the Solana
 Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
 
+> **These are records of runs, not descriptions of the current tree.** Both runs
+> predate the move to in-process pure-Rust Groth16 proving, so several assertion
+> rows below say the proof was generated and verified by `snarkjs`. That is what
+> happened in those runs and the rows are left as they were recorded. The
+> participant CLI now proves in-process via `ark-circom`/`ark-groth16` with no
+> Node process, and `--use-snarkjs` is a legacy fallback; `circom`/`snarkjs` are
+> still needed at BUILD time to produce the `.wasm`/`.r1cs`/`.zkey` artifacts,
+> and `snarkjs groth16 setup` is still the ceremony's phase-2 starting point.
+> Nothing else about the runs changed: every signature, compute-unit figure and
+> on-chain assertion below is exactly as captured.
+
 ---
 
 # Public devnet deployment (browser-verifiable)
@@ -87,9 +98,11 @@ mismatched-recipient, replay) all fail closed on-chain.
 ## Confidential-value soak - shield / transfer / unshield (devnet)
 
 Fresh pools per run. The 2-in/2-out JoinSplit `Transact` layer, driven by the
-shipped participant CLI (snarkjs Groth16) and the gasless coordinator. A
-transfer is signed ONLY by the relay (hides WHO) and carries `publicAmount ==
-0` (hides HOW MUCH).
+participant CLI and the gasless coordinator. (This run predates the move to
+in-process pure-Rust proving, so the CLI proved with snarkjs here; it now proves
+with `ark-circom`/`ark-groth16` by default and `--use-snarkjs` is the legacy
+fallback.) A transfer is signed ONLY by the relay (hides WHO for that transfer)
+and carries `publicAmount == 0` (hides HOW MUCH).
 
 - main ValuePool: `3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4` (authority / relay `hfQPKv4EDrUNeEqQjWVC1EKRVaSgFeVRkrkRkCJPG4j`), vault `6S8PHSZ9g9Xd5ea6Vz4iPEa4J59i9hVMGfhUumETg3D2`
 - main pool (Explorer): https://explorer.solana.com/address/3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4?cluster=devnet
@@ -263,7 +276,8 @@ solana program deploy \
   --program-id programs/mirror-pool/target/deploy/mirror_pool-keypair.json \
   programs/mirror-pool/target/deploy/mirror_pool.so
 
-# 3. (ZK path) ensure snarkjs + the circuit artifacts are present
+# 3. (ZK path) ensure the circuit artifacts are present (proving is in-process
+#    pure Rust; circom/snarkjs are only needed to BUILD these artifacts)
 #    circuits/membership_final.zkey, circuits/membership_js/membership.wasm,
 #    circuits/artifacts/verification_key.json  (build with `bash circuits/build.sh`)
 
@@ -284,7 +298,8 @@ This section documents an automated end-to-end run of `mirror-soak-value` (the
 confidential-VALUE soak) against a LIVE local Surfpool validator (a local mainnet
 mirror at `http://127.0.0.1:8899`), treated as mainnet and run honestly. It exercises the 2-in/2-out
 JoinSplit `Transact` layer (shield / transfer / unshield) through the SHIPPED
-participant CLI (`mirror-cli`, which proves with snarkjs and emits each Transact) and
+participant CLI (`mirror-cli`, which proved with snarkjs at the time of this run and
+emits each Transact; it now proves in-process in pure Rust by default) and
 the gasless coordinator (`mirror_coordinator::submit_transact`). The signatures below
 are local-validator signatures, reproducible by re-running the soak against a fresh
 Surfpool, not lookups on a public explorer.
@@ -382,7 +397,8 @@ solana program deploy \
   --program-id .soak/keys/confidential-program.json \
   programs/mirror-pool/target/deploy/mirror_pool.so
 
-# 3. ensure snarkjs + the transaction-circuit artifacts are present
+# 3. ensure the transaction-circuit artifacts are present (proving is in-process
+#    pure Rust; circom/snarkjs are only needed to BUILD these artifacts)
 #    circuits/transaction_final.zkey, circuits/transaction_js/transaction.wasm,
 #    circuits/artifacts/transaction_verification_key.json
 

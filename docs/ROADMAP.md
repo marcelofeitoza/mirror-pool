@@ -1,13 +1,20 @@
 # mirror-pool roadmap
 
 mirror-pool is "Tornado Cash for behavior, not funds." N participants voluntarily
-pool an action so the action is publicly visible but its initiator is not. The
-behavioral privacy target is obscurity of the initiator: making an on-chain action
-un-attributable to a specific wallet by an automated chain-analysis pipeline. That
-core is not about hiding funds, amounts, or the fact that an action occurred. An
+pool one identical action into a synchronized round, and the round is what an
+automated chain-analysis pipeline has to read. The two paths target different
+things, and the difference is load-bearing:
+
+- the **crowd path** removes the per-actor *signal* (timing, ordering, size, gas
+  payer, fingerprint, parseable intent) while each participant still signs their
+  own action, so the action stays attributable to that wallet;
+- the **ZK opt-in path** removes the attribution itself, settling to a fresh
+  output with no participant signature behind an on-chain membership proof.
+
+Neither is about hiding funds, amounts, or the fact that an action occurred. An
 optional confidential-value layer (below) deliberately extends BEYOND that theme: a
-Tornado-Nova-style shielded pool that also hides amounts, so a deployment that turns
-it on hides both who initiated an action and how much moved.
+Tornado-Nova-style shielded pool that also hides amounts, so a deployment running
+it alongside the ZK path hides both who initiated an action and how much moved.
 
 This document states what is **built** and what is **future**. The complete
 two-path behavioral system is built: a crowd path that defeats copy-trading and
@@ -46,13 +53,14 @@ on real mixers and Solana clustering, not a strawman. Full detail is in
 Design responses, one line each: shared-epoch batch settlement defeats FIFO; fixed
 size buckets defeat amount matching; a normalized, rotating gasless coordinator
 defeats fingerprinting and gas-payer reuse; denominated, batched funding rounds
-that credit a fresh commit wallet out of the value pool remove the
-main-wallet-to-commit-wallet edge that common-funding clustering keys on (with the
-residual measured in `EFFECTIVE_K.md`, not assumed away); a fixed uniform action
-shape removes the copy-trade signal; honest k-accounting keeps the reported number
-truthful; and the ZK opt-in path adds a cryptographic membership proof so
-who-initiated is
-hidden even from the relay.
+that credit a fresh commit wallet out of the value pool would remove the
+main-wallet-to-commit-wallet edge that common-funding clustering keys on (designed
+and unit-tested but not wired into a running service, with the residual measured in
+`EFFECTIVE_K.md` rather than assumed away); a fixed uniform action shape removes
+the copy-trade signal; honest k-accounting keeps the reported number truthful; and
+the ZK opt-in path adds a cryptographic membership proof so who-initiated is hidden
+even from the relay - which the crowd path, where each participant signs their own
+action, does not do.
 
 ---
 
@@ -192,8 +200,10 @@ k-anonymity. The CLI (`value-keygen`/`init-value-pool`/`shield`/`transfer`/
 `unshield`/`scan`) proves in pure Rust and emits the `Transact`; the coordinator's
 `submit_transact` settles it gaslessly (relay-only signer for transfer/unshield, so
 the user never signs; depositor co-sign for a shield). Because a confidential
-transfer settles through the gasless relay with `publicAmount == 0`, mirror-pool
-then hides both who initiated and how much moved. The whole path is soak-proven end
+transfer settles through the gasless relay with `publicAmount == 0`, that transfer
+hides both who initiated it and how much it moved. That property belongs to the
+value layer's own transfers; it does not extend to a crowd-path action, which the
+participant still signs. The whole path is soak-proven end
 to end (shield / transfer / unshield + fixed-denomination, 25/25 on-chain
 assertions; `docs/PROOF.md`). The JoinSplit trusted setup is the same reproducible
 development/test setup as the membership circuit and MUST NOT secure real value.
@@ -316,8 +326,8 @@ settlement trace.
 | Fixed-denomination mode (amount k-anonymity, `DenominationMismatch`) | Built |
 | Gasless confidential submit (`submit_transact`, relay-only signer) | Built |
 | Confidential CLI (`value-keygen`/`shield`/`transfer`/`unshield`/`scan`) | Built |
-| Funding-provenance path: `fund-commit` (fresh commit wallet funded by unshield) + coordinator funding rounds (denomination, batching, minimum-round floor) | Built |
-| Effective-k derived from the funding mechanism, with its residual measured and published | Built |
+| Funding-provenance path: `fund-commit` (fresh commit wallet funded by unshield, emits the request) + `FundingRounds` batcher (denomination, batching, minimum-round floor) | Library + CLI; NOT wired end to end, NOT soaked |
+| Effective-k derived from the funding mechanism's rules, with its residual measured and published (a model, not a deployment measurement) | Built |
 | Joint deposit-to-withdrawal matching inference in the harness adversary | Built |
 | Swap/stake-from-pool via CPI on the ZK path | Future |
 | ZK-path anonymity-mining reward (dwell/age proof) | Future |
@@ -326,6 +336,7 @@ settlement trace.
 | Confidential deposits (hide even the shield/unshield magnitude) | Future |
 | n-in / n-out JoinSplit beyond 2-in / 2-out | Future |
 | Confidential swap/stake from the value pool | Future |
+| Wiring `fund-commit` into a running `FundingRounds` service, and soaking a funding round live | Future |
 | Cross-epoch privacy, decentralized coordinator, more behaviors | Future |
 
 **One-line honest claim:** mirror-pool ships a complete two-path behavioral
@@ -333,16 +344,21 @@ anonymity pool plus an optional confidential-value layer. The crowd path collaps
 the strongest empirical mixer attack (FIFO temporal matching) to the 1/real_k
 baseline via shared-epoch batch settlement, proven by an adversarial harness, and
 defeats fingerprint and amount-match attacks with a gasless rotating coordinator and
-fixed size buckets; the ZK opt-in path adds cryptographic who-initiated
-unlinkability with an on-chain Groth16 membership proof; and the confidential-value
-layer adds a Tornado-Nova 2-in/2-out JoinSplit that hides amounts (soak-proven end
-to end), so a deployment can hide both who initiated and how much moved. That same
-value pool carries the funding leg: a commit wallet is credited by an unshield in a
-denominated, batched funding round rather than by a transfer from a main wallet,
-which removes the common-funding edge and leaves a residual the harness measures
-(90.0% of nominal effective-k at k=32) instead of assuming. The
-remaining work is CPI-executed pooled actions, an anonymous ZK-path reward, actually
-running the (already built) trusted-setup ceremony with external contributors and
-redeploying with its key, confidential deposits, an n-in/n-out JoinSplit,
-confidential swap/stake, and scaling, all extensions of shipped patterns rather than
-new claims.
+fixed size buckets - it does not hide the on-chain signer, because each participant
+signs their own action; the ZK opt-in path is the one that adds cryptographic
+who-initiated unlinkability, with an on-chain Groth16 membership proof and no
+participant signature at settle; and the confidential-value layer adds a
+Tornado-Nova 2-in/2-out JoinSplit that hides amounts (soak-proven end to end), so a
+deployment running it with the ZK path can hide both who initiated and how much
+moved. That same value pool is *designed* to carry the funding leg: a commit wallet
+credited by an unshield in a denominated, batched funding round rather than by a
+transfer from a main wallet, which would remove the common-funding edge and leave a
+residual the harness measures (75.8% of nominal effective-k at k=32 from the
+enforced rules alone, 90.0% if participants voluntarily dwell two rounds, both at
+full adoption) instead of assuming. That leg is library code plus a CLI that emits
+a request; nothing wires the two together yet, and it has never been soaked. The
+remaining work is that wiring plus a funding-round soak, CPI-executed pooled
+actions, an anonymous ZK-path reward, actually running the (already built)
+trusted-setup ceremony with external contributors and redeploying with its key,
+confidential deposits, an n-in/n-out JoinSplit, confidential swap/stake, and
+scaling, all extensions of shipped patterns rather than new claims.
