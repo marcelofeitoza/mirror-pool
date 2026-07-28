@@ -61,6 +61,15 @@ pub fn process_instruction(
         // in this table: there is no UPDATE_VK tag, so once a registry PDA holds
         // a key no instruction in this program can change it.
         wire::tag::INIT_VK => instructions::init_vk::process(program_id, accounts, data),
+        // Opt-in disclosure layer. Neither tag is reachable from any settle path,
+        // and no settle path reads what they write: registering is a user choice
+        // and not registering degrades nothing.
+        wire::tag::REGISTER_VIEWING_KEY => {
+            instructions::register_viewing_key::process(program_id, accounts, data)
+        }
+        wire::tag::PUBLISH_DISCLOSURE => {
+            instructions::publish_disclosure::process(program_id, accounts, data)
+        }
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

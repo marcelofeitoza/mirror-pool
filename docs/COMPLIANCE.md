@@ -1,19 +1,32 @@
-# Association sets: the opt-in compliance layer
+# The opt-in compliance layer: association sets and viewing keys
 
-mirror-pool ships an OPTIONAL association-set primitive, in the sense of
-Buterin, Illum, Nadler, Schaer and Soleimani's *Blockchain Privacy and Regulatory
-Compliance: Towards a Practical Equilibrium* ("Privacy Pools"). A user can prove,
-in zero knowledge, that their deposit belongs to a CURATED subset of the pool's
-deposits, without revealing which deposit is theirs.
+mirror-pool ships TWO optional compliance primitives, and they answer different
+questions.
+
+**Association sets** (sections 1 to 6), in the sense of Buterin, Illum, Nadler,
+Schaer and Soleimani's *Blockchain Privacy and Regulatory Compliance: Towards a
+Practical Equilibrium* ("Privacy Pools"). A user proves, in zero knowledge, that
+their deposit belongs to a CURATED subset of the pool's deposits, without
+revealing which deposit is theirs. It answers "my funds are in the acceptable
+set", to EVERYONE, while revealing nothing.
+
+**Viewing keys and sealed disclosures** (section 7). A user publishes an
+X25519 key under their own address, and a user can post a sealed record that
+reveals ONE of their own settled actions to ONE reader they chose. It answers
+"here is exactly what I did", to one party, and it is a disclosure of private
+data.
+
+Neither is required by anything. A pool that required either would be a
+surveillance pool.
 
 This document is about the politics as much as the cryptography, because a
 compliance feature in a privacy tool is mostly a political object. It states what
-the primitive does, who has to be trusted for it to mean anything, what a user
-who is excluded can still do, and what it does NOT provide.
+each primitive does, who has to be trusted for it to mean anything, what a user
+who is excluded can still do, and what neither provides.
 
 ---
 
-## 1. The problem it addresses
+## 1. The problem association sets address
 
 A privacy pool's anonymity set is everyone in it, including anyone whose funds
 came from a theft. An honest user has no way to say "I am in this pool, but I am
@@ -28,7 +41,7 @@ anonymity inside the honest crowd.
 
 ---
 
-## 2. What we built
+## 2. What we built (association sets)
 
 Three additive pieces. Nothing in the pre-existing membership path changed.
 
@@ -160,7 +173,7 @@ point users at a single curator.
 
 ---
 
-## 6. Limits, stated plainly
+## 6. Limits of association sets, stated plainly
 
 **Your anonymity is the size of the intersection.** The association proof hides
 you inside the set of commitments that are in BOTH the pool tree and the curated
@@ -198,25 +211,210 @@ supports it; the ceremony has not been run for it.
 
 ---
 
-## 7. How it composes with viewing keys
+## 7. Viewing keys and sealed disclosures
 
-The two disclosure primitives are complementary and deliberately separate.
+The second primitive, and the one that reveals something. An association proof
+says "I am in the acceptable set" to everybody while disclosing nothing. A
+disclosure says "here is exactly what this one action was" to exactly one reader.
+Neither substitutes for the other, and neither requires the other.
 
-**Encrypted notes / viewing keys** (`crates/mirror-core/src/encrypted_note.rs`,
-X25519 ECDH + HKDF-SHA256 + ChaCha20-Poly1305, with a viewing key kept distinct
-from the spend key) let a user reveal the CONTENTS of specific activity to a
-specific party: hand over the viewing key and the auditor reads those notes and
-nothing else. It answers "here is exactly what I did", to one recipient, and it
-is a disclosure of private data.
+The cryptography already existed client-side
+(`crates/mirror-core/src/encrypted_note.rs`: X25519 ECDH, HKDF-SHA256,
+ChaCha20-Poly1305, with a viewing key deliberately separate from the spend key).
+What section 7 is about is the ON-CHAIN half: where a reader's key is published,
+how a record is bound to a settlement, and which parts of the claim the program
+actually enforces.
 
-**Association proofs** answer a different question - "my funds are in the
-acceptable set" - to EVERYONE, publicly, while disclosing nothing at all. There
-is no recipient, no key handed over, no data revealed.
+### 7.1 What we built
 
-Used together: an association proof is the cheap, public, always-on signal that
-gets a user through the front door, and a viewing key is the targeted, revocable-
-in-practice disclosure for the rare case where somebody has standing to ask for
-detail. Neither can substitute for the other, and neither requires the other.
+**A viewing-key directory.** `REGISTER_VIEWING_KEY` writes a `ViewingKey` account
+at seeds `["view", authority]`, holding `{ authority, viewing_pub,
+rotation_count }`. The authority signs for itself. The same instruction rotates
+the key later, and only that authority can, because the account is that
+authority's PDA. An auditor publishes a key so users have something to seal to; a
+user may publish one so a sender can encrypt a confidential-value note to them
+knowing only their address.
+
+**A disclosure record.** `PUBLISH_DISCLOSURE` writes a `Disclosure` account at
+seeds `["disc", pool, action_hash, auditor_view_pub]`, holding
+`{ pool, recipient, auditor, auditor_view_pub, action_hash, amount, blob }`. The
+`blob` is exactly one 100-byte encrypted-note ciphertext. Its plaintext is the
+`(epoch, secret)` pair for one ZK opt-in action, which is all a reader needs,
+because
+
+```text
+commitment    = Poseidon(secret, actionHash, epoch)     the deposit leaf
+nullifierHash = Poseidon(secret, epoch)                 the spend tag
+```
+
+and `action_hash` is on the record in the clear. The reader recomputes both,
+finds the `CommitDeposit` that escrowed the deposit (hence the wallet that funded
+it) and the `SettleZk` that spent it (hence the payout), and has the whole
+provenance of that one action.
+
+**What the record deliberately does NOT contain: the commitment.** Putting the
+disclosed commitment on-chain, or in the record's address, would publicly link
+that deposit to that settlement for everybody, which is precisely the link the
+pool exists to break. Here the deposit side is inside the sealed blob and nowhere
+else. What the record makes public is the settlement side, which the settlement
+already made public itself.
+
+### 7.2 Registration is authenticated, and by derivation rather than by a check
+
+The obvious way to build this layer is a record keyed by the commitment being
+disclosed, written by whoever pays for it. That has two holes: any payer can
+claim any commitment first, and the handler accepts the sealed bytes without
+knowing anything about them. We do not do either.
+
+`action_hash` is not accepted from the caller. The handler recomputes
+
+```text
+action_hash = Poseidon(recipientHi128, recipientLo128, amount)
+```
+
+on-chain from the SIGNING recipient's address, with the same `sol_poseidon` call
+`SETTLE_ZK` uses, and that value is a PDA seed. Chaining it up:
+
+```text
+record PDA  = ["disc", pool, actionHash, auditorViewPub]   derived from the signer
+actionHash  = Poseidon(recipient, amount)                   binds the recipient
+commitment  = Poseidon(secret, actionHash, epoch)           binds the actionHash
+```
+
+so the only party who can write a record about a settlement is the address that
+settlement was bound to pay, which is the address the depositor themselves chose
+INSIDE the commitment. Squatting somebody else's slot is not forbidden by a rule
+that could be forgotten; it is an address that cannot be derived. An attacker who
+publishes junk under an address they control occupies only their own slot, which
+corresponds to a settlement to themselves.
+
+The directory has the same shape: the authority is the only variable seed, so the
+only registration any signer can write is their own. There is no first-come race
+for anybody's entry.
+
+### 7.3 What is enforced where
+
+| Claim | Enforced by |
+|---|---|
+| The publisher holds the key the settlement pays | On-chain: PDA derived from the signing recipient's `action_hash` |
+| Nobody else can occupy that record | On-chain: same derivation, plus write-once |
+| Nobody else can occupy a directory entry | On-chain: `["view", authority]` with the authority signing |
+| The reader is a real, registered party | On-chain: the ViewingKey account must be program-owned, v1, and at its own PDA; the key is READ from it |
+| The amount is one this pool can settle | On-chain: equals `pool.zk_denomination` |
+| The blob is the right shape | On-chain: exact length, and its ephemeral X25519 key must be canonical and not small-order |
+| The blob opens at all | NOT enforced. The program holds no secret and cannot decrypt |
+| The blob opens to the claimed action | NOT enforced on-chain. The READER checks it in one Poseidon hash |
+| The disclosed action really settled | NOT enforced. The reader checks the Nullifier PDA exists |
+| The publisher told the truth | NOT enforceable by any program. See below |
+
+The last three are the honest limit of the design, and they are why the record is
+signed. A false disclosure is possible. It costs the liar their own slot, it is
+detected by the reader immediately (the recomputed commitment is simply not on
+the chain, and the recomputed nullifier has no PDA), and it carries the signature
+of the address that settlement paid. That is accountability, not prevention, and
+calling it prevention would be a lie about what the code does.
+
+### 7.4 What the reader learns, and what they do not
+
+Learns, for each record they can open:
+
+- the `(epoch, secret)` of that ONE action, hence its deposit leaf and spend tag;
+- therefore the deposit transaction, hence the wallet that funded it;
+- therefore the settlement transaction, hence what was paid and to whom;
+- that the publisher signed the claim.
+
+Does not learn:
+
+- anything about any other participant of the pool;
+- anything about the publisher's OTHER actions. Every action has its own secret
+  and its own record, so disclosure is per-action, not per-account. Handing over
+  a viewing key wholesale is a different, blunter act, and this layer does not
+  require it;
+- anything about the confidential-value layer. Those notes use a separate key and
+  a separate accumulator;
+- any ability to move the money. The escrow's only exit is `SETTLE_ZK`, which
+  pays the address bound in `actionHash`. A reader who holds the secret can at
+  most produce a proof that pays the publisher's own recipient.
+
+One real harm remains: a reader who gets the secret BEFORE the action settles can
+settle it at a moment of their choosing, which can put the settlement in a thinner
+window than the user would have picked. That is an anonymity harm, not a theft.
+The CLI refuses to publish a disclosure for an unsettled action unless you pass
+`--allow-unsettled`, and says why.
+
+### 7.5 The privacy cost of registering at all
+
+Stated plainly, because a disclosure feature that hides its own cost is a trap.
+
+**Registering a viewing key is a public, permanent act.** The account links your
+Solana address to an X25519 key forever. Anyone can read it. If you later receive
+confidential-value notes at that key, an observer still cannot tell which notes
+are yours (that needs trial decryption with your secret), but they can tell that
+this address is set up to participate.
+
+**Publishing a disclosure is a public act about a specific settlement.** The
+record says, to everybody: the settlement to address R on this pool, for this
+amount, has a disclosure addressed to auditor A. So it publishes the FACT of a
+disclosure and the IDENTITY of your reader. It does not publish the commitment,
+the epoch, the nullifier, or the secret.
+
+**The rent payer is a linkability leak if you let it be.** The settlement paid a
+fresh address; paying the record's rent from your main wallet links that wallet
+to the action, which is exactly what the fresh address was for. The CLI pays from
+the recipient by default.
+
+**Choosing an auditor is itself information.** Which reader you named is public
+and permanent, and "this user discloses to that firm" may be more than you meant
+to say.
+
+**It is one-way.** Records are write-once and there is no close instruction, so
+there is no revocation: the reader keeps whatever they decrypted, and the fact of
+the disclosure stays on-chain. Rotating your reader's key does not un-disclose
+anything; it only changes where future records land.
+
+### 7.6 How the two primitives compose
+
+An association proof is the cheap, public, always-on signal that gets a user
+through the front door without revealing anything. A disclosure is the targeted,
+one-reader, one-action detail for the rarer case where somebody has standing to
+ask. They are independent: the association path (`SETTLE_ZK_ASSOCIATED`) never
+reads a viewing key or a record, and the disclosure path never reads an
+association set. A user can use either, both, or neither.
+
+Used together the story is: prove publicly that you are in a curated set, and, if
+a counterparty needs more than that, disclose the one action they are asking
+about to them alone. What you never have to do is hand anybody a key that opens
+everything you have ever done.
+
+### 7.7 Limits, stated plainly
+
+**No on-chain disclosure for the confidential-value layer.** The authentication
+above works because a behavioral settlement binds a Solana address inside its
+commitment. A confidential value note binds a Poseidon key, not an on-chain
+address, so there is no signature the program could require. Disclosure there
+stays client-side: hand the reader the note material or the viewing key out of
+band. The fix would be to bind an auditor blob into a JoinSplit's `extDataHash`
+so the spend proof itself authorizes the record. We have not built that, and we
+are not going to imply the amount layer has an on-chain disclosure primitive when
+it does not.
+
+**The X25519 checks are byte checks.** Canonical encoding and the small-order
+blacklist are what the program can afford, and they are what protects a user from
+a client that seals to a degenerate key. They do NOT prove the bytes are a point
+on the curve, and they do not prove the registrant holds the matching secret. A
+registration whose secret nobody holds simply produces records nobody can open.
+
+**Nothing stops a reader from republishing.** Disclosure is disclosure. Once a
+reader can open a record, what they do with the contents is a matter of law and
+contract, not of cryptography.
+
+**One record per (action, reader key).** Disclosing the same action to a second
+reader is a second record, at a different address, sealed to their key. Rotating
+a reader's key changes where new records land and does not disturb old ones.
+
+**The trusted-setup caveat is unchanged.** This layer verifies no proof and adds
+no circuit, so it neither improves nor worsens the ceremony situation described
+in `docs/CEREMONY.md`.
 
 ---
 
@@ -267,6 +465,51 @@ needs the association circuit's build artifacts, produced once by
 If the curator does not vouch for this deposit, the command stops with a message
 saying so and reminding you that plain `mirror-cli prove` still works.
 
+### Viewing keys and disclosures
+
+Auditor (or anyone), once, to publish the key they can be addressed at. The key
+comes from a `value-keygen` keyfile, or as raw hex when the secret lives
+elsewhere:
+
+```bash
+mirror-cli viewing-key register \
+  --program-id <PROGRAM> --authority auditor.json --wallet auditor-wallet.json
+```
+
+Anyone, to look up an address's published key (including to check it before
+sealing anything to it):
+
+```bash
+mirror-cli viewing-key show --program-id <PROGRAM> --authority <AUDITOR_PUBKEY>
+```
+
+User, to disclose ONE settled action to ONE reader. The `--recipient` keypair is
+the fresh address that settlement paid, and it must sign: that signature is what
+the record's address is derived from:
+
+```bash
+mirror-cli disclose \
+  --program-id <PROGRAM> --note notes/<note>.json \
+  --auditor <AUDITOR_PUBKEY> --recipient recipient.json
+```
+
+The command refuses if the action has not settled yet and explains why (a reader
+holding the secret early can choose when it settles), refuses if the reader has
+not registered a key, and refuses if the keypair is not the note's bound
+recipient. It prints, in plain words, what the reader can now read and what
+everybody else can now read.
+
+Auditor, to find and check what has been disclosed to them:
+
+```bash
+mirror-cli audit scan --program-id <PROGRAM> --wallet auditor-wallet.json
+```
+
+For each record it can open, this prints the recomputed commitment and nullifier
+and then VERIFIES the claim against the chain by deriving the Nullifier PDA and
+checking it exists. A record that does not open, or that opens to an action with
+no on-chain nullifier, is reported as unverified rather than believed.
+
 ---
 
 ## 9. Where the code is
@@ -283,3 +526,19 @@ saying so and reminding you that plain `mirror-cli prove` still works.
 | On-chain tests | `programs/mirror-pool/tests/association.rs` |
 | Host prover + curator tooling | `crates/mirror-cli/src/association.rs` |
 | Host tests | `crates/mirror-cli/src/association/tests.rs` |
+
+Viewing keys and disclosures (section 7):
+
+| Piece | Path |
+|---|---|
+| Sealing, opening, recomputing (host) | `crates/mirror-core/src/disclosure.rs` |
+| The ECIES it reuses unchanged | `crates/mirror-core/src/encrypted_note.rs` |
+| Accounts | `programs/mirror-pool/src/state/{viewing_key,disclosure}.rs` |
+| Instructions | `programs/mirror-pool/src/instructions/{register_viewing_key,publish_disclosure}.rs` |
+| On-chain tests | `programs/mirror-pool/tests/viewing.rs` |
+| CLI | `mirror-cli viewing-key register / viewing-key show / disclose / audit scan` |
+
+There is deliberately no circuit and no verifying key in that table: this layer
+proves nothing in zero knowledge. It publishes a key, and it publishes a sealed
+record whose address is derived from a signature. Everything it claims beyond
+that, the reader checks for themselves.

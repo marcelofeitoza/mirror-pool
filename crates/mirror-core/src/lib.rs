@@ -482,6 +482,15 @@ pub mod wire {
         /// [`super::INIT_VK_HEADER_LEN`]. There is deliberately no update tag:
         /// the key a verify path reads is immutable for the deployment's life.
         pub const INIT_VK: u8 = 11;
+        /// Opt-in disclosure layer: register (or rotate) an X25519 viewing key
+        /// under the SIGNER'S OWN address (seeds `["view", authority]`). See
+        /// [`super::REGISTER_VIEWING_KEY_LEN`].
+        pub const REGISTER_VIEWING_KEY: u8 = 12;
+        /// Opt-in disclosure layer: publish ONE sealed disclosure record about a
+        /// settlement whose bound recipient is the signer (seeds
+        /// `["disc", pool, action_hash, auditor_view_pub]`). See
+        /// [`super::PUBLISH_DISCLOSURE_LEN`].
+        pub const PUBLISH_DISCLOSURE: u8 = 13;
     }
 
     /// INIT_POOL layout:
@@ -681,6 +690,58 @@ pub mod wire {
     const _: () = assert!(VK_MAX_ENCODED_LEN == 961);
     const _: () = assert!(INIT_VK_HEADER_LEN == 2);
     const _: () = assert!(VK_REGISTRY_HEADER_LEN == 4);
+    // Opt-in disclosure layer: pin the sizes in lockstep with the program's
+    // mirrored `wire` module (which asserts the same numbers).
+    const _: () = assert!(REGISTER_VIEWING_KEY_LEN == 33);
+    const _: () = assert!(PUBLISH_DISCLOSURE_LEN == 109);
+    const _: () = assert!(DISCLOSURE_BLOB_LEN == 100);
+    // The on-chain record stores exactly one sealed `encrypted_note` blob, so the
+    // two lengths are the same number by construction, not by coincidence.
+    const _: () = assert!(DISCLOSURE_BLOB_LEN == crate::encrypted_note::ENC_NOTE_BLOB_LEN);
+
+    // --- Opt-in disclosure layer (ADDITIVE): on-chain viewing keys + sealed
+    // disclosure records. Kept byte-identical to the on-chain program's mirrored
+    // `wire` module and `pda` seeds. ---
+
+    /// Seed prefix of a registered viewing key's PDA: `["view", authority]`.
+    ///
+    /// The authority is the ONLY variable seed, so a registration can only ever
+    /// land under the address that signed for it. There is no slot anybody else
+    /// can take, which is what makes the directory unsquattable. MUST match the
+    /// program's `pda::VIEWING_KEY_SEED`.
+    pub const VIEWING_KEY_SEED: &[u8] = b"view";
+
+    /// Seed prefix of a disclosure record's PDA:
+    /// `["disc", pool, action_hash, auditor_view_pub]`.
+    ///
+    /// `action_hash = Poseidon(recipientHi128, recipientLo128, amount)` is
+    /// recomputed ON-CHAIN from the SIGNING recipient's address, so the slot a
+    /// record can occupy is a function of the signer's own key: publishing
+    /// against somebody else's settlement is not a check that can be skipped, it
+    /// is an address that cannot be derived. MUST match the program's
+    /// `pda::DISCLOSURE_SEED`.
+    pub const DISCLOSURE_SEED: &[u8] = b"disc";
+
+    /// REGISTER_VIEWING_KEY layout: `[tag(1)][viewing_pub(32)]`.
+    ///
+    /// The authority and the rent payer are both accounts, so the body is just
+    /// the X25519 public key. MUST match the program's
+    /// `wire::REGISTER_VIEWING_KEY_LEN`.
+    pub const REGISTER_VIEWING_KEY_LEN: usize = 1 + 32;
+
+    /// The one sealed blob a disclosure record carries: exactly one
+    /// [`crate::encrypted_note`] ciphertext,
+    /// `ephemeral_pub(32) || nonce(12) || ct+tag(56)`. Any other length is
+    /// malformed. MUST match the program's `wire::DISCLOSURE_BLOB_LEN`.
+    pub const DISCLOSURE_BLOB_LEN: usize = 100;
+
+    /// PUBLISH_DISCLOSURE layout: `[tag(1)][amount(8 LE)][blob(100)]`.
+    ///
+    /// `amount` is the settled action's public amount (the pool's fixed
+    /// `zk_denomination`); together with the SIGNING recipient it is what the
+    /// on-chain Poseidon recomputation turns into the record's address. MUST
+    /// match the program's `wire::PUBLISH_DISCLOSURE_LEN`.
+    pub const PUBLISH_DISCLOSURE_LEN: usize = 1 + 8 + DISCLOSURE_BLOB_LEN;
 
     // --- Digest-pinned verifying-key registry (ADDITIVE). Kept byte-identical to
     // the on-chain program's mirrored `wire` module. ---
@@ -785,6 +846,14 @@ pub mod wire {
 /// and trial-decrypts to recover spendable notes. See the module docs for the
 /// exact on-chain blob byte layout.
 pub mod encrypted_note;
+
+/// Opt-in selective disclosure to an auditor the user chose (host-side).
+/// ADDITIVE, and additive to [`encrypted_note`] in particular: a disclosure IS an
+/// encrypted-note blob, sealed to an auditor's on-chain-registered viewing key,
+/// whose plaintext is the `(epoch, secret)` pair that lets exactly that reader
+/// recompute one action's deposit leaf and spend tag. Nothing here is required by
+/// any settle path. See the module docs and `docs/COMPLIANCE.md`.
+pub mod disclosure;
 
 /// Confidential value-note (UTXO) primitives for the 2-in / 2-out JoinSplit
 /// `circuits/transaction.circom` (see `circuits/TRANSACTION.md`).

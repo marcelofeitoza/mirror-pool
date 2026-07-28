@@ -128,6 +128,17 @@ enum Command {
     /// (curator) Association-set tooling: build a curated root, emit the update.
     #[command(subcommand_help_heading = "Association sets")]
     Assoc(AssocArgs),
+    /// (OPTIONAL) Publish or rotate the X25519 viewing key your address can be
+    /// addressed at. Nothing requires it: no settle path reads it.
+    #[command(subcommand_help_heading = "Selective disclosure")]
+    ViewingKey(ViewingKeyArgs),
+    /// (OPTIONAL) Disclose ONE of your own settled actions to ONE auditor you
+    /// chose, sealed to their registered viewing key.
+    Disclose(DiscloseArgs),
+    /// (auditor) Scan the chain for disclosure records sealed to your viewing
+    /// key, open them, and verify each against the chain.
+    #[command(subcommand_help_heading = "Selective disclosure")]
+    Audit(AuditArgs),
     /// Show pool config + current epoch on-chain.
     Status(StatusArgs),
     /// (confidential value) Derive a value spend + viewing keypair and save a keyfile.
@@ -680,6 +691,105 @@ struct AssocBuildRootArgs {
     out: Option<PathBuf>,
 }
 
+/// `viewing-key`: the OPT-IN on-chain viewing-key directory.
+#[derive(Args)]
+struct ViewingKeyArgs {
+    #[command(subcommand)]
+    command: ViewingKeyCommand,
+}
+
+#[derive(Subcommand)]
+enum ViewingKeyCommand {
+    /// Publish (or rotate) the X25519 viewing key for your own address. The
+    /// account is your PDA, so nobody else can ever write it - and nothing on
+    /// this chain requires you to write it either.
+    Register(ViewingKeyRegisterArgs),
+    /// Show the viewing key an address has published, if any.
+    Show(ViewingKeyShowArgs),
+}
+
+#[derive(Args)]
+struct ViewingKeyRegisterArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// The authority keypair (JSON byte array). Signs for its own registration.
+    #[arg(long)]
+    authority: PathBuf,
+    /// A value keyfile (from `value-keygen`) whose viewing key to publish.
+    /// Mutually exclusive with --viewing-pub.
+    #[arg(long)]
+    wallet: Option<PathBuf>,
+    /// The raw X25519 viewing public key (64 hex chars), for a reader whose
+    /// secret lives elsewhere. Mutually exclusive with --wallet.
+    #[arg(long)]
+    viewing_pub: Option<String>,
+    /// Fee payer keypair; defaults to the authority.
+    #[arg(long)]
+    payer: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct ViewingKeyShowArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// The address to look up (base58).
+    #[arg(long)]
+    authority: String,
+}
+
+#[derive(Args)]
+struct DiscloseArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// The ZK-path note (from `deposit-commit`) for the action to disclose.
+    #[arg(long)]
+    note: PathBuf,
+    /// The auditor's address (base58). They must have registered a viewing key;
+    /// the key is read from that account, never from this command line.
+    #[arg(long)]
+    auditor: String,
+    /// The keypair of the note's bound recipient. It MUST sign: the program
+    /// recomputes the record's address from this signer, which is what stops
+    /// anyone publishing a record about somebody else's settlement.
+    #[arg(long)]
+    recipient: PathBuf,
+    /// Fee payer keypair; defaults to the recipient. Paying from another wallet
+    /// links that wallet to this action, which the settlement did not.
+    #[arg(long)]
+    payer: Option<PathBuf>,
+    /// Publish even if the action has not settled yet. Disclosing early lets the
+    /// reader settle it at a moment of their choosing (they cannot redirect the
+    /// payout, but they can pick a thinner window than you would have).
+    #[arg(long)]
+    allow_unsettled: bool,
+}
+
+/// `audit`: the reader's side of the disclosure layer.
+#[derive(Args)]
+struct AuditArgs {
+    #[command(subcommand)]
+    command: AuditCommand,
+}
+
+#[derive(Subcommand)]
+enum AuditCommand {
+    /// Find every disclosure sealed to your viewing key, open it, and check what
+    /// it claims against the chain.
+    Scan(AuditScanArgs),
+}
+
+#[derive(Args)]
+struct AuditScanArgs {
+    #[command(flatten)]
+    chain: ChainArgs,
+    /// The value keyfile (from `value-keygen`) holding your viewing secret.
+    #[arg(long)]
+    wallet: PathBuf,
+    /// Only report records about this Pool (base58).
+    #[arg(long)]
+    pool: Option<String>,
+}
+
 #[derive(Args)]
 struct StatusArgs {
     /// RPC endpoint.
@@ -782,6 +892,14 @@ fn main() -> Result<()> {
             AssocCommand::Init(a) => run_assoc_init(a),
             AssocCommand::Publish(a) => run_assoc_publish(a),
             AssocCommand::Show(a) => run_assoc_show(a),
+        },
+        Command::ViewingKey(args) => match args.command {
+            ViewingKeyCommand::Register(a) => run_viewing_key_register(a),
+            ViewingKeyCommand::Show(a) => run_viewing_key_show(a),
+        },
+        Command::Disclose(args) => run_disclose(args),
+        Command::Audit(args) => match args.command {
+            AuditCommand::Scan(a) => run_audit_scan(a),
         },
         Command::Status(args) => run_status(args),
         Command::ValueKeygen(args) => run_value_keygen(args),
@@ -1321,6 +1439,295 @@ fn run_assoc_show(args: AssocShowArgs) -> Result<()> {
             ""
         };
         println!("    [{i}] {}{label}", to_hex(root));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in disclosure layer: viewing-key directory, disclosing, auditing.
+// ---------------------------------------------------------------------------
+
+/// Publish (or rotate) the X25519 viewing key for the signing address.
+fn run_viewing_key_register(args: ViewingKeyRegisterArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
+    let authority_kp = chain::read_keypair(&args.authority)?;
+    let payer_kp = match &args.payer {
+        Some(p) => chain::read_keypair(p)?,
+        None => chain::read_keypair(&args.authority)?,
+    };
+    let authority = authority_kp.pubkey();
+    let payer = payer_kp.pubkey();
+
+    let viewing_pub = match (&args.wallet, &args.viewing_pub) {
+        (Some(_), Some(_)) => return Err(anyhow!("pass --wallet or --viewing-pub, not both")),
+        (Some(path), None) => {
+            let keyfile = value_note::ValueKeyfile::load(path)?;
+            let wallet = value_note::ValueWallet::from_keyfile(&keyfile)?;
+            wallet.viewing.public()
+        }
+        (None, Some(hex)) => util::from_hex32(hex).context("--viewing-pub")?,
+        (None, None) => return Err(anyhow!("pass --wallet or --viewing-pub")),
+    };
+    // Refuse locally exactly what the chain refuses, with the reason.
+    if !mirror_core::encrypted_note::is_acceptable_x25519_pubkey(&viewing_pub) {
+        return Err(anyhow!(
+            "that is not an acceptable X25519 viewing key: it is either a non-canonical encoding \
+             or a small-order point, and anything sealed to a small-order key is readable by \
+             everybody. The program rejects it too (InvalidViewingKey)."
+        ));
+    }
+
+    let viewkey = chain::viewing_key_pda(&program_id, &authority);
+    let chain_client = Chain::new(args.chain.rpc_url);
+    let existing = chain_client.viewing_key_state(&viewkey)?;
+
+    let ix =
+        chain::register_viewing_key_ix(&program_id, &viewkey, &authority, &payer, &viewing_pub);
+    let mut signers: Vec<&solana_keypair::Keypair> = vec![&payer_kp];
+    if authority != payer {
+        signers.push(&authority_kp);
+    }
+    let sig = chain_client
+        .submit(&[ix], &signers)
+        .context("submitting RegisterViewingKey")?;
+
+    match existing {
+        None => println!("viewing key registered."),
+        Some(prev) => {
+            println!("viewing key rotated.");
+            println!("  previous key:    {}", to_hex(&prev.viewing_public_key));
+        }
+    }
+    println!("  authority:       {authority}");
+    println!("  viewing key:     {}", to_hex(&viewing_pub));
+    println!("  viewing-key PDA: {viewkey}");
+    println!("  signature:       {sig}");
+    println!();
+    println!(
+        "  This account is PUBLIC and permanent: it links {authority} to this key forever, and \
+         anyone can read it. It is also optional - no settle path reads it, so not registering \
+         costs you nothing."
+    );
+    Ok(())
+}
+
+/// Show what viewing key an address has published, if any.
+fn run_viewing_key_show(args: ViewingKeyShowArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
+    let authority = parse_pubkey(&args.authority, "authority")?;
+    let viewkey = chain::viewing_key_pda(&program_id, &authority);
+    let chain_client = Chain::new(args.chain.rpc_url);
+
+    match chain_client.viewing_key_state(&viewkey)? {
+        None => {
+            println!("{authority} has not registered a viewing key.");
+            println!("  expected PDA: {viewkey}");
+            println!("  That is the default, and it blocks nothing.");
+        }
+        Some(state) => {
+            println!("viewing key {viewkey}");
+            println!("  authority:   {}", state.authority);
+            println!("  viewing key: {}", to_hex(&state.viewing_public_key));
+            println!("  rotations:   {}", state.rotation_count);
+        }
+    }
+    Ok(())
+}
+
+/// Seal one ZK-path action to an auditor's registered viewing key and publish the
+/// record.
+fn run_disclose(args: DiscloseArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
+    let auditor = parse_pubkey(&args.auditor, "auditor")?;
+    let note = Note::load(&args.note)?;
+    let pool = parse_pubkey(&note.pool, "pool (from the note)")?;
+
+    let (note_recipient, amount) = match &note.action {
+        ActionRecord::Transfer { recipient, amount } => (recipient.clone(), *amount),
+        ActionRecord::Crowd { .. } => {
+            return Err(anyhow!(
+                "this note is a CROWD-path note. The disclosure layer covers the ZK opt-in path, \
+                 whose settlement binds a recipient address the record is derived from; a crowd \
+                 action has no such address."
+            ))
+        }
+    };
+
+    let recipient_kp = chain::read_keypair(&args.recipient)?;
+    let recipient = recipient_kp.pubkey();
+    if recipient.to_string() != note_recipient {
+        return Err(anyhow!(
+            "--recipient is {recipient}, but this note is bound to {note_recipient}. Only the \
+             bound recipient can publish a record about this settlement: the program derives the \
+             record's address from the signer."
+        ));
+    }
+    let payer_kp = match &args.payer {
+        Some(p) => chain::read_keypair(p)?,
+        None => chain::read_keypair(&args.recipient)?,
+    };
+    let payer = payer_kp.pubkey();
+
+    // The reader must have registered. The key comes from that account.
+    let auditor_viewkey = chain::viewing_key_pda(&program_id, &auditor);
+    let chain_client = Chain::new(args.chain.rpc_url);
+    let auditor_state = chain_client
+        .viewing_key_state(&auditor_viewkey)?
+        .ok_or_else(|| {
+            anyhow!(
+            "{auditor} has not registered a viewing key ({auditor_viewkey} is empty), so there is \
+             nothing to seal to. Ask them to run `mirror-cli viewing-key register`."
+        )
+        })?;
+
+    // Has it settled? A disclosure about an unsettled action is publishable, but
+    // the reader could then choose when it settles.
+    let secret = Secret(util::from_hex32(&note.secret_hex)?);
+    let epoch = Epoch(note.epoch);
+    let nullifier = mirror_core::nullifier(&secret, epoch);
+    let nf_pda = chain::nullifier_pda(&program_id, &pool, epoch.0, &nullifier.0);
+    let settled = chain_client.nullifier_exists(&nf_pda)?;
+    if !settled && !args.allow_unsettled {
+        return Err(anyhow!(
+            "this action has not settled yet ({nf_pda} does not exist). Disclosing the secret now \
+             lets the reader settle it whenever they like - they cannot redirect the payout, which \
+             the commitment binds, but they can pick a thinner window than you would have. Wait \
+             for the settle, or pass --allow-unsettled if that is what you want."
+        ));
+    }
+
+    let blob = mirror_core::disclosure::seal(&auditor_state.viewing_public_key, epoch, &secret);
+    let action_hash = mirror_core::transfer_action_hash(&recipient.to_bytes(), amount);
+    let record = chain::disclosure_pda(
+        &program_id,
+        &pool,
+        &action_hash,
+        &auditor_state.viewing_public_key,
+    );
+
+    let ix = chain::publish_disclosure_ix(
+        &program_id,
+        &record,
+        &pool,
+        &recipient,
+        &auditor_viewkey,
+        &payer,
+        amount,
+        &blob,
+    );
+    let mut signers: Vec<&solana_keypair::Keypair> = vec![&payer_kp];
+    if recipient != payer {
+        signers.push(&recipient_kp);
+    }
+    let sig = chain_client
+        .submit(&[ix], &signers)
+        .context("submitting PublishDisclosure")?;
+
+    println!("disclosure published.");
+    println!("  pool:            {pool}");
+    println!("  recipient:       {recipient}");
+    println!("  auditor:         {auditor}");
+    println!(
+        "  auditor key:     {}",
+        to_hex(&auditor_state.viewing_public_key)
+    );
+    println!("  action hash:     {}", to_hex(&action_hash));
+    println!("  record PDA:      {record}");
+    println!("  settled already: {settled}");
+    println!("  signature:       {sig}");
+    println!();
+    println!(
+        "  What {auditor} can now read: this ONE action's deposit leaf and spend tag, so they can \
+         find the deposit that funded it and the settlement that paid it. Nothing about your other \
+         actions, and nothing about anyone else's."
+    );
+    println!(
+        "  What everyone else can now read: that the settlement to {recipient} has a disclosure \
+         addressed to that auditor. The commitment is NOT on this record; it is inside the sealed \
+         blob."
+    );
+    Ok(())
+}
+
+/// Find, open, and verify every disclosure sealed to this reader's viewing key.
+fn run_audit_scan(args: AuditScanArgs) -> Result<()> {
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
+    let pool_filter = match &args.pool {
+        Some(p) => Some(parse_pubkey(p, "pool")?),
+        None => None,
+    };
+    let keyfile = value_note::ValueKeyfile::load(&args.wallet)?;
+    let wallet = value_note::ValueWallet::from_keyfile(&keyfile)?;
+    let viewing_secret = wallet.viewing.to_secret_bytes();
+    let my_pub = wallet.viewing.public();
+
+    let chain_client = Chain::new(args.chain.rpc_url);
+    let records = chain_client.disclosure_records(&program_id)?;
+
+    println!("scanned {} disclosure record(s).", records.len());
+    let mut opened = 0usize;
+    for (address, record) in &records {
+        if let Some(pool) = pool_filter {
+            if record.pool != pool {
+                continue;
+            }
+        }
+        // The record names the key it was sealed to, so skip the ones that are
+        // not ours before spending a trial decryption on them. The AEAD check
+        // below is what actually decides.
+        if record.auditor_view_pub != my_pub {
+            continue;
+        }
+        let Some(disclosed) = mirror_core::disclosure::open(&viewing_secret, &record.blob) else {
+            println!();
+            println!("record {address}: sealed to my key but does NOT open.");
+            println!("  The publisher sealed to a different key, or the blob is junk. Nothing to");
+            println!("  verify; the record is worthless and its publisher signed it.");
+            continue;
+        };
+        opened += 1;
+        let action = mirror_core::disclosure::derive_action(&disclosed, &record.action_hash);
+        let nf_pda = chain::nullifier_pda(
+            &program_id,
+            &record.pool,
+            action.epoch.0,
+            &action.nullifier.0,
+        );
+        let settled = chain_client.nullifier_exists(&nf_pda)?;
+
+        println!();
+        println!("record {address}");
+        println!("  pool:          {}", record.pool);
+        println!("  published by:  {} (signed)", record.recipient);
+        println!("  addressed to:  {}", record.auditor);
+        println!("  amount:        {} lamports", record.amount);
+        println!("  epoch:         {}", action.epoch.0);
+        println!("  commitment:    {}", to_hex(&action.commitment.0));
+        println!("  nullifier:     {}", to_hex(&action.nullifier.0));
+        println!("  nullifier PDA: {nf_pda}");
+        if settled {
+            println!("  VERIFIED:      that nullifier PDA exists, so this action really settled.");
+            println!(
+                "                 The deposit that funded it is the CommitDeposit carrying the \
+                 commitment above."
+            );
+        } else {
+            println!(
+                "  UNVERIFIED:    no nullifier PDA at that address, so nothing on-chain supports"
+            );
+            println!(
+                "                 this claim yet. Either the action has not settled, or the \
+                 record is false."
+            );
+        }
+    }
+    println!();
+    println!("{opened} record(s) were addressed to this viewing key.");
+    if opened == 0 {
+        println!(
+            "  Nothing to read. Records are found by scanning, not by lookup: a reader cannot \
+             derive a record's address without already knowing the settlement it is about."
+        );
     }
     Ok(())
 }

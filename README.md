@@ -130,7 +130,7 @@ honest against the tree.
 | Component | Path | Status |
 | --- | --- | --- |
 | Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` (circomlib Poseidon, cross-check-proven against the circuit), `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
-| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain crowd-path k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification, and a write-once, digest-pinned verifying-key registry (`InitVk`, no update path) that every verify re-validates. 105 program tests (mollusk integration + in-crate unit); `build-sbf` green. The public-devnet deployment predates both the registry and the escrow fix and is labelled historical in `docs/PROOF.md`. |
+| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain crowd-path k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification, and a write-once, digest-pinned verifying-key registry (`InitVk`, no update path) that every verify re-validates, plus the OPT-IN disclosure layer (`RegisterViewingKey` / `PublishDisclosure`), whose record address the program DERIVES from the settling recipient's own signature so no one can publish about, or squat, somebody else's settlement. 121 program tests (mollusk integration + in-crate unit); `build-sbf` green. The public-devnet deployment predates both the registry and the escrow fix and is labelled historical in `docs/PROOF.md`. |
 | ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and releases the escrow to the address the member bound (clients bind a fresh one). A real proof verifies on-chain (fixture test) and live in the soak. `SettleZk` enforces the pool's fixed `zk_denomination` (which, with program-applied crowd/ZK leaf-domain separation, is what bounds the escrow), but no k-floor and no recipient freshness, and the reasons are in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) section 4. |
 | Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. Also prints an information-theoretic effective-k table (Serjantov-Danezis `2^H(p)` + min-entropy) whose mirror-pool provenance classes are DERIVED from the shipped funding mechanism, with funding-policy, adversary-strength, dwell and adoption ablations; see [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md). |
 | Funding-provenance path | `crates/mirror-cli` + `crates/mirror-coordinator` | **Implemented + soaked** - `fund-commit` funds a FRESH commit wallet by unshielding from the value pool (vault is the sender, relay the only signer, denomination enforced); `funding_service::FundingService` + `DirectoryIntake` ingest those emits, and `funding::FundingRounds` batches them to a round boundary with a minimum-round floor and an arrival-independent release order. Soak-proven end to end on local Surfpool, 25/25 on-chain assertions, including that each fresh commit wallet's ONLY inbound transfer is from the pool vault and that each funding transaction carries exactly one signature, the relay's ([`docs/PROOF.md`](docs/PROOF.md)). The residual it leaves (public boundary amounts and slots) is measured, not assumed. |
@@ -148,8 +148,8 @@ honest against the tree.
 
 "Implemented" means the component's core logic is complete and tested. It does
 not mean "deployed": the ceremony row above is the one place where that
-distinction bites, and it is labelled. The 264 host workspace tests
-(11 more are environment-gated and skipped by default), 105 on-chain program tests,
+distinction bites, and it is labelled. The 274 host workspace tests
+(11 more are environment-gated and skipped by default), 121 on-chain program tests,
 `build-sbf`, and the two live Surfpool soaks (behavioral 17/17 + confidential
 25/25 on-chain assertions) are all green. See the roadmap for future work
 (swap/stake-from-pool via CPI, confidential deposits, wiring and soaking the
@@ -360,12 +360,20 @@ reasoning, and the set the ZK path actually gives, are in
   participants also dwell two rounds - dwell being a recommendation the protocol
   cannot enforce. Both residuals are published rather than rounded away, and the
   same pool used naively measures 7.66.
-- [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) - the OPT-IN association-set layer
-  (Privacy Pools): prove your deposit is in a curator's curated set without
-  revealing which deposit it is, enforced on-chain in the execute path. Includes
-  the curator trust assumption, the censorship tradeoff (and why there is
-  deliberately no mandatory mode), what an excluded user can still do, how it
-  composes with the viewing keys, and the limits.
+- [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) - the two OPT-IN compliance
+  primitives. **Association sets** (Privacy Pools): prove your deposit is in a
+  curator's curated set without revealing which deposit it is, enforced on-chain
+  in the execute path, with the curator trust assumption, the censorship tradeoff
+  (and why there is deliberately no mandatory mode), and what an excluded user can
+  still do. **On-chain viewing keys and sealed disclosures**: publish an X25519
+  key under your own address, and disclose ONE of your own settled actions to ONE
+  reader you chose, in a record whose address the program DERIVES from the
+  settlement's own recipient signature (so nobody can publish about somebody
+  else's settlement, and nobody can squat a slot). Includes the table of what is
+  enforced on-chain versus what the reader must check themselves, what the reader
+  learns and cannot learn, and the privacy cost of registering at all - a record
+  publicly announces that a settlement has a disclosure and names the reader, and
+  is permanent.
 - [`docs/CEREMONY.md`](docs/CEREMONY.md) - the multi-party Groth16 phase-2
   trusted-setup ceremony: how to contribute, how to verify somebody else's, why a
   beacon is final and how that is enforced, how the independent-contributor count

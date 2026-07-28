@@ -17,6 +17,8 @@
 //! Value nf PDA      seeds = [b"vnf",    vpool(32), nullifier(32)]
 //! AssociationSet    seeds = [b"assoc",  pool(32), curator(32)]
 //! VkRegistry        seeds = [b"vk",     circuit_id(1)]
+//! ViewingKey        seeds = [b"view",   authority(32)]
+//! Disclosure        seeds = [b"disc",   pool(32), action_hash(32), view_pub(32)]
 //! ```
 //!
 //! The VkRegistry namespace is deliberately GLOBAL rather than per-pool: its
@@ -32,6 +34,22 @@
 //! publish competing curated sets over the same pool and a user picks which one
 //! to prove against. Keying the set to the pool alone would have made "who
 //! curates" a single, unaccountable slot.
+//!
+//! The two disclosure-layer namespaces are where the seed choice IS the access
+//! control, so both are worth spelling out:
+//!
+//! - A ViewingKey's only variable seed is the AUTHORITY, and the authority must
+//!   sign. A registration can therefore only ever land under the address that
+//!   signed it: there is no slot anybody else can take, and no first-come race to
+//!   win.
+//! - A Disclosure's seeds include the `action_hash` the program RECOMPUTES from
+//!   the signing recipient's own address and the settled amount
+//!   (`action::transfer_action_hash`). The address of a record is thus a function
+//!   of a key the publisher must hold, which is what makes publishing against
+//!   somebody else's settlement not a check to be skipped but an address that
+//!   cannot be derived. The auditor's viewing public key is the last seed, so one
+//!   action can be disclosed to several auditors (and to a rotated key) without
+//!   any of the records displacing another.
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -59,6 +77,10 @@ pub const VALUE_NULLIFIER_SEED: &[u8] = b"vnf";
 pub const ASSOCIATION_SEED: &[u8] = b"assoc";
 /// Seed prefix for a circuit's write-once, digest-pinned VkRegistry PDA.
 pub const VK_REGISTRY_SEED: &[u8] = b"vk";
+/// Seed prefix for a registered viewing key (opt-in disclosure layer).
+pub const VIEWING_KEY_SEED: &[u8] = b"view";
+/// Seed prefix for a sealed disclosure record (opt-in disclosure layer).
+pub const DISCLOSURE_SEED: &[u8] = b"disc";
 
 /// Find a program-derived address and its bump.
 ///

@@ -50,6 +50,11 @@ pub const ASSOCIATION_SEED: &[u8] = b"assoc";
 /// byte-identical to the on-chain `pda` module.
 pub const VK_REGISTRY_SEED: &[u8] = wire::VK_REGISTRY_SEED;
 
+/// Opt-in disclosure layer: the seed prefixes for a registered viewing key and a
+/// sealed disclosure record, byte-identical to the on-chain `pda` module.
+pub const VIEWING_KEY_SEED: &[u8] = wire::VIEWING_KEY_SEED;
+pub const DISCLOSURE_SEED: &[u8] = wire::DISCLOSURE_SEED;
+
 /// Derive the Pool PDA: seeds `[b"pool", authority]`.
 pub fn pool_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[POOL_SEED, authority.as_ref()], program_id).0
@@ -97,6 +102,39 @@ pub fn association_pda(program_id: &Pubkey, pool: &Pubkey, curator: &Pubkey) -> 
 /// one legal byte string per circuit and a per-pool copy would only add rent.
 pub fn vk_registry_pda(program_id: &Pubkey, circuit_id: u8) -> Pubkey {
     Pubkey::find_program_address(&[VK_REGISTRY_SEED, &[circuit_id]], program_id).0
+}
+
+/// Derive a registered viewing key's PDA: seeds `[b"view", authority]`.
+///
+/// The authority is the only variable seed and must sign the registration, so
+/// the only slot any signer can write is their own: the directory cannot be
+/// squatted.
+pub fn viewing_key_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[VIEWING_KEY_SEED, authority.as_ref()], program_id).0
+}
+
+/// Derive a disclosure record's PDA: seeds
+/// `[b"disc", pool, action_hash(32), auditor_view_pub(32)]`.
+///
+/// `action_hash = transfer_action_hash(recipient, amount)`, which the program
+/// RECOMPUTES from the signing recipient, so this address is only derivable (and
+/// only writable) by the party the settlement was bound to pay.
+pub fn disclosure_pda(
+    program_id: &Pubkey,
+    pool: &Pubkey,
+    action_hash: &Hash32,
+    auditor_view_pub: &[u8; 32],
+) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            DISCLOSURE_SEED,
+            pool.as_ref(),
+            action_hash,
+            auditor_view_pub,
+        ],
+        program_id,
+    )
+    .0
 }
 
 /// Derive the ValuePool PDA: seeds `[b"vpool", authority]`.
@@ -377,6 +415,128 @@ impl AssociationState {
 }
 
 // ---------------------------------------------------------------------------
+// Opt-in disclosure layer: the ViewingKey and Disclosure account layouts,
+// byte-identical to the on-chain `state::viewing_key` / `state::disclosure`.
+// (LE integers; see programs/mirror-pool/src/state/.)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+mod viewing_key_off {
+    pub const VERSION: usize = 0;
+    pub const AUTHORITY: usize = 1;
+    pub const VIEWING_PUB: usize = 33;
+    pub const BUMP: usize = 65;
+    pub const ROTATION_COUNT: usize = 66;
+    pub const LEN: usize = ROTATION_COUNT + 8; // 74
+}
+
+#[allow(dead_code)]
+mod disclosure_off {
+    pub const VERSION: usize = 0;
+    pub const POOL: usize = 1;
+    pub const RECIPIENT: usize = 33;
+    pub const AUDITOR: usize = 65;
+    pub const AUDITOR_VIEW_PUB: usize = 97;
+    pub const ACTION_HASH: usize = 129;
+    pub const AMOUNT: usize = 161;
+    pub const BUMP: usize = 169;
+    pub const BLOB: usize = 170;
+    pub const BLOB_LEN: usize = mirror_core::wire::DISCLOSURE_BLOB_LEN;
+    pub const LEN: usize = BLOB + BLOB_LEN; // 270
+}
+
+/// A decoded snapshot of a registered ViewingKey account.
+#[derive(Clone, Debug)]
+pub struct ViewingKeyState {
+    pub authority: Pubkey,
+    pub viewing_public_key: [u8; 32],
+    /// Times the key has been replaced (0 for a never-rotated registration).
+    pub rotation_count: u64,
+}
+
+impl ViewingKeyState {
+    /// Decode the raw ViewingKey account bytes. Fails closed on a wrong length or
+    /// an uninitialized account.
+    pub fn decode(data: &[u8]) -> Result<ViewingKeyState> {
+        if data.len() != viewing_key_off::LEN {
+            bail!(
+                "viewing-key account is {} bytes, expected {} (layout drift or not a registration)",
+                data.len(),
+                viewing_key_off::LEN
+            );
+        }
+        if data[viewing_key_off::VERSION] == 0 {
+            bail!("viewing-key account is not initialized (version 0)");
+        }
+        let read_hash =
+            |off: usize| -> [u8; 32] { data[off..off + 32].try_into().expect("32 bytes in range") };
+        Ok(ViewingKeyState {
+            authority: Pubkey::new_from_array(read_hash(viewing_key_off::AUTHORITY)),
+            viewing_public_key: read_hash(viewing_key_off::VIEWING_PUB),
+            rotation_count: u64::from_le_bytes(
+                data[viewing_key_off::ROTATION_COUNT..viewing_key_off::ROTATION_COUNT + 8]
+                    .try_into()
+                    .expect("8 bytes in range"),
+            ),
+        })
+    }
+}
+
+/// A decoded snapshot of a sealed Disclosure record.
+///
+/// Everything here except `blob` is PUBLIC by construction: the program derived
+/// or copied it. The blob is the only part carrying what was disclosed, and only
+/// the auditor's viewing secret opens it.
+#[derive(Clone, Debug)]
+pub struct DisclosureState {
+    pub pool: Pubkey,
+    /// The publisher: the address the disclosed settlement was bound to pay.
+    pub recipient: Pubkey,
+    /// The reader's on-chain identity (their ViewingKey account's authority).
+    pub auditor: Pubkey,
+    /// The reader's X25519 key the blob is sealed to.
+    pub auditor_view_pub: [u8; 32],
+    /// `Poseidon(recipientHi128, recipientLo128, amount)`, recomputed on-chain.
+    pub action_hash: Hash32,
+    pub amount: u64,
+    /// The sealed ciphertext (an `encrypted_note` blob).
+    pub blob: Vec<u8>,
+}
+
+impl DisclosureState {
+    /// Decode the raw Disclosure account bytes. Fails closed on a wrong length or
+    /// an uninitialized account.
+    pub fn decode(data: &[u8]) -> Result<DisclosureState> {
+        if data.len() != disclosure_off::LEN {
+            bail!(
+                "disclosure account is {} bytes, expected {} (layout drift or not a record)",
+                data.len(),
+                disclosure_off::LEN
+            );
+        }
+        if data[disclosure_off::VERSION] == 0 {
+            bail!("disclosure account is not initialized (version 0)");
+        }
+        let read_hash =
+            |off: usize| -> [u8; 32] { data[off..off + 32].try_into().expect("32 bytes in range") };
+        Ok(DisclosureState {
+            pool: Pubkey::new_from_array(read_hash(disclosure_off::POOL)),
+            recipient: Pubkey::new_from_array(read_hash(disclosure_off::RECIPIENT)),
+            auditor: Pubkey::new_from_array(read_hash(disclosure_off::AUDITOR)),
+            auditor_view_pub: read_hash(disclosure_off::AUDITOR_VIEW_PUB),
+            action_hash: read_hash(disclosure_off::ACTION_HASH),
+            amount: u64::from_le_bytes(
+                data[disclosure_off::AMOUNT..disclosure_off::AMOUNT + 8]
+                    .try_into()
+                    .expect("8 bytes in range"),
+            ),
+            blob: data[disclosure_off::BLOB..disclosure_off::BLOB + disclosure_off::BLOB_LEN]
+                .to_vec(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ValuePool account layout, byte-identical to the on-chain `state::value_pool`.
 // (LE integers; see programs/mirror-pool/src/state/value_pool.rs.)
 // ---------------------------------------------------------------------------
@@ -518,6 +678,64 @@ impl Chain {
             .get_account(assoc)
             .with_context(|| format!("reading association account {assoc}"))?;
         AssociationState::decode(&account.data)
+    }
+
+    /// Read and decode a registered ViewingKey account (opt-in disclosure layer).
+    ///
+    /// `None` is a real answer, not an error: it means that address has never
+    /// registered a viewing key, which is the default and blocks nothing.
+    pub fn viewing_key_state(&self, viewkey: &Pubkey) -> Result<Option<ViewingKeyState>> {
+        let account = self
+            .rpc
+            .get_account_with_commitment(viewkey, self.rpc.commitment())
+            .with_context(|| format!("reading viewing-key account {viewkey}"))?
+            .value;
+        match account {
+            None => Ok(None),
+            Some(account) if account.data.is_empty() => Ok(None),
+            Some(account) => ViewingKeyState::decode(&account.data).map(Some),
+        }
+    }
+
+    /// Fetch every disclosure record this program owns, decoded.
+    ///
+    /// Records are found by SCANNING, not by lookup: a reader cannot compute a
+    /// record's address without already knowing the settlement it is about, which
+    /// is the point. Accounts of any other shape are skipped, so this is safe to
+    /// run against a program that owns pools, epochs and nullifiers too.
+    pub fn disclosure_records(
+        &self,
+        program_id: &Pubkey,
+    ) -> Result<Vec<(Pubkey, DisclosureState)>> {
+        let accounts = self
+            .rpc
+            .get_program_accounts(program_id)
+            .with_context(|| format!("listing accounts owned by {program_id}"))?;
+        let mut out = Vec::new();
+        for (address, account) in accounts {
+            if account.data.len() != disclosure_off::LEN
+                || account.data[disclosure_off::VERSION] == 0
+            {
+                continue;
+            }
+            if let Ok(state) = DisclosureState::decode(&account.data) {
+                out.push((address, state));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether a behavioral nullifier PDA exists, i.e. whether that action has
+    /// settled. This is how a reader CONFIRMS a disclosure rather than believing
+    /// it: the record claims a secret, the reader derives the nullifier from it,
+    /// and either the chain has the PDA or the claim is unsupported.
+    pub fn nullifier_exists(&self, nullifier_pda: &Pubkey) -> Result<bool> {
+        let account = self
+            .rpc
+            .get_account_with_commitment(nullifier_pda, self.rpc.commitment())
+            .with_context(|| format!("reading nullifier account {nullifier_pda}"))?
+            .value;
+        Ok(matches!(account, Some(a) if !a.data.is_empty()))
     }
 
     /// Read and decode a ValuePool account.
@@ -673,6 +891,75 @@ pub fn update_association_root_ix(
         accounts: vec![
             AccountMeta::new(*assoc, false),
             AccountMeta::new_readonly(*curator, true),
+        ],
+        data,
+    }
+}
+
+/// Build the `RegisterViewingKey` instruction (opt-in disclosure layer).
+///
+/// Body: `[viewing_pub(32)]`. Accounts (see
+/// `instructions::register_viewing_key`): viewkey(w), authority(signer),
+/// payer(signer, w), system_program. The same instruction rotates an existing
+/// registration; only its own authority can, since the account is that
+/// authority's PDA.
+pub fn register_viewing_key_ix(
+    program_id: &Pubkey,
+    viewkey: &Pubkey,
+    authority: &Pubkey,
+    payer: &Pubkey,
+    viewing_pub: &[u8; 32],
+) -> Instruction {
+    let mut data = Vec::with_capacity(wire::REGISTER_VIEWING_KEY_LEN);
+    data.push(wire::tag::REGISTER_VIEWING_KEY);
+    data.extend_from_slice(viewing_pub);
+    debug_assert_eq!(data.len(), wire::REGISTER_VIEWING_KEY_LEN);
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*viewkey, false),
+            AccountMeta::new_readonly(*authority, true),
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+        ],
+        data,
+    }
+}
+
+/// Build the `PublishDisclosure` instruction (opt-in disclosure layer).
+///
+/// Body: `[amount(8 LE)][blob(100)]`. Accounts (see
+/// `instructions::publish_disclosure`): disclosure(w), pool, recipient(signer),
+/// auditor_viewkey, payer(signer, w), system_program.
+///
+/// The RECIPIENT signs: the program recomputes `action_hash` from that signer and
+/// derives the record's address from it, so this instruction can only ever write
+/// a record about a settlement bound to the signer.
+#[allow(clippy::too_many_arguments)]
+pub fn publish_disclosure_ix(
+    program_id: &Pubkey,
+    disclosure: &Pubkey,
+    pool: &Pubkey,
+    recipient: &Pubkey,
+    auditor_viewkey: &Pubkey,
+    payer: &Pubkey,
+    amount: u64,
+    blob: &[u8],
+) -> Instruction {
+    let mut data = Vec::with_capacity(wire::PUBLISH_DISCLOSURE_LEN);
+    data.push(wire::tag::PUBLISH_DISCLOSURE);
+    data.extend_from_slice(&amount.to_le_bytes());
+    data.extend_from_slice(blob);
+    debug_assert_eq!(data.len(), wire::PUBLISH_DISCLOSURE_LEN);
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*disclosure, false),
+            AccountMeta::new_readonly(*pool, false),
+            AccountMeta::new_readonly(*recipient, true),
+            AccountMeta::new_readonly(*auditor_viewkey, false),
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
         ],
         data,
     }
@@ -996,5 +1283,111 @@ mod tests {
             value_nullifier_pda(&program, &vpool, &nf),
             value_nullifier_pda(&program, &vpool, &nf2)
         );
+    }
+
+    #[test]
+    fn disclosure_layout_offsets_match_program() {
+        // Mirrors `programs/mirror-pool/src/state/{viewing_key,disclosure}.rs`.
+        assert_eq!(viewing_key_off::VIEWING_PUB, 33);
+        assert_eq!(viewing_key_off::ROTATION_COUNT, 66);
+        assert_eq!(viewing_key_off::LEN, 74);
+        assert_eq!(disclosure_off::AUDITOR_VIEW_PUB, 97);
+        assert_eq!(disclosure_off::ACTION_HASH, 129);
+        assert_eq!(disclosure_off::BLOB, 170);
+        assert_eq!(disclosure_off::BLOB_LEN, 100);
+        assert_eq!(disclosure_off::LEN, 270);
+        // The record carries exactly one encrypted-note blob, so the two lengths
+        // are one number.
+        assert_eq!(
+            disclosure_off::BLOB_LEN,
+            mirror_core::encrypted_note::ENC_NOTE_BLOB_LEN
+        );
+    }
+
+    /// The record's address is a function of the action hash (hence of the
+    /// recipient and the amount) and of the reader's key. That is the whole
+    /// anti-squat argument, so pin that each input really moves the address.
+    #[test]
+    fn disclosure_pda_is_bound_to_the_action_and_the_reader() {
+        let program = Pubkey::new_from_array([9u8; 32]);
+        let pool = Pubkey::new_from_array([1u8; 32]);
+        let recipient = Pubkey::new_from_array([2u8; 32]);
+        let other_recipient = Pubkey::new_from_array([3u8; 32]);
+        let view_pub = [4u8; 32];
+        let other_view_pub = [5u8; 32];
+        let amount = 250_000_000u64;
+
+        let action = mirror_core::transfer_action_hash(&recipient.to_bytes(), amount);
+        let record = disclosure_pda(&program, &pool, &action, &view_pub);
+        assert_eq!(record, disclosure_pda(&program, &pool, &action, &view_pub));
+
+        // A different recipient, a different amount, and a different reader key
+        // each land somewhere else.
+        let other_action = mirror_core::transfer_action_hash(&other_recipient.to_bytes(), amount);
+        assert_ne!(
+            record,
+            disclosure_pda(&program, &pool, &other_action, &view_pub)
+        );
+        let other_amount = mirror_core::transfer_action_hash(&recipient.to_bytes(), amount + 1);
+        assert_ne!(
+            record,
+            disclosure_pda(&program, &pool, &other_amount, &view_pub)
+        );
+        assert_ne!(
+            record,
+            disclosure_pda(&program, &pool, &action, &other_view_pub)
+        );
+    }
+
+    #[test]
+    fn viewing_key_ix_layout() {
+        let program = Pubkey::new_from_array([9u8; 32]);
+        let authority = Pubkey::new_from_array([2u8; 32]);
+        let payer = Pubkey::new_from_array([3u8; 32]);
+        let viewkey = viewing_key_pda(&program, &authority);
+        let view_pub = [7u8; 32];
+        let ix = register_viewing_key_ix(&program, &viewkey, &authority, &payer, &view_pub);
+        assert_eq!(ix.data.len(), wire::REGISTER_VIEWING_KEY_LEN);
+        assert_eq!(ix.data[0], wire::tag::REGISTER_VIEWING_KEY);
+        assert_eq!(ix.data[1..], view_pub);
+        // viewkey(w,!s), authority(!w,s), payer(w,s), system(!w,!s).
+        assert!(ix.accounts[0].is_writable && !ix.accounts[0].is_signer);
+        assert!(!ix.accounts[1].is_writable && ix.accounts[1].is_signer);
+        assert!(ix.accounts[2].is_writable && ix.accounts[2].is_signer);
+        assert_eq!(ix.accounts[3].pubkey, SYSTEM_PROGRAM_ID);
+    }
+
+    #[test]
+    fn publish_disclosure_ix_layout() {
+        let program = Pubkey::new_from_array([9u8; 32]);
+        let pool = Pubkey::new_from_array([1u8; 32]);
+        let recipient = Pubkey::new_from_array([2u8; 32]);
+        let payer = Pubkey::new_from_array([3u8; 32]);
+        let viewkey = Pubkey::new_from_array([4u8; 32]);
+        let record = Pubkey::new_from_array([5u8; 32]);
+        let blob = vec![8u8; wire::DISCLOSURE_BLOB_LEN];
+        let ix = publish_disclosure_ix(
+            &program,
+            &record,
+            &pool,
+            &recipient,
+            &viewkey,
+            &payer,
+            250_000_000,
+            &blob,
+        );
+        assert_eq!(ix.data.len(), wire::PUBLISH_DISCLOSURE_LEN);
+        assert_eq!(ix.data[0], wire::tag::PUBLISH_DISCLOSURE);
+        assert_eq!(ix.data[1..9], 250_000_000u64.to_le_bytes());
+        assert_eq!(&ix.data[9..], &blob[..]);
+        // record(w,!s), pool(!w,!s), recipient(!w,SIGNER), viewkey(!w,!s),
+        // payer(w,s), system(!w,!s). The recipient signature is the whole
+        // authentication story, so pin it here too.
+        assert!(ix.accounts[0].is_writable && !ix.accounts[0].is_signer);
+        assert!(!ix.accounts[1].is_writable && !ix.accounts[1].is_signer);
+        assert!(!ix.accounts[2].is_writable && ix.accounts[2].is_signer);
+        assert!(!ix.accounts[3].is_writable && !ix.accounts[3].is_signer);
+        assert!(ix.accounts[4].is_writable && ix.accounts[4].is_signer);
+        assert_eq!(ix.accounts[5].pubkey, SYSTEM_PROGRAM_ID);
     }
 }

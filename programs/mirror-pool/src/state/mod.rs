@@ -8,12 +8,14 @@
 use pinocchio::error::ProgramError;
 
 pub mod association;
+pub mod disclosure;
 pub mod epoch;
 pub mod merkle;
 pub mod nullifier;
 pub mod participant;
 pub mod pool;
 pub mod value_pool;
+pub mod viewing_key;
 pub mod vk_registry;
 
 /// Read a single byte at `offset`.

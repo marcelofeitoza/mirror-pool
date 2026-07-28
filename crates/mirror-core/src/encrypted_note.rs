@@ -93,6 +93,102 @@ const KDF_INFO: &[u8] = b"mirror-pool/encrypted-note/v1";
 const _: () = assert!(ENC_NOTE_BLOB_LEN <= crate::wire::TRANSACT_MAX_ENC_LEN);
 const _: () = assert!(ENC_NOTE_BLOB_LEN == 100);
 
+/// Little-endian encoding of the curve25519 field prime `p = 2^255 - 19`. Used
+/// only to reject non-canonical public keys byte-wise (see
+/// [`is_acceptable_x25519_pubkey`]); no field arithmetic happens here.
+const CURVE25519_P_LE: [u8; 32] = [
+    0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+];
+
+/// The CANONICAL small-order X25519 public keys, i.e. the ones that survive the
+/// canonicality filter below. Points of order 1, 2, 4 and 8 produce an ECDH
+/// output that does not depend on the peer's secret at all, so a "sealed" blob
+/// built against one is readable by anybody.
+///
+/// The non-canonical members of the classic 12-entry blacklist (`p`, `p+1`, and
+/// the high-bit-set variants) are already rejected by the canonicality test, so
+/// they are deliberately NOT repeated here.
+const SMALL_ORDER_X25519: [[u8; 32]; 5] = [
+    // 0 (order 4)
+    [0u8; 32],
+    // 1 (order 1)
+    [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
+    ],
+    // order 8
+    [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4,
+        0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49,
+        0xb8, 0x00,
+    ],
+    // order 8
+    [
+        0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24, 0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef,
+        0x5b, 0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86, 0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f,
+        0x11, 0x57,
+    ],
+    // p - 1 (order 2)
+    [
+        0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ],
+];
+
+/// Structural acceptance test for a 32-byte X25519 public key.
+///
+/// This is a BYTE test, not a curve membership proof. It rejects exactly two
+/// classes, and it is worth being precise about why each one matters here:
+///
+/// 1. **Non-canonical encodings**: the top bit is ignored by X25519 and values
+///    `>= p` reduce, so several byte strings denote the same key. Anywhere a
+///    public key is used as an identifier (this repo derives a PDA from one) that
+///    turns into malleability: two different accounts for one key. Requiring the
+///    canonical little-endian encoding `< p` with the top bit clear makes the
+///    identifier unique.
+/// 2. **Small-order points**: the ECDH output for these is a fixed value
+///    independent of the peer's secret, so anything "sealed" to one is public. A
+///    key like this is either a broken client or a deliberate trap, and either way
+///    a user who publishes a disclosure against one has published it to everybody.
+///
+/// An honestly generated key (clamped scalar, OS randomness) never trips either
+/// branch, so this is a guard against buggy or hostile input and never fires on
+/// the happy path. It does NOT prove the bytes are a point on the curve: X25519
+/// accepts any 32 bytes, and a full check would need field arithmetic this crate
+/// deliberately does not carry. The on-chain program mirrors this function
+/// byte-for-byte (`state::viewing_key::is_acceptable_viewing_pub`).
+pub fn is_acceptable_x25519_pubkey(pubkey: &[u8; 32]) -> bool {
+    // (1a) The high bit is ignored by X25519, so a set one is a second encoding
+    // of the same key.
+    if pubkey[31] & 0x80 != 0 {
+        return false;
+    }
+    // (1b) Canonical means numerically less than p, little-endian.
+    let mut canonical = false;
+    for i in (0..32).rev() {
+        if pubkey[i] < CURVE25519_P_LE[i] {
+            canonical = true;
+            break;
+        }
+        if pubkey[i] > CURVE25519_P_LE[i] {
+            return false;
+        }
+    }
+    if !canonical {
+        // Equal to p: not canonical either.
+        return false;
+    }
+    // (2) Small-order points.
+    for bad in SMALL_ORDER_X25519.iter() {
+        if pubkey == bad {
+            return false;
+        }
+    }
+    true
+}
+
 /// A recipient's X25519 **viewing** keypair. Distinct from the value spend key
 /// ([`crate::note::ValueKeypair`]): this one only encrypts and discovers notes and
 /// never enters the circuit. The public half is half of the recipient address.
@@ -411,6 +507,42 @@ mod tests {
         assert_eq!(hits[0].blinding, bytes(30));
         assert_eq!(hits[1].amount, 200);
         assert_eq!(hits[1].blinding, bytes(32));
+    }
+
+    #[test]
+    fn acceptance_test_takes_real_keys_and_refuses_degenerate_ones() {
+        // Every honestly generated key is accepted.
+        for seed in 0..16u8 {
+            let kp = ViewingKeypair::from_secret(bytes(seed));
+            assert!(
+                is_acceptable_x25519_pubkey(&kp.public()),
+                "a clamped X25519 public key must be accepted"
+            );
+        }
+        // The canonical small-order points are refused.
+        for bad in SMALL_ORDER_X25519.iter() {
+            assert!(
+                !is_acceptable_x25519_pubkey(bad),
+                "a small-order point must be refused"
+            );
+        }
+        // Non-canonical encodings are refused: high bit set, p, p+1, and a value
+        // above p.
+        let real = ViewingKeypair::from_secret(bytes(3)).public();
+        let mut high_bit = real;
+        high_bit[31] |= 0x80;
+        assert!(!is_acceptable_x25519_pubkey(&high_bit));
+        assert!(!is_acceptable_x25519_pubkey(&CURVE25519_P_LE));
+        let mut p_plus_1 = CURVE25519_P_LE;
+        p_plus_1[0] = 0xee;
+        assert!(!is_acceptable_x25519_pubkey(&p_plus_1));
+        let mut above = [0xffu8; 32];
+        above[31] = 0x7f;
+        assert!(!is_acceptable_x25519_pubkey(&above));
+        // p - 1 is canonical but small order, so it is caught by the second test.
+        let mut p_minus_1 = CURVE25519_P_LE;
+        p_minus_1[0] = 0xec;
+        assert!(!is_acceptable_x25519_pubkey(&p_minus_1));
     }
 
     #[test]

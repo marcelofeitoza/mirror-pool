@@ -91,6 +91,29 @@
 //! chooses. What an attestation is WORTH is an off-chain judgement about that
 //! curator; the program only proves the inclusion proof really was verified.
 //!
+//! Opt-in disclosure layer (additive; see `docs/COMPLIANCE.md`). The second,
+//! complementary compliance primitive: where an association proof says "my funds
+//! are in the acceptable set" to EVERYONE while revealing nothing, a disclosure
+//! reveals ONE action to ONE reader the user picked. `REGISTER_VIEWING_KEY`
+//! publishes an X25519 viewing key under the signer's own address (seeds
+//! `["view", authority]`), and `PUBLISH_DISCLOSURE` posts a sealed record about a
+//! settlement (seeds `["disc", pool, action_hash, auditor_view_pub]`) whose
+//! payload only that reader can open.
+//!
+//! The authentication is the seed derivation, not a check: `action_hash` is
+//! recomputed ON-CHAIN from the SIGNING recipient's address and the settled
+//! amount, and the settling commitment binds that same `actionHash`, so the only
+//! party who can write a record about a settlement is the address that
+//! settlement was bound to pay. Squatting somebody else's slot is not forbidden,
+//! it is underivable.
+//!
+//! Neither instruction is read by any settle path, so not registering degrades
+//! nothing: a pool that required disclosure would be a surveillance pool. What
+//! the program cannot do is verify the sealed payload (it holds no secret and
+//! cannot decrypt); `state::disclosure` and `docs/COMPLIANCE.md` state exactly
+//! which half of the claim is enforced on-chain and which half the reader checks
+//! for themselves.
+//!
 //! Build:
 //!
 //! ```text
@@ -180,6 +203,14 @@ pub mod wire {
         /// program-owned registry PDA (see [`super::INIT_VK_HEADER_LEN`]).
         /// There is deliberately NO matching update tag.
         pub const INIT_VK: u8 = 11;
+        /// Opt-in disclosure layer: register (or rotate) an X25519 viewing key
+        /// under the SIGNER'S OWN address (see
+        /// [`super::REGISTER_VIEWING_KEY_LEN`]).
+        pub const REGISTER_VIEWING_KEY: u8 = 12;
+        /// Opt-in disclosure layer: publish one sealed disclosure record about a
+        /// settlement whose bound recipient is the signer (see
+        /// [`super::PUBLISH_DISCLOSURE_LEN`]).
+        pub const PUBLISH_DISCLOSURE: u8 = 13;
     }
 
     /// COMMIT layout: `[tag(1)][commitment(32)]`.
@@ -376,6 +407,31 @@ pub mod wire {
     /// Longest canonical encoding across the pinned circuits.
     pub const VK_MAX_ENCODED_LEN: usize = vk_encoded_len(VK_MAX_PUBLIC_INPUTS);
 
+    // --- Opt-in disclosure layer (ADDITIVE): on-chain viewing keys + sealed
+    // disclosure records. REDEFINED here for the same reason the rest of this
+    // module is, and pinned by the compile-time asserts below in lockstep with
+    // `mirror_core::wire`. ---
+
+    /// REGISTER_VIEWING_KEY layout: `[tag(1)][viewing_pub(32)]`. The authority and
+    /// the rent payer are both accounts, so the body is just the key.
+    /// MUST match `mirror_core::wire::REGISTER_VIEWING_KEY_LEN`.
+    pub const REGISTER_VIEWING_KEY_LEN: usize = 1 + 32;
+
+    /// The one sealed blob a disclosure record carries: exactly one
+    /// `mirror_core::encrypted_note` ciphertext,
+    /// `ephemeral_pub(32) || nonce(12) || ct+tag(56)`. Any other length is
+    /// malformed. MUST match `mirror_core::wire::DISCLOSURE_BLOB_LEN` (and
+    /// therefore `mirror_core::encrypted_note::ENC_NOTE_BLOB_LEN`).
+    pub const DISCLOSURE_BLOB_LEN: usize = 100;
+
+    /// PUBLISH_DISCLOSURE layout: `[tag(1)][amount(8 LE)][blob(100)]`.
+    ///
+    /// `amount` is the settled action's public amount; with the SIGNING recipient
+    /// it is what the handler's on-chain Poseidon recomputation turns into the
+    /// record's own address. MUST match
+    /// `mirror_core::wire::PUBLISH_DISCLOSURE_LEN`.
+    pub const PUBLISH_DISCLOSURE_LEN: usize = 1 + 8 + DISCLOSURE_BLOB_LEN;
+
     /// INIT_VK layout: `[tag(1)][circuit_id(1)][vk(vk_encoded_len(n))]`, where
     /// `n` is the circuit's pinned public-input count. The body length is
     /// therefore fixed per circuit, and any other length is malformed.
@@ -423,6 +479,12 @@ pub mod wire {
     const _: () = assert!(vk_encoded_len(7) == 961);
     const _: () = assert!(VK_MAX_ENCODED_LEN == 961);
     const _: () = assert!(INIT_VK_HEADER_LEN == 2);
+    // Opt-in disclosure layer: pin the sizes in lockstep with `mirror_core::wire`
+    // (which asserts the same numbers, and additionally asserts that
+    // DISCLOSURE_BLOB_LEN is the encrypted-note blob length).
+    const _: () = assert!(REGISTER_VIEWING_KEY_LEN == 33);
+    const _: () = assert!(DISCLOSURE_BLOB_LEN == 100);
+    const _: () = assert!(PUBLISH_DISCLOSURE_LEN == 109);
     const _: () = assert!(
         SETTLE_ZK_ASSOCIATED_LEN
             == 1 + 8
@@ -558,6 +620,31 @@ pub enum MirrorPoolError {
     /// submitter holds) can be neither installed at INIT_VK nor used at verify.
     /// Also returned for an unknown circuit id, which is pinned to nothing.
     VkNotApproved = 30,
+    /// A 32-byte X25519 public key handed to the disclosure layer failed the
+    /// structural test in `state::viewing_key::is_acceptable_viewing_pub`: a
+    /// non-canonical encoding (top bit set, or a value `>= p`, both of which alias
+    /// to another encoding of the same key and would make a key-derived PDA
+    /// malleable) or a small-order point (whose ECDH output is independent of the
+    /// peer's secret, so anything "sealed" to it is public). Raised by
+    /// REGISTER_VIEWING_KEY for the key being registered, and by
+    /// PUBLISH_DISCLOSURE for the key it re-reads from the registry account.
+    InvalidViewingKey = 31,
+    /// PUBLISH_DISCLOSURE was handed a viewing-key account that is missing, not
+    /// program-owned, the wrong size, not a v1 registration, or not the canonical
+    /// `["view", authority]` PDA for the authority it stores. Fail closed: a
+    /// disclosure is never sealed to a key this program cannot attribute.
+    ViewingKeyNotInitialized = 32,
+    /// PUBLISH_DISCLOSURE on a Disclosure PDA that already holds a record. The
+    /// record is WRITE-ONCE: there is no update and no close instruction, so a
+    /// published disclosure cannot be rewritten by its publisher afterwards.
+    DisclosureAlreadyInitialized = 33,
+    /// PUBLISH_DISCLOSURE: the sealed blob failed structural validation - its
+    /// ephemeral X25519 public key is non-canonical or small-order, which is the
+    /// case where a user believes they sealed to one reader but every reader can
+    /// open it. The program cannot check more than the blob's SHAPE (it holds no
+    /// secret and cannot decrypt); what it cannot check is stated in
+    /// `state::disclosure` and `docs/COMPLIANCE.md`.
+    InvalidDisclosureBlob = 34,
     /// Skeleton guard: reserved for handlers whose logic has not landed yet.
     /// Unused in v1 (all five instructions are implemented) but kept so the
     /// off-chain error mapping stays stable.
