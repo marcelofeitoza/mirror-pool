@@ -71,6 +71,15 @@ path = "src/main.rs"
 name = "mirror-soak-value"
 path = "src/bin/confidential.rs"
 
+# The SUSTAINED run: the same fixed crowd shape, repeated on a paced cadence for
+# hours against a live public cluster, recording latency, leader spread, state
+# growth and accumulator drift as they change over time. Separate binary because
+# it answers a different question from the three above: not "does each flow
+# work?" but "does the same flow still behave the same way after hours?".
+[[bin]]
+name = "mirror-soak-sustained"
+path = "src/bin/sustained.rs"
+
 # The FUNDING-ROUND soak: participants shield, `fund-commit` emits a relay-signed
 # unshield into a FRESH commit wallet, the coordinator's funding service ingests
 # it, batches it to a round boundary, and releases it gaslessly. Asserts the

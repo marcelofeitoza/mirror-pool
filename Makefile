@@ -72,6 +72,34 @@ soak-funding:
 	cargo run -p mirror-soak --release --bin mirror-soak-funding -- \
 	  --rpc-url $(SURFPOOL_RPC) --program-id $(PROGRAM_ID)
 
+# The SUSTAINED run: one fixed crowd shape repeated on a paced cadence for hours
+# against a live cluster, recording latency, leader spread, state growth and
+# accumulator drift as they change over time. Unlike the targets above this one
+# is meant for a PUBLIC cluster, so it never airdrops: MIRROR_FUNDING_KEYPAIR
+# must name a pre-funded master payer that every wallet is funded from by system
+# transfer, and the loop stops itself at BUDGET_FLOOR lamports.
+#
+#   make soak-sustained PROGRAM_ID=<id> RPC=https://api.devnet.solana.com \
+#     MIRROR_FUNDING_KEYPAIR=<master.json> DURATION=14400
+RPC ?= $(SURFPOOL_RPC)
+DURATION ?= 14400
+ROUND_INTERVAL ?= 200
+BUDGET_FLOOR ?= 15000000
+soak-sustained:
+	@test -n "$(PROGRAM_ID)" || (echo "set PROGRAM_ID=<deployed program id>" && false)
+	@test -n "$(MIRROR_FUNDING_KEYPAIR)" || (echo "set MIRROR_FUNDING_KEYPAIR=<pre-funded master payer>" && false)
+	cargo run -p mirror-soak --bin mirror-soak-sustained -- \
+	  --rpc-url $(RPC) --program-id $(PROGRAM_ID) \
+	  --duration-secs $(DURATION) --round-interval-secs $(ROUND_INTERVAL) \
+	  --budget-floor-lamports $(BUDGET_FLOOR)
+
+# Re-derive the sustained run's aggregate report from the committed evidence
+# alone: no RPC, no keys, no cluster. Every number in docs/DEVNET.md comes from
+# this, so a reader can recompute it.
+soak-sustained-summary:
+	cargo run -p mirror-soak --bin mirror-soak-sustained -- \
+	  --summarize docs/devnet-run/sustained-devnet-rounds.jsonl
+
 check: fmt-check clippy test
 
 clean:
