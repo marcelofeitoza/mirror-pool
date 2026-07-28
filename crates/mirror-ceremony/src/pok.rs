@@ -25,11 +25,13 @@
 //! # What it is bound to
 //!
 //! The Fiat-Shamir challenge commits to the running transcript hash, the
-//! contribution index, the contributor identifier, and both the previous and new
-//! delta points in both groups:
+//! contribution index, the contributor identifier, the step's kind and provenance,
+//! and both the previous and new delta points in both groups:
 //!
 //! ```text
 //! c = Fr( SHA-256( POK_TAG || prev_hash || index || contributor_id
+//!                  || kind_tag || beacon_source || beacon_iterations_exp
+//!                  || machine_fingerprint || entropy_source_tag || timestamp
 //!                  || prev_delta_g1 || prev_delta_g2
 //!                  || new_delta_g1  || new_delta_g2 || R ) )
 //! z = k + c * s          R = prev_delta_g1 * k
@@ -37,8 +39,18 @@
 //!
 //! Verification is `prev_delta_g1 * z == R + new_delta_g1 * c`. Moving a proof to
 //! a different position changes `prev_hash` and `index`; re-attributing it to
-//! another operator changes `contributor_id`; either changes `c` and the check
-//! fails.
+//! another operator changes `contributor_id`; relabelling a beacon as an ordinary
+//! entropy contribution changes `kind_tag` and `entropy_source_tag`. Each of those
+//! changes `c` and the check fails.
+//!
+//! # The limit of that binding
+//!
+//! Binding the metadata stops anyone who does NOT know a step's delta ratio from
+//! relabelling it - which is everyone but the contributor. It does not stop the
+//! party who knows the ratio from re-proving the relabelled step, and for a beacon
+//! step the ratio is public, so anyone can. What closes that gap is not this
+//! module: it is [`crate::verify`] checking each step's ratio against the beacon
+//! value the ceremony pre-committed to in public. See `docs/CEREMONY.md`.
 //!
 //! `Fr(...)` is `from_be_bytes_mod_order` over the 32-byte digest. Reducing 256
 //! bits into the ~254-bit scalar field is very slightly non-uniform; the residual
@@ -51,7 +63,47 @@ use ark_ff::{PrimeField, Zero};
 use rand::RngCore;
 
 use crate::points;
-use crate::transcript::{Canonical, POK_TAG};
+use crate::transcript::{Canonical, ContributionKind, Provenance, POK_TAG};
+
+/// The kind and provenance of a step, in the decoded form the challenge absorbs.
+///
+/// Recording this in the transcript is not enough on its own: a transcript can be
+/// edited and re-hashed. Binding it into the challenge is what makes an edit
+/// invalidate the entry.
+pub struct Metadata<'a> {
+    /// [`ContributionKind::tag`]: 0 for an entropy contribution, 1 for a beacon.
+    pub kind_tag: u8,
+    /// The beacon's source bytes, empty for an entropy contribution.
+    pub beacon_source: &'a [u8],
+    /// The beacon's iteration exponent, 0 for an entropy contribution.
+    pub beacon_iterations_exp: u32,
+    /// The self-reported machine fingerprint.
+    pub machine_fingerprint: &'a str,
+    /// [`crate::EntropySource::tag`].
+    pub entropy_source_tag: u8,
+    /// The self-reported wall-clock time.
+    pub timestamp_unix: u64,
+}
+
+impl<'a> Metadata<'a> {
+    /// Build the binding for a step. `beacon_source` is the already-decoded source
+    /// (use [`ContributionKind::beacon_source_bytes`]); it is passed in rather than
+    /// decoded here so that computing a challenge cannot fail.
+    pub fn new(
+        kind: &ContributionKind,
+        beacon_source: &'a [u8],
+        provenance: &'a Provenance,
+    ) -> Metadata<'a> {
+        Metadata {
+            kind_tag: kind.tag(),
+            beacon_source,
+            beacon_iterations_exp: kind.beacon_iterations_exp(),
+            machine_fingerprint: &provenance.machine_fingerprint,
+            entropy_source_tag: provenance.entropy_source.tag(),
+            timestamp_unix: provenance.timestamp_unix,
+        }
+    }
+}
 
 /// Everything the challenge is bound to.
 pub struct Statement<'a> {
@@ -61,6 +113,9 @@ pub struct Statement<'a> {
     pub index: u32,
     /// The operator identifier the contribution is attributed to.
     pub contributor_id: &'a str,
+    /// What kind of step this is, and the context it was produced in. Bound so a
+    /// step cannot be relabelled after the fact.
+    pub metadata: Metadata<'a>,
     /// The delta points before the contribution (the Schnorr base is
     /// `prev_delta_g1`).
     pub prev_delta_g1: G1Affine,
@@ -116,6 +171,12 @@ fn challenge(statement: &Statement, r: &G1Affine) -> Fr {
     h.raw(statement.prev_hash);
     h.u32(statement.index);
     h.text(statement.contributor_id);
+    h.byte(statement.metadata.kind_tag);
+    h.bytes(statement.metadata.beacon_source);
+    h.u32(statement.metadata.beacon_iterations_exp);
+    h.text(statement.metadata.machine_fingerprint);
+    h.byte(statement.metadata.entropy_source_tag);
+    h.u64(statement.metadata.timestamp_unix);
     h.raw(&points::g1_bytes(&statement.prev_delta_g1));
     h.raw(&points::g2_bytes(&statement.prev_delta_g2));
     h.raw(&points::g1_bytes(&statement.new_delta_g1));
@@ -127,6 +188,7 @@ fn challenge(statement: &Statement, r: &G1Affine) -> Fr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transcript::EntropySource;
     use ark_ec::CurveGroup;
     use rand::SeedableRng;
 
@@ -135,6 +197,9 @@ mod tests {
         prev_hash: [u8; 32],
         id: String,
         index: u32,
+        kind: ContributionKind,
+        beacon_source: Vec<u8>,
+        provenance: Provenance,
         prev_g1: G1Affine,
         prev_g2: G2Affine,
         new_g1: G1Affine,
@@ -152,6 +217,13 @@ mod tests {
             prev_hash,
             id,
             index,
+            kind: ContributionKind::Entropy,
+            beacon_source: Vec::new(),
+            provenance: Provenance {
+                machine_fingerprint: "fp-1".into(),
+                entropy_source: EntropySource::Os,
+                timestamp_unix: 1_700_000_000,
+            },
             prev_g1,
             prev_g2,
             new_g1: (prev_g1 * s).into_affine(),
@@ -165,6 +237,7 @@ mod tests {
                 prev_hash: &self.prev_hash,
                 index: self.index,
                 contributor_id: &self.id,
+                metadata: Metadata::new(&self.kind, &self.beacon_source, &self.provenance),
                 prev_delta_g1: self.prev_g1,
                 prev_delta_g2: self.prev_g2,
                 new_delta_g1: self.new_g1,
@@ -204,6 +277,40 @@ mod tests {
         let mut replayed = f.statement();
         replayed.prev_hash = &other_hash;
         assert!(!verify(&replayed, &pok));
+    }
+
+    #[test]
+    fn proof_does_not_survive_a_beacon_being_relabelled_as_an_entropy_contribution() {
+        // The step was made as a beacon; the challenge commits to that.
+        let mut f = fixture("coordinator", 0, [1u8; 32], 5);
+        f.kind = ContributionKind::Beacon {
+            source: "abcd".into(),
+            iterations_exp: 4,
+        };
+        f.beacon_source = vec![0xab, 0xcd];
+        f.provenance.entropy_source = EntropySource::Beacon;
+        let pok = prove(&f.statement(), &f.s, &mut rng());
+        assert!(verify(&f.statement(), &pok));
+
+        // Relabelled to an ordinary OS-entropy contribution: the proof no longer
+        // verifies, so the entry cannot simply be re-hashed into the chain.
+        let mut relabelled = fixture("coordinator", 0, [1u8; 32], 5);
+        relabelled.provenance.machine_fingerprint = f.provenance.machine_fingerprint.clone();
+        assert!(!verify(&relabelled.statement(), &pok));
+    }
+
+    #[test]
+    fn proof_does_not_survive_a_rewritten_provenance() {
+        let f = fixture("alice", 0, [1u8; 32], 5);
+        let pok = prove(&f.statement(), &f.s, &mut rng());
+
+        let mut other_machine = fixture("alice", 0, [1u8; 32], 5);
+        other_machine.provenance.machine_fingerprint = "fp-2".into();
+        assert!(!verify(&other_machine.statement(), &pok));
+
+        let mut other_time = fixture("alice", 0, [1u8; 32], 5);
+        other_time.provenance.timestamp_unix += 1;
+        assert!(!verify(&other_time.statement(), &pok));
     }
 
     #[test]

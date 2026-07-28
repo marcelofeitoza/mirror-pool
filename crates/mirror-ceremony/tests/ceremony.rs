@@ -19,6 +19,7 @@ use mirror_ceremony::contribute::{self, Entropy};
 use mirror_ceremony::error::Check;
 use mirror_ceremony::key::CeremonyKey;
 use mirror_ceremony::ptau::Phase1Provenance;
+use mirror_ceremony::session::Session;
 use mirror_ceremony::transcript::{
     entry_hash, ContributionKind, ContributionRecord, EntropySource, PokRecord, Provenance,
     Transcript,
@@ -239,10 +240,12 @@ fn rejects_a_delta_g2_that_moved_by_a_different_scalar() {
     let forged_key = CeremonyKey::new("synthetic", forged_pk).expect("key");
 
     let prev_hash = transcript.genesis_hash().expect("genesis");
+    let provenance = forged_provenance();
     let statement = pok::Statement {
         prev_hash: &prev_hash,
         index: 0,
         contributor_id: "mallory",
+        metadata: forged_metadata(&provenance),
         prev_delta_g1: initial.delta_g1(),
         prev_delta_g2: initial.delta_g2(),
         new_delta_g1: new_g1,
@@ -347,10 +350,12 @@ fn rejects_a_null_contribution() {
     let initial = synthetic_key(21);
     let mut transcript = open_transcript(&initial);
     let prev_hash = transcript.genesis_hash().expect("genesis");
+    let provenance = forged_provenance();
     let statement = pok::Statement {
         prev_hash: &prev_hash,
         index: 0,
         contributor_id: "lazy",
+        metadata: forged_metadata(&provenance),
         prev_delta_g1: initial.delta_g1(),
         prev_delta_g2: initial.delta_g2(),
         new_delta_g1: initial.delta_g1(),
@@ -438,10 +443,12 @@ fn rejects_a_key_whose_h_query_was_not_divided_by_the_delta_ratio() {
     let bad_key = CeremonyKey::new("synthetic", bad_pk).expect("key");
 
     let prev_hash = transcript.genesis_hash().expect("genesis");
+    let provenance = forged_provenance();
     let statement = pok::Statement {
         prev_hash: &prev_hash,
         index: 0,
         contributor_id: "mallory",
+        metadata: forged_metadata(&provenance),
         prev_delta_g1: initial.delta_g1(),
         prev_delta_g2: initial.delta_g2(),
         new_delta_g1: bad_key.delta_g1(),
@@ -470,11 +477,20 @@ fn rejects_a_tampered_beacon_source() {
         .expect("beacon");
     let final_key = out.key.clone();
 
-    // Claim a different iteration count. The delta points and the proof of
-    // knowledge are untouched, so only the beacon recomputation can object.
+    // Claim a different iteration count. The iteration count is bound into the
+    // proof of knowledge, so the first check to object is that one.
     if let ContributionKind::Beacon { iterations_exp, .. } = &mut transcript.contributions[0].kind {
         *iterations_exp = 5;
     }
+    rehash(&mut transcript);
+    let err = verify::verify(&transcript, &initial, &final_key).expect_err("must reject");
+    assert_eq!(check_of(&err), Check::ProofOfKnowledge);
+
+    // A beacon scalar is public, so the forger can re-prove the edited step. Now
+    // only recomputing the beacon from its declared source and count can object,
+    // and it does: 2^5 iterations do not produce the delta that is recorded.
+    let real = mirror_ceremony::beacon::scalar(b"real-source", 4).expect("beacon scalar");
+    reprove_step(&mut transcript, 0, real);
     rehash(&mut transcript);
     let err = verify::verify(&transcript, &initial, &final_key).expect_err("must reject");
     assert_eq!(check_of(&err), Check::Beacon);
@@ -632,8 +648,500 @@ fn a_shared_pok_nonce_commitment_merges_contributions() {
 }
 
 // ---------------------------------------------------------------------------
+// a beacon closes the ceremony
+// ---------------------------------------------------------------------------
+
+/// The value a ceremony announces in public before it ends. A verifier can hold it
+/// independently of the transcript, which is what makes it useful.
+const PRE_COMMITTED: &[u8] = b"block hash announced in advance";
+const PRE_COMMITTED_EXP: u32 = 4;
+
+/// Three contributions closed by the pre-committed beacon. Returns the transcript,
+/// the initial key and the final (closed) key.
+fn closed_ceremony(seed: u64) -> (Transcript, CeremonyKey, CeremonyKey) {
+    let initial = synthetic_key(seed);
+    let mut transcript = open_transcript(&initial);
+    let mut head = initial.clone();
+    for i in 0..3 {
+        head = contribute::contribute(
+            &mut transcript,
+            &head,
+            &format!("contributor-{i}"),
+            &Entropy::Deterministic(format!("seed-{i}")),
+        )
+        .expect("contribution")
+        .key
+        .clone();
+    }
+    let closed = contribute::contribute_beacon(
+        &mut transcript,
+        &head,
+        "coordinator",
+        PRE_COMMITTED,
+        PRE_COMMITTED_EXP,
+    )
+    .expect("beacon")
+    .key
+    .clone();
+    (transcript, initial, closed)
+}
+
+#[test]
+fn rejects_a_contribution_appended_after_the_closing_beacon() {
+    // Five steps: three contributions, the closing beacon, and one more
+    // contribution spliced on after it by an appender that ignores the rule. The
+    // spliced step is impeccable in isolation - real delta ratio, real proof of
+    // knowledge - so only the beacon-is-final rule can object.
+    let (mut transcript, initial, closed) = closed_ceremony(41);
+    let four_step =
+        verify::verify(&transcript, &initial, &closed).expect("closed ceremony verifies");
+    assert_eq!(four_step.steps, 4);
+    assert!(four_step.closed_by_beacon);
+
+    let after = append_forged_step(
+        &mut transcript,
+        &closed,
+        "late-comer",
+        ContributionKind::Entropy,
+        EntropySource::Os,
+        Fr::from(77u64),
+    );
+    let err = verify::verify(&transcript, &initial, &after).expect_err("must reject");
+    assert_eq!(check_of(&err), Check::BeaconFinal);
+    assert!(
+        err.to_string().contains("step 4 was appended after it"),
+        "the error must name the offending step: {err}"
+    );
+}
+
+#[test]
+fn rejects_a_second_beacon() {
+    // A second beacon is still a step after the closing one, and it hands the last
+    // move to whoever chose it.
+    let (mut transcript, initial, closed) = closed_ceremony(42);
+    let s = mirror_ceremony::beacon::scalar(b"a second beacon value", 4).expect("beacon scalar");
+    let after = append_forged_step(
+        &mut transcript,
+        &closed,
+        "coordinator",
+        ContributionKind::Beacon {
+            source: hexfmt::encode(b"a second beacon value"),
+            iterations_exp: 4,
+        },
+        EntropySource::Beacon,
+        s,
+    );
+    let err = verify::verify(&transcript, &initial, &after).expect_err("must reject");
+    assert_eq!(check_of(&err), Check::BeaconFinal);
+}
+
+#[test]
+fn refuses_to_contribute_after_a_beacon() {
+    // The honest tooling refuses at the source, so the transcript above can only be
+    // produced by someone who wrote their own appender.
+    let (mut transcript, _, closed) = closed_ceremony(43);
+    let err = contribute::contribute(&mut transcript, &closed, "late-comer", &Entropy::Os)
+        .expect_err("must refuse");
+    assert!(
+        err.to_string().contains("a beacon is final"),
+        "unexpected error: {err}"
+    );
+    let err = contribute::contribute_beacon(&mut transcript, &closed, "coordinator", b"again", 4)
+        .expect_err("must refuse");
+    assert!(
+        err.to_string().contains("a beacon is final"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(transcript.contributions.len(), 4, "nothing was appended");
+}
+
+#[test]
+fn a_session_refuses_to_contribute_after_its_closing_beacon() {
+    // The same rule through the on-disk session surface the CLI drives.
+    let dir = tempdir("session-closed");
+    let initial = synthetic_key(44);
+    let mut session = Session {
+        dir: dir.clone(),
+        transcript: open_transcript(&initial),
+    };
+    initial
+        .save(&session.key_path(0))
+        .expect("save initial key");
+    session
+        .contribute("alice", &Entropy::Deterministic("a".into()))
+        .expect("contribution");
+    session
+        .beacon("coordinator", PRE_COMMITTED, PRE_COMMITTED_EXP)
+        .expect("beacon");
+    assert!(session.closed_by_beacon());
+
+    let err = session
+        .contribute("late-comer", &Entropy::Os)
+        .expect_err("must refuse");
+    assert!(
+        err.to_string().contains("a beacon is final"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(session.transcript.contributions.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// a beacon cannot be relabelled into a secret contributor
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_relabelled_beacon_does_not_verify() {
+    // Rewrite the closing beacon as an ordinary OS-entropy contribution and
+    // recompute every chain hash. That used to be enough, because the proof of
+    // knowledge said nothing about the kind. It now commits to it.
+    let (mut transcript, initial, closed) = closed_ceremony(45);
+    let honest = verify::verify(&transcript, &initial, &closed).expect("verifies");
+    assert_eq!(honest.beacon_steps, 1);
+
+    let last = transcript.contributions.len() - 1;
+    transcript.contributions[last].kind = ContributionKind::Entropy;
+    transcript.contributions[last].provenance.entropy_source = EntropySource::Os;
+    transcript.contributions[last]
+        .provenance
+        .machine_fingerprint = "a-different-machine".into();
+    rehash(&mut transcript);
+
+    let err = verify::verify(&transcript, &initial, &closed).expect_err("must reject");
+    assert_eq!(check_of(&err), Check::ProofOfKnowledge);
+}
+
+#[test]
+fn a_half_relabelled_beacon_is_rejected_on_kind_provenance_disagreement() {
+    // Rewriting only one of the two redundant fields is caught before the algebra
+    // is even reached.
+    for relabel_kind in [false, true] {
+        let (mut transcript, initial, closed) = closed_ceremony(46);
+        let last = transcript.contributions.len() - 1;
+        if relabel_kind {
+            transcript.contributions[last].kind = ContributionKind::Entropy;
+        } else {
+            transcript.contributions[last].provenance.entropy_source = EntropySource::Os;
+        }
+        rehash(&mut transcript);
+        let err = verify::verify(&transcript, &initial, &closed).expect_err("must reject");
+        assert_eq!(check_of(&err), Check::KindConsistency);
+    }
+}
+
+#[test]
+fn a_relabelled_beacon_is_rejected_when_the_pre_committed_value_is_supplied() {
+    // The party who applied the beacon knows its scalar - it is a published value,
+    // so everybody does - and can therefore re-prove the relabelled step. Binding
+    // the kind into the proof does not stop them. What stops them is the beacon
+    // pre-commitment: any verifier holding the announced value recomputes the
+    // scalar and sees it applied by a step that is not recorded as that beacon.
+    let (mut transcript, initial, closed) = closed_ceremony(47);
+    let last = transcript.contributions.len() - 1;
+    transcript.contributions[last].kind = ContributionKind::Entropy;
+    transcript.contributions[last].provenance.entropy_source = EntropySource::Os;
+    transcript.contributions[last]
+        .provenance
+        .machine_fingerprint = "a-different-machine".into();
+    transcript.contributions[last].contributor_id = "dave@example.org".into();
+    rehash(&mut transcript);
+    let beacon_scalar =
+        mirror_ceremony::beacon::scalar(PRE_COMMITTED, PRE_COMMITTED_EXP).expect("beacon scalar");
+    reprove_step(&mut transcript, last, beacon_scalar);
+    rehash(&mut transcript);
+
+    let opts = verify::VerifyOptions {
+        beacon_precommitment: Some(verify::BeaconPrecommitment {
+            source: PRE_COMMITTED,
+            iterations_exp: PRE_COMMITTED_EXP,
+        }),
+    };
+    let err = verify::verify_with(&transcript, &initial, &closed, &opts).expect_err("must reject");
+    assert_eq!(check_of(&err), Check::Beacon);
+    assert!(
+        err.to_string().contains("not recorded as that beacon"),
+        "unexpected error: {err}"
+    );
+
+    // The honest half of the story: WITHOUT the pre-commitment the relabelled step
+    // is a scalar like any other, and no verifier can tell. The tool does not
+    // pretend otherwise - it accepts the transcript, counts the relabelled step,
+    // and says in the report that it could not rule this out.
+    let blind = verify::verify(&transcript, &initial, &closed).expect("indistinguishable");
+    assert_eq!(blind.independence.independent_contributors, 1);
+    assert!(!blind.beacon_precommitment_checked);
+    assert!(
+        blind
+            .independence
+            .warnings
+            .iter()
+            .any(|w| w.contains("relabelled public beacon")),
+        "the report must say the check was not performed: {:?}",
+        blind.independence.warnings
+    );
+}
+
+#[test]
+fn a_step_that_replays_a_recorded_beacon_scalar_is_rejected() {
+    // The same defence without any external input: a step earlier in the chain that
+    // applies the very scalar the transcript's own beacon publishes is that beacon,
+    // whatever it calls itself.
+    let initial = synthetic_key(48);
+    let mut transcript = open_transcript(&initial);
+    let s = mirror_ceremony::beacon::scalar(PRE_COMMITTED, PRE_COMMITTED_EXP).expect("scalar");
+    let head = append_forged_step(
+        &mut transcript,
+        &initial,
+        "mallory",
+        ContributionKind::Entropy,
+        EntropySource::Os,
+        s,
+    );
+    let closed = contribute::contribute_beacon(
+        &mut transcript,
+        &head,
+        "coordinator",
+        PRE_COMMITTED,
+        PRE_COMMITTED_EXP,
+    )
+    .expect("beacon")
+    .key
+    .clone();
+    let err = verify::verify(&transcript, &initial, &closed).expect_err("must reject");
+    assert_eq!(check_of(&err), Check::Beacon);
+}
+
+#[test]
+fn a_ceremony_closed_by_the_wrong_beacon_is_rejected() {
+    // "We closed on the value we announced" is a claim; with the announced value in
+    // hand it becomes a check.
+    let (transcript, initial, closed) = closed_ceremony(49);
+    let opts = verify::VerifyOptions {
+        beacon_precommitment: Some(verify::BeaconPrecommitment {
+            source: b"a value nobody announced",
+            iterations_exp: PRE_COMMITTED_EXP,
+        }),
+    };
+    let err = verify::verify_with(&transcript, &initial, &closed, &opts).expect_err("must reject");
+    assert_eq!(check_of(&err), Check::Beacon);
+    assert!(
+        err.to_string().contains("not the pre-committed one"),
+        "unexpected error: {err}"
+    );
+
+    // The right value verifies, and the report records that the check ran.
+    let opts = verify::VerifyOptions {
+        beacon_precommitment: Some(verify::BeaconPrecommitment {
+            source: PRE_COMMITTED,
+            iterations_exp: PRE_COMMITTED_EXP,
+        }),
+    };
+    let report = verify::verify_with(&transcript, &initial, &closed, &opts).expect("verifies");
+    assert!(report.beacon_precommitment_checked);
+    assert!(report.closed_by_beacon);
+}
+
+#[test]
+fn a_beacon_is_never_counted_even_when_its_provenance_claims_os_entropy() {
+    // Both signals have to agree that a step is not a beacon before it can count.
+    let transcript = independence_fixture(&[
+        ("alice", "fp-1", EntropySource::Os),
+        ("coordinator", "fp-2", EntropySource::Os),
+    ]);
+    let mut relabelled = transcript.clone();
+    relabelled.contributions[1].kind = ContributionKind::Beacon {
+        source: hexfmt::encode(PRE_COMMITTED),
+        iterations_exp: PRE_COMMITTED_EXP,
+    };
+    let honest = mirror_ceremony::independence::assess(&transcript);
+    let report = mirror_ceremony::independence::assess(&relabelled);
+    assert_eq!(honest.independent_contributors, 2);
+    assert_eq!(
+        report.independent_contributors, 1,
+        "a beacon-kind step must not be counted whatever its provenance claims"
+    );
+    assert_eq!(report.beacon_steps, 1);
+}
+
+// ---------------------------------------------------------------------------
+// transcript-only verification (what a third party can check from a published
+// transcript.json alone)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_published_transcript_verifies_on_its_own_without_the_key_files() {
+    let (transcript, _, _) = closed_ceremony(50);
+    let opts = verify::VerifyOptions {
+        beacon_precommitment: Some(verify::BeaconPrecommitment {
+            source: PRE_COMMITTED,
+            iterations_exp: PRE_COMMITTED_EXP,
+        }),
+    };
+    let report = verify::verify_transcript(&transcript, &opts).expect("transcript verifies");
+    assert_eq!(report.steps, 4);
+    assert!(report.closed_by_beacon);
+    assert!(
+        !report.key_checks,
+        "a transcript-only run must not claim the key-level checks ran"
+    );
+
+    // It is a real check, not a rubber stamp: the same tampering the full verifier
+    // catches is caught here too.
+    let mut tampered = transcript.clone();
+    tampered.contributions[1].contributor_id = "someone-else".into();
+    rehash(&mut tampered);
+    let err = verify::verify_transcript(&tampered, &opts).expect_err("must reject");
+    assert_eq!(check_of(&err), Check::ProofOfKnowledge);
+}
+
+#[test]
+fn the_committed_demo_transcripts_verify() {
+    // The transcripts published under docs/ceremony-run/ are the specific recorded
+    // run docs/PROOF.md describes. Checking them here means the published evidence
+    // cannot silently stop matching the code that produced it - and it exercises
+    // exactly the path a third party runs.
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let opts = verify::VerifyOptions {
+        beacon_precommitment: Some(verify::BeaconPrecommitment {
+            source: b"mirror-pool demo beacon 2026-07-27",
+            iterations_exp: 16,
+        }),
+    };
+    for (file, steps, final_hash) in [
+        (
+            "membership-transcript.json",
+            4usize,
+            "4704bc3af3dbd387fe24f831a3a951882373e05222278b3f4337dd50c7681049",
+        ),
+        (
+            "transaction-transcript.json",
+            3,
+            "ea5608fdab7820d9c17c4271fb1d93bae35e7da732c90acd75b4051d3d8a4cf7",
+        ),
+    ] {
+        let path = repo.join("docs/ceremony-run").join(file);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let transcript = Transcript::from_json(&text).expect("parsing the published transcript");
+        let report = verify::verify_transcript(&transcript, &opts)
+            .unwrap_or_else(|e| panic!("{file} must verify: {e}"));
+        assert_eq!(report.steps, steps);
+        assert!(report.closed_by_beacon);
+        assert!(report.beacon_precommitment_checked);
+        assert_eq!(
+            report.final_transcript_hash, final_hash,
+            "{file} no longer hashes to the value docs/PROOF.md publishes"
+        );
+        assert_eq!(
+            report.independence.independent_contributors, 1,
+            "{file} was run on one machine, so the honest count is 1"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Append a step the honest tooling refuses to make, the way an attacker with
+/// their own appender would: apply a delta ratio to the head key, prove knowledge
+/// of it, and splice a well-formed entry onto the chain. Returns the new head key.
+fn append_forged_step(
+    transcript: &mut Transcript,
+    head: &CeremonyKey,
+    id: &str,
+    kind: ContributionKind,
+    entropy_source: EntropySource,
+    s: Fr,
+) -> CeremonyKey {
+    let new_pk = contribute::apply_delta(&head.pk, &s).expect("apply delta");
+    let new_key = CeremonyKey::new(head.circuit.clone(), new_pk).expect("key");
+    let prev_hash = transcript.head_hash().expect("head hash");
+    let index = transcript.contributions.len() as u32;
+    let provenance = Provenance {
+        machine_fingerprint: "attacker".into(),
+        entropy_source,
+        timestamp_unix: 1_700_100_000 + u64::from(index) * 600,
+    };
+    let beacon_source = kind.beacon_source_bytes().expect("beacon source");
+    let statement = pok::Statement {
+        prev_hash: &prev_hash,
+        index,
+        contributor_id: id,
+        metadata: pok::Metadata::new(&kind, &beacon_source, &provenance),
+        prev_delta_g1: head.delta_g1(),
+        prev_delta_g2: head.delta_g2(),
+        new_delta_g1: new_key.delta_g1(),
+        new_delta_g2: new_key.delta_g2(),
+    };
+    let proof = pok::prove(&statement, &s, &mut rand::rngs::OsRng);
+    let mut rec = ContributionRecord {
+        index,
+        contributor_id: id.to_string(),
+        kind,
+        provenance,
+        prev_hash: hexfmt::encode(&prev_hash),
+        new_delta_g1: hexfmt::encode(&points::g1_bytes(&new_key.delta_g1())),
+        new_delta_g2: hexfmt::encode(&points::g2_bytes(&new_key.delta_g2())),
+        new_key_digest: hexfmt::encode(&new_key.digest()),
+        pok: PokRecord {
+            r: hexfmt::encode(&points::g1_bytes(&proof.r)),
+            z: hexfmt::encode(&points::fr_bytes(&proof.z)),
+        },
+        hash: String::new(),
+    };
+    rec.hash = hexfmt::encode(&entry_hash(&prev_hash, &rec).expect("entry hash"));
+    transcript.contributions.push(rec);
+    new_key
+}
+
+/// Re-prove a step after editing it, which the party who knows its delta ratio can
+/// always do. Call [`rehash`] afterwards.
+fn reprove_step(transcript: &mut Transcript, at: usize, s: Fr) {
+    let (prev_g1, prev_g2) = if at == 0 {
+        transcript.header_deltas().expect("header deltas")
+    } else {
+        transcript.contributions[at - 1].deltas().expect("deltas")
+    };
+    let rec = &transcript.contributions[at];
+    let prev_hash = hexfmt::decode32("prev_hash", &rec.prev_hash).expect("prev hash");
+    let (new_g1, new_g2) = rec.deltas().expect("deltas");
+    let beacon_source = rec.kind.beacon_source_bytes().expect("beacon source");
+    let statement = pok::Statement {
+        prev_hash: &prev_hash,
+        index: rec.index,
+        contributor_id: &rec.contributor_id,
+        metadata: pok::Metadata::new(&rec.kind, &beacon_source, &rec.provenance),
+        prev_delta_g1: prev_g1,
+        prev_delta_g2: prev_g2,
+        new_delta_g1: new_g1,
+        new_delta_g2: new_g2,
+    };
+    let proof = pok::prove(&statement, &s, &mut rand::rngs::OsRng);
+    transcript.contributions[at].pok = PokRecord {
+        r: hexfmt::encode(&points::g1_bytes(&proof.r)),
+        z: hexfmt::encode(&points::fr_bytes(&proof.z)),
+    };
+}
+
+/// The provenance every hand-forged record carries. It is bound into the proof of
+/// knowledge, so a forged proof has to commit to exactly this.
+fn forged_provenance() -> Provenance {
+    Provenance {
+        machine_fingerprint: "forged".into(),
+        entropy_source: EntropySource::Os,
+        timestamp_unix: 1_700_000_000,
+    }
+}
+
+/// The PoK metadata binding for a hand-forged entropy record.
+fn forged_metadata(provenance: &Provenance) -> pok::Metadata<'_> {
+    pok::Metadata::new(&ContributionKind::Entropy, &[], provenance)
+}
 
 /// Build a transcript entry around already-computed values (used by the forgery
 /// tests, which cannot go through the honest contribution path).
@@ -649,11 +1157,7 @@ fn record(
         index,
         contributor_id: id.to_string(),
         kind: ContributionKind::Entropy,
-        provenance: Provenance {
-            machine_fingerprint: "forged".into(),
-            entropy_source: EntropySource::Os,
-            timestamp_unix: 1_700_000_000,
-        },
+        provenance: forged_provenance(),
         prev_hash: String::new(),
         new_delta_g1: hexfmt::encode(&points::g1_bytes(&new_g1)),
         new_delta_g2: hexfmt::encode(&points::g2_bytes(&new_g2)),
@@ -675,10 +1179,18 @@ fn independence_fixture(rows: &[(&str, &str, EntropySource)]) -> Transcript {
     for (i, (id, fingerprint, source)) in rows.iter().enumerate() {
         let g1 = (G1Affine::generator() * Fr::from(i as u64 + 2)).into_affine();
         let g2 = (G2Affine::generator() * Fr::from(i as u64 + 2)).into_affine();
+        let kind = if *source == EntropySource::Beacon {
+            ContributionKind::Beacon {
+                source: hexfmt::encode(b"fixture beacon"),
+                iterations_exp: 4,
+            }
+        } else {
+            ContributionKind::Entropy
+        };
         transcript.contributions.push(ContributionRecord {
             index: i as u32,
             contributor_id: (*id).to_string(),
-            kind: ContributionKind::Entropy,
+            kind,
             provenance: Provenance {
                 machine_fingerprint: (*fingerprint).to_string(),
                 entropy_source: *source,

@@ -402,8 +402,14 @@ is self-contained and repeatable; the signatures above are from this run.
 Recorded 2026-07-27 on the membership circuit, plus an independent second run on the
 transaction circuit. This is a **demonstration that the ceremony machinery works end
 to end**, NOT a production ceremony: every contribution came from one machine, so the
-tool reports one independent contributor, and the resulting key has not been deployed.
-The committed verifying keys are still the dev-setup keys.
+tool reports one independent contributor; the beacon source is a fixed demo string
+rather than a value nobody could predict; and the resulting key has not been
+deployed. The committed verifying keys are still the dev-setup keys.
+
+**The transcripts of this run are committed**, at
+`docs/ceremony-run/membership-transcript.json` (7 KB) and
+`docs/ceremony-run/transaction-transcript.json` (6 KB). Section "What a third party
+can check" below states exactly what they do and do not let an outsider reproduce.
 
 ## What the ceremony was anchored to
 
@@ -413,6 +419,7 @@ The committed verifying keys are still the dev-setup keys.
 | phase-1 provenance | 55 contributions, power `2^16`, ceremony power `2^28`, named contributors | yes - `ceremony inspect-ptau` reads them out of the file |
 | circuit | `circuits/membership.r1cs`, sha256 `8ed379951ad0b7371b4ac53fc373b64c36ac26552802ff165dad7af4977bd0a2` | yes, for a given circom version |
 | initial phase-2 key | sha256 `8c6b6c48195a4e116322cace04ec7619a9b158137bb98df37d9f78e651b15697` | **yes** - `snarkjs groth16 setup` is deterministic |
+| beacon source | the text `mirror-pool demo beacon 2026-07-27`, `2^16` SHA-256 iterations | yes - published here, which is what makes check 12 runnable |
 
 The determinism of `snarkjs groth16 setup` was checked directly: running it twice on
 the same r1cs and ptau produced byte-identical zkeys
@@ -424,19 +431,20 @@ re-derive the start of the chain instead of trusting it.
 
 | step | contributor | kind | entropy | new key digest (first 16) | chain hash (first 16) |
 | --- | --- | --- | --- | --- | --- |
-| 0 | `alice@example.org` | entropy | OS + user string | `414f795f75c5ff4b` | `8ff46869ef510769` |
-| 1 | `bob@example.net` | entropy | OS + user string | `cb0ea53ae67191e0` | `8016f34130823f58` |
-| 2 | `carol@example.com` | entropy | OS + user string | `abe3e0fc98be6186` | `c9ca47e5f91bae10` |
-| 3 | `coordinator` | beacon (`2^16` SHA-256 iterations) | public | `6757820d23f5a2a3` | `de97230bcf01a164` |
+| 0 | `alice@example.org` | entropy | OS + user string | `30bb22b26bf366bc` | `02cf868b07c2eff9` |
+| 1 | `bob@example.net` | entropy | OS + user string | `1bc5b1cf0c371e5e` | `d9643bce149db23a` |
+| 2 | `carol@example.com` | entropy | OS + user string | `4d9886284e11a877` | `dde23ec7e626d151` |
+| 3 | `coordinator` | beacon (`2^16` SHA-256 iterations) | public | `d120a789e077a4f5` | `4704bc3af3dbd387` |
 
-Final ceremony hash: `de97230bcf01a164b05121112bae0fad43a781c3cc328fadb280217609046dea`.
+Final ceremony hash: `4704bc3af3dbd387fe24f831a3a951882373e05222278b3f4337dd50c7681049`.
+Transcript file sha256: `ff2af0bd07e77182629b063e71f07d28282cd1e08720c102b348bf869302d5da`.
 
 Contribution digests are **not** reproducible by a third party: the scalars come from
 OS randomness, which is the point. What a third party reproduces is the *verification*.
 
 ## What verification reported
 
-`mirror-cli ceremony verify --dir ... --r1cs ... --initial-zkey ...`:
+`mirror-cli ceremony verify --dir ... --r1cs ... --initial-zkey ... --beacon-source-text ...`:
 
 ```
 r1cs circuits/membership.r1cs matches the transcript.
@@ -444,7 +452,9 @@ initial key re-derived from circuits/membership_0000.zkey matches the transcript
 CEREMONY VERIFIED
   steps:                   4
   of which beacons:        1
-  final transcript hash:   de97230bcf01a164b05121112bae0fad43a781c3cc328fadb280217609046dea
+  closed by beacon:        yes
+  beacon pre-commitment:   checked against the value you supplied
+  final transcript hash:   4704bc3af3dbd387fe24f831a3a951882373e05222278b3f4337dd50c7681049
   phase-1 contributions:   55
 
 INDEPENDENT CONTRIBUTORS: 1
@@ -463,6 +473,37 @@ WARNINGS
 **Three distinct self-asserted identities, one machine, reported as one contributor.**
 That is the self-run refusal doing its job on a real run, and it is why the headline
 number in this section is 1 and not 3.
+
+Run the same command *without* `--beacon-source-text` and the report changes in two
+places, which is the point of publishing the beacon value:
+
+```
+  beacon pre-commitment:   NOT supplied - a relabelled beacon cannot be ruled out
+  - no pre-committed beacon value was supplied to this verification, so it cannot
+    rule out that a step counted as a secret contribution was a relabelled public
+    beacon; re-run with the beacon value the ceremony announced in advance
+```
+
+## The rules the run had to satisfy
+
+Both of these are enforced by the code as of this run, and both are exercised
+adversarially in `crates/mirror-ceremony/tests/ceremony.rs`:
+
+```
+$ mirror-cli ceremony contribute --dir "$D" --id "late-comer@example.org"
+Error: cannot contribute: this ceremony was closed by the beacon at step 3;
+a beacon is final, so no further step can be appended.
+```
+
+- **A beacon closes the ceremony.** Nothing may follow it, and there is at most one.
+  A transcript with a post-beacon step is rejected even when that step carries a
+  valid proof of knowledge.
+- **A beacon cannot be relabelled into a contributor.** The kind and provenance are
+  bound into the proof of knowledge, so relabelling invalidates the step for anyone
+  who does not know its delta ratio; and for the one party who does (a beacon scalar
+  is public), the pre-committed beacon value above lets any verifier catch it. With
+  no pre-commitment supplied, the relabelling is indistinguishable and the report
+  says so rather than claiming a check it did not perform.
 
 ## The end-to-end check
 
@@ -505,29 +546,63 @@ Only `delta` moved. That is exactly what a phase-2 ceremony is defined to do.
 ## Second circuit, independent transcript
 
 The transaction (JoinSplit) circuit was run as a separate ceremony over the same
-public phase 1:
+public phase 1, and closed with the same published beacon value:
 
 | item | value |
 | --- | --- |
 | r1cs sha256 | `908988ec0ee6626b7d8fd39892e12166b5ec75ef1a3a259b64bdc1a6c8990063` |
 | initial key digest | `3f7eb98b3a72011d21e4af5b45eff1402007688c07770973a8dec4a6816e8beb` |
-| steps | 2 entropy contributions |
-| final key digest | `7433ed19a86984aaae4e7bec0829a8a5b3f01b2076242121864e8a708bba3c72` |
-| final ceremony hash | `d5a657e936f30f375d2e0b2b4242f85953763acb6900831233e8cd93602f91ea` |
-| verify | `CEREMONY VERIFIED`, 1 independent contributor (same-machine merge) |
+| steps | 2 entropy contributions + closing beacon |
+| final key digest | `cf960b337d8650780749e6dceb7e9b8a325e4be4a1b5534b808503f8ed8fc337` |
+| final ceremony hash | `ea5608fdab7820d9c17c4271fb1d93bae35e7da732c90acd75b4051d3d8a4cf7` |
+| transcript file sha256 | `2c846e103be37a1490a3105e8f9e5d1b8bd431cc02ef2b2a444aef8f6e7b406a` |
+| verify | `CEREMONY VERIFIED`, closed by beacon, 1 independent contributor (same-machine merge) |
 
 `prove-check` deliberately refuses this ceremony: it builds a membership witness, and
 constructing a full 2-in/2-out JoinSplit witness is out of its scope. That circuit's
 ceremony is verified and exportable, but its end-to-end proof check is not automated.
 
+## What a third party can check
+
+The transcripts are committed; the proving keys are not (4.7 MB and 11 MB of
+gitignored build artifact). So:
+
+```sh
+mirror-cli ceremony verify-transcript \
+  --file docs/ceremony-run/membership-transcript.json \
+  --beacon-source-text "mirror-pool demo beacon 2026-07-27" \
+  --beacon-iterations-exp 16
+```
+
+reproduces, from the committed file alone: the whole hash chain and the published
+ceremony hash, every Schnorr proof of knowledge at its own position and under its own
+label, every `delta_g1`/`delta_g2` same-ratio pairing, the beacon step recomputed
+point for point from the published source, the beacon-is-final rule, and the
+contributor count of 1.
+
+It does **not** reproduce the four key-level checks (initial-key binding, final-key
+binding, untouched-part equality, `h_query`/`l_query` scaling), because those compare
+against key files that are not published. The command prints
+`TRANSCRIPT VERIFIED (no key files: the key-level checks did NOT run)` and lists what
+it skipped. Those checks did run locally, in the `ceremony verify` output quoted
+above, and they run in the test suite on synthetic keys - but for *this specific run*
+they are not externally reproducible, and this document does not claim they are.
+
+The committed transcripts are also checked by
+`cargo test -p mirror-ceremony the_committed_demo_transcripts_verify`, which pins
+their final ceremony hashes to the values published above, so the published evidence
+cannot drift away from the code that produced it.
+
 ## Timings (optimized build, Apple silicon)
 
 | operation | membership (11522 constraints) | transaction (27278 constraints) |
 | --- | --- | --- |
-| `ceremony start` (read zkey, write key) | 1.5 s | 1.8 s |
-| `ceremony contribute` | 2.0 s | 3.9 s |
-| `ceremony verify` (whole chain) | 0.8 s | 0.3 s |
-| `ceremony prove-check` (verify + prove + on-chain verify) | 0.4 s | n/a |
+| `ceremony start` (read zkey, write key) | 1.0 s | 1.9 s |
+| `ceremony contribute` | 1.9 s | 4.2 s |
+| `ceremony beacon` (`2^16` iterations) | 1.9 s | n/a |
+| `ceremony verify` (whole chain) | 0.2 s | 0.4 s |
+| `ceremony verify-transcript` (no key files) | 0.04 s | 0.03 s |
+| `ceremony prove-check` (verify + prove + on-chain verify) | 0.6 s | n/a |
 
 Key files are 4.7 MB (membership) and 11 MB (transaction). Transcripts are ~7 KB.
 
@@ -543,18 +618,21 @@ every gate (`cargo check` / `fmt` / `clippy` / `test`), are unaffected.
 
 ```sh
 D=ceremony/membership
+BEACON="mirror-pool demo beacon 2026-07-27"
 mirror-cli ceremony inspect-ptau --ptau circuits/pot16_final.ptau
 snarkjs groth16 setup circuits/membership.r1cs circuits/pot16_final.ptau \
   circuits/membership_0000.zkey
 mirror-cli ceremony start --circuit membership --dir "$D" \
   --r1cs circuits/membership.r1cs --ptau circuits/pot16_final.ptau \
   --initial-zkey circuits/membership_0000.zkey
-mirror-cli ceremony contribute --dir "$D" --id "alice@example.org"
-mirror-cli ceremony contribute --dir "$D" --id "bob@example.net"
+mirror-cli ceremony contribute --dir "$D" --id "alice@example.org" --entropy "<yours>"
+mirror-cli ceremony contribute --dir "$D" --id "bob@example.net" --entropy "<yours>"
+mirror-cli ceremony contribute --dir "$D" --id "carol@example.com" --entropy "<yours>"
 mirror-cli ceremony beacon --dir "$D" --id coordinator \
-  --source-hex <pre-committed public value> --iterations-exp 16
+  --source-text "$BEACON" --iterations-exp 16
 mirror-cli ceremony verify --dir "$D" \
-  --r1cs circuits/membership.r1cs --initial-zkey circuits/membership_0000.zkey
+  --r1cs circuits/membership.r1cs --initial-zkey circuits/membership_0000.zkey \
+  --beacon-source-text "$BEACON" --beacon-iterations-exp 16
 mirror-cli ceremony prove-check --dir "$D" --out-dir /tmp/cproof
 snarkjs groth16 verify /tmp/cproof/verification_key.json \
   /tmp/cproof/public.json /tmp/cproof/proof.json
@@ -565,6 +643,10 @@ The same flow also runs as a test:
 ```sh
 MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored ceremony_key
 ```
+
+With `MIRROR_PROVE_LIVE=1` set, that test now FAILS if the circuit build artifacts
+are missing, instead of returning early and reporting success. Without the flag it
+skips, which is what CI does.
 
 Your digests from step 0 onward will differ from the table above (different entropy);
 the phase-1 digest, the r1cs digest and the initial-key digest will not.

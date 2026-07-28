@@ -539,22 +539,34 @@ for that, in pure Rust, for both circuits. Full guide: `docs/CEREMONY.md`.
   key. In the exported verifying key, only `vk_delta_2` differs.
 - **Each contribution proves knowledge of its ratio.** A Schnorr proof over the base
   `delta_g1` of the previous key, with a Fiat-Shamir challenge bound to the running
-  transcript hash, the contribution index and the contributor identifier - so a proof
-  cannot be replayed at another position or re-attributed to another operator.
+  transcript hash, the contribution index, the contributor identifier, and the step's
+  kind and provenance - so a proof cannot be replayed at another position,
+  re-attributed to another operator, or carried over to a step relabelled from
+  "beacon" to "entropy contribution".
+- **A beacon is final.** Once the closing beacon is in the transcript, `contribute`
+  refuses to append anything and `verify` rejects a chain with a step after the
+  beacon or with more than one beacon.
 - **The chain is SHA-256 over a canonical serialization** (domain tag, fixed-width
   values raw, variable-length values length-prefixed). The final chain hash is the
   value a coordinator publishes.
 - **Verification is reproducible by anyone** holding the transcript, the initial key
-  and the final key: chain links, entry hashes, every proof of knowledge, a pairing
-  same-ratio check per step, beacon recomputation, endpoint digests, untouched-part
-  equality, and a batched pairing check that the query vectors were divided by the
-  accumulated ratio. Tampered deltas, forged or replayed proofs, reordered chains and
-  truncated chains are each rejected, each with a test.
+  and the final key: chain links, entry hashes, kind/provenance agreement, every proof
+  of knowledge, a pairing same-ratio check per step, beacon recomputation, the
+  beacon-is-final rule, endpoint digests, untouched-part equality, and a batched
+  pairing check that the query vectors were divided by the accumulated ratio.
+  Tampered deltas, forged or replayed proofs, reordered chains, truncated chains,
+  post-beacon steps and relabelled beacons are each rejected, each with a test.
+  `ceremony verify-transcript` runs everything that does not need the key files, for
+  a third party who has only the published `transcript.json`.
 - **The reported number is an independent-contributor count**, not a contribution
   count. Contributions sharing an identity, a machine fingerprint or a
   proof-of-knowledge nonce are merged; deterministic and beacon steps are never
-  counted. It is a heuristic against accidental self-inflation, explicitly not a
-  Sybil defence.
+  counted, and a step counts only when its kind and its self-reported entropy source
+  agree that it is not a beacon. It is a heuristic against accidental self-inflation
+  and an upper bound on distinct secret holders, explicitly not a Sybil defence. A
+  verifier who supplies the pre-committed beacon value additionally gets a mechanical
+  check that no counted step is the public beacon scalar under another name; without
+  it, the two are indistinguishable and the report says so.
 - **Keys travel in a `.mpk` container** around arkworks' canonical uncompressed
   `ProvingKey<Bn254>` serialization (arkworks has no zkey writer). Verifying keys are
   exported in both the snarkjs `verification_key.json` shape and the
@@ -566,7 +578,11 @@ ceremony-produced key and runs the exact on-chain `groth16-solana` verifier over
 result against the ceremony-exported verifying key.
 
 **Status.** The machinery is built and tested; no production ceremony has been run,
-so the committed and deployed verifying keys are still dev-setup keys.
+so the committed and deployed verifying keys are still dev-setup keys. The
+transcripts of the local demonstration run are committed under `docs/ceremony-run/`
+and are checked by the test suite; the keys they refer to are not published, so the
+four key-level checks are not third-party reproducible for that run
+(`docs/PROOF.md`).
 
 ---
 
@@ -795,7 +811,7 @@ of nominal `k`, and under naive pass-through use of the same pool it is most of 
 | shared types + wire format + Poseidon + tests | `crates/mirror-core` | **Implemented** - `commit`/`nullifier`/`transfer_action_hash`, `ActionClass`/`SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon`, `wire`; circomlib-Poseidon; fixture cross-check against the circuit |
 | on-chain program (both settle paths) | `programs/mirror-pool` | **Implemented** - `InitPool`/`Commit`/`SettleEpoch`/`CommitDeposit`/`SettleZk`/`ClaimReward`; frontier accumulator + 32-root ring; Epoch/Nullifier/Dwell PDAs; on-chain k-floor, double-settle prevention, per-nullifier anti-replay; on-chain Groth16 (alt_bn128) |
 | membership circuit + setup + verifying key | `circuits/` | **Implemented** - depth-20 Poseidon membership circuit, dev/test Groth16 setup, committed proof fixture + vendored `vk.rs` |
-| multi-party phase-2 trusted-setup ceremony | `crates/mirror-ceremony` | **Implemented** - public phase-1 import + provenance reader, delta re-randomization, Schnorr PoK bound to contributor and transcript, SHA-256 transcript chain, reproducible verification (PoK + pairing same-ratio + batched query-scaling), self-run-refusing independent-contributor count, snarkjs/`groth16-solana` verifying-key export; driven by `mirror-cli ceremony ...`. NOT yet run for production: the deployed keys are still dev-setup keys |
+| multi-party phase-2 trusted-setup ceremony | `crates/mirror-ceremony` | **Implemented** - public phase-1 import + provenance reader, delta re-randomization, Schnorr PoK bound to contributor, position, kind and provenance, SHA-256 transcript chain, enforced beacon-is-final rule, reproducible verification (PoK + pairing same-ratio + batched query-scaling + optional beacon pre-commitment check), self-run-refusing independent-contributor count, transcript-only verification, snarkjs/`groth16-solana` verifying-key export; driven by `mirror-cli ceremony ...`. NOT yet run for production: the deployed keys are still dev-setup keys |
 | gasless batch coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window scheduler, real-k floor gate, rotating fee-payer, normalized `TxProfile`, atomic crowd-tx composition (N+1 signer, ALT, `plan_settlements`), mockable RPC boundary |
 | pooled-action behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + `PlainTransfer` (soak baseline), Jupiter swap, jitoSOL stake adapters; bucketed amounts |
 | participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`fund-commit`/`status`/`ceremony`; prove rebuilds the path, proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback, `--proving-key` proves under a ceremony key), emits `SettleZk` |

@@ -248,6 +248,12 @@ pub fn contribute(
 /// See [`crate::beacon`] for what a beacon is for. It is recorded with
 /// [`EntropySource::Beacon`], so it never inflates the independent-contributor
 /// count.
+///
+/// **A beacon is final.** Once one is in the transcript, this function and
+/// [`contribute`] both refuse to append anything else, and [`crate::verify`]
+/// rejects a transcript where something was appended anyway. Allowing a step after
+/// the beacon would hand the last move straight back to whoever added it, which is
+/// the exact thing a beacon exists to prevent.
 pub fn contribute_beacon(
     transcript: &mut Transcript,
     key: &CeremonyKey,
@@ -282,6 +288,15 @@ fn apply(
             "contributor id must not be empty - it is bound into the proof of knowledge".into(),
         ));
     }
+    // A beacon closes the ceremony. Appending anything after it - another beacon or
+    // an entropy contribution - would give the appender the last move the beacon
+    // exists to take away, so it is refused here and rejected by `verify`.
+    if let Some(at) = transcript.first_beacon_index() {
+        return Err(CeremonyError::Contribution(format!(
+            "this ceremony was closed by the beacon at step {at}; a beacon is final, so no further \
+             step can be appended. Start a new ceremony if more contributions are needed."
+        )));
+    }
     let expected = expected_head_digest(transcript)?;
     if key.digest() != expected {
         return Err(CeremonyError::Contribution(format!(
@@ -309,10 +324,21 @@ fn apply(
 
     let prev_hash = transcript.head_hash()?;
     let index = transcript.contributions.len() as u32;
+
+    // The provenance is fixed BEFORE the proof is made, because the proof commits
+    // to it: a step's kind and provenance cannot be rewritten afterwards without
+    // invalidating it.
+    let provenance = Provenance {
+        machine_fingerprint: machine_fingerprint(),
+        entropy_source,
+        timestamp_unix: now_unix(),
+    };
+    let beacon_source = kind.beacon_source_bytes()?;
     let statement = pok::Statement {
         prev_hash: &prev_hash,
         index,
         contributor_id,
+        metadata: pok::Metadata::new(&kind, &beacon_source, &provenance),
         prev_delta_g1: prev_g1,
         prev_delta_g2: prev_g2,
         new_delta_g1: new_key.delta_g1(),
@@ -324,11 +350,7 @@ fn apply(
         index,
         contributor_id: contributor_id.to_string(),
         kind,
-        provenance: Provenance {
-            machine_fingerprint: machine_fingerprint(),
-            entropy_source,
-            timestamp_unix: now_unix(),
-        },
+        provenance,
         prev_hash: hexfmt::encode(&prev_hash),
         new_delta_g1: hexfmt::encode(&points::g1_bytes(&new_key.delta_g1())),
         new_delta_g2: hexfmt::encode(&points::g2_bytes(&new_key.delta_g2())),

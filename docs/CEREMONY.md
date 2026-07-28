@@ -103,6 +103,8 @@ key:
 ```
 R = prev_delta_g1 * k                          (k a fresh secret nonce)
 c = Fr( SHA-256( POK_TAG || prev_hash || index || contributor_id
+                 || kind_tag || beacon_source || beacon_iterations_exp
+                 || machine_fingerprint || entropy_source_tag || timestamp
                  || prev_delta_g1 || prev_delta_g2
                  || new_delta_g1  || new_delta_g2 || R ) )
 z = k + c * s
@@ -110,10 +112,18 @@ z = k + c * s
 
 Verification is `prev_delta_g1 * z == R + new_delta_g1 * c`.
 
-The challenge commits to the **running transcript hash**, the **contribution index**
-and the **contributor identifier**. So a proof cannot be moved to another position in
-the chain, cannot be replayed into a different ceremony, and cannot be re-attributed
-to a different operator: each of those changes `c`, and the check fails.
+The challenge commits to the **running transcript hash**, the **contribution index**,
+the **contributor identifier**, and the step's **kind and provenance**. So a proof
+cannot be moved to another position in the chain, cannot be replayed into a different
+ceremony, cannot be re-attributed to a different operator, and cannot be carried over
+to a step relabelled from "beacon" to "entropy contribution": each of those changes
+`c`, and the check fails.
+
+That binding stops anyone who does **not** know a step's delta ratio from relabelling
+it, which is everyone except that step's contributor. It does not stop the party who
+knows the ratio from re-proving the relabelled step - and for a beacon the ratio is a
+published value, so anybody can. Section 6 says what closes that, and what remains
+open.
 
 ### The transcript chain
 
@@ -133,6 +143,11 @@ h_{i+1} = SHA-256( ENTRY_TAG || h_i || index || contributor_id || kind
 
 The final `h_n` is the **ceremony hash**. It is the one value a coordinator should
 publish; anyone who later receives a transcript can recompute it and compare.
+
+The transcript format is at **version 2**. Version 1 did not bind the kind and
+provenance into the proof of knowledge and did not enforce the beacon-is-final rule
+below, so `verify` rejects a v1 transcript rather than re-reading it under rules it
+was never held to.
 
 ## 4. Running a ceremony
 
@@ -197,16 +212,17 @@ mirror-cli ceremony contribute \
   dropped. Rust cannot guarantee no copy survives in a register or in swap, so treat
   the *machine* as the thing to be trusted, and prefer one you are willing to power
   off afterwards.
-- `--id` is bound into the proof of knowledge. It is self-asserted (nothing binds it
-  to a real person), but it cannot be rewritten after the fact without invalidating
-  the contribution.
+- `--id` is bound into the proof of knowledge, along with the step's kind and
+  provenance. All of it is self-asserted (nothing binds it to a real person), but
+  none of it can be rewritten after the fact without invalidating the contribution.
 - `--deterministic-seed` exists for demos and tests. It makes the contribution
   reproducible, and therefore its toxic waste public; contributions made that way are
   flagged in the transcript and are never counted as independent contributors.
 
-Then hand the directory to the next contributor.
+Then hand the directory to the next contributor. Once the ceremony has been closed
+with a beacon (section 4.3) this command refuses, which is the point of a beacon.
 
-### 4.3 Optional: close with a beacon
+### 4.3 Close with a beacon
 
 Without a beacon, the last contributor can *grind*: try many candidate scalars and
 keep whichever final key suits them. A beacon removes that. Announce, in public and
@@ -222,9 +238,15 @@ mirror-cli ceremony beacon \
   --iterations-exp 20
 ```
 
-The scalar is SHA-256 iterated `2^iterations_exp` times over the source. Two honest
+The scalar is SHA-256 iterated `2^iterations_exp` times over the source. Three honest
 notes about this:
 
+- **A beacon is final, and this is enforced.** Once a beacon is in the transcript,
+  `contribute` and `beacon` both refuse to append anything else, and `verify` rejects
+  a transcript that has a step after the beacon or more than one beacon. Letting a
+  step follow the beacon would hand the last move straight back to whoever added it,
+  which is the exact thing the beacon removes. (Before this was enforced, a
+  post-beacon contribution verified.)
 - **The beacon adds no secrecy.** Its scalar is public and anyone can recompute it,
   which is exactly why the verifier can reproduce the whole beacon step point for
   point. It is never counted as an independent contributor.
@@ -233,41 +255,84 @@ notes about this:
   verification too. Its only purpose is to put wall-clock distance between the beacon
   value becoming public and the final key existing.
 
+**Publish the beacon source, not just the fact that you used one.** A verifier who
+holds the announced value can pass it to `verify` (section 4.4), and that is the only
+mechanical check that a step recorded as a secret contribution is not the public
+beacon scalar under another name. See section 6.
+
 ### 4.4 Anyone: verify
 
 ```sh
 mirror-cli ceremony verify \
   --dir ceremony/membership \
   --r1cs circuits/membership.r1cs \
-  --initial-zkey membership_0000.zkey
+  --initial-zkey membership_0000.zkey \
+  --beacon-source-hex <the value the ceremony announced> \
+  --beacon-iterations-exp 20
 ```
 
 `--r1cs` confirms the transcript is pinned to the circuit you think it is.
 `--initial-zkey` confirms the start of the chain is the deterministic output of
 `snarkjs groth16 setup` on the public inputs - so the ceremony is anchored to
 something reproducible rather than to a file the coordinator handed you.
+`--beacon-source-hex` / `--beacon-source-text` supply the pre-committed beacon value.
+Without it check 13 below cannot run at all, and check 12 can only recognize beacon
+sources the transcript itself records - which is exactly the set an attacker deletes
+when relabelling. The report says so in `beacon pre-commitment: NOT supplied`.
 
-Verification recomputes the entire chain and checks, in order:
+Verification recomputes the entire chain and runs these checks. The per-step ones
+(3 to 12) run in the order listed, so that is the order failures are reported in;
+13 is checked up front, when the pre-commitment is read.
 
 | # | Check | Catches |
 |---|-------|---------|
-| 1 | transcript version, phase-1 record parses, chain is non-empty | a malformed or empty "ceremony" |
+| 1 | transcript version, phase-1 record parses, chain is non-empty | a malformed or empty "ceremony", or a v1 transcript held to v1 rules |
 | 2 | initial key digest and delta points match the header | a substituted starting key |
-| 3 | `prev_hash` equals the running chain hash, at every step | reordering, splicing, editing |
-| 4 | `index` equals the position | renumbering |
-| 5 | recomputed entry hash equals the recorded one | any field edited without re-hashing |
-| 6 | the delta actually moved, and is not the point at infinity | null and degenerate contributions |
-| 7 | the Schnorr proof of knowledge verifies at this exact position and id | forged, replayed, or re-attributed contributions |
-| 8 | `e(prev_g1, new_g2) == e(new_g1, prev_g2)` | `delta_g2` moved by a different scalar than `delta_g1` |
-| 9 | beacon steps reproduce exactly from their published source | a beacon that was not actually applied |
-| 10 | final key digest and delta points match the last entry | truncation, a substituted final key |
-| 11 | every delta-independent part of the key is byte-identical to the initial key | tampering with `alpha`, `IC`, the `A`/`B` queries |
-| 12 | batched pairing check that `h_query` and `l_query` were divided by the accumulated ratio | a key that is not actually a valid key for the circuit |
+| 3 | nothing follows a beacon, and there is at most one | a contribution appended after the closing beacon |
+| 4 | `prev_hash` equals the running chain hash, at every step | reordering, splicing, editing |
+| 5 | `index` equals the position | renumbering |
+| 6 | recomputed entry hash equals the recorded one | any field edited without re-hashing |
+| 7 | `kind` and `entropy_source` agree about whether the step is a beacon | a half-finished relabelling |
+| 8 | the delta actually moved, and is not the point at infinity | null and degenerate contributions |
+| 9 | the Schnorr proof of knowledge verifies at this exact position, id, kind and provenance | forged, replayed, re-attributed, or relabelled contributions |
+| 10 | `e(prev_g1, new_g2) == e(new_g1, prev_g2)` | `delta_g2` moved by a different scalar than `delta_g1` |
+| 11 | beacon steps reproduce exactly from their published source | a beacon that was not actually applied |
+| 12 | no step applies a known beacon's scalar unless it is recorded as that beacon | a beacon relabelled into a "contributor" (needs the pre-commitment, or a beacon source already in the transcript) |
+| 13 | the recorded beacon is the pre-committed one (checked before the walk) | a ceremony closed on some other value than the one announced (needs the pre-commitment) |
+| 14 | final key digest and delta points match the last entry | truncation, a substituted final key |
+| 15 | every delta-independent part of the key is byte-identical to the initial key | tampering with `alpha`, `IC`, the `A`/`B` queries |
+| 16 | batched pairing check that `h_query` and `l_query` were divided by the accumulated ratio | a key that is not actually a valid key for the circuit |
 
 Every one of these rejections has a test in
 `crates/mirror-ceremony/tests/ceremony.rs`, including the sophisticated versions
-where the attacker re-hashes the whole chain after tampering so that only the algebra
-can object.
+where the attacker re-hashes the whole chain after tampering, and re-proves the step
+they edited, so that only the algebra or the beacon pre-commitment can object.
+
+### 4.4b Verifying a published transcript on its own
+
+A transcript is a few kilobytes; the proving keys next to it are megabytes. Someone
+who has only the published `transcript.json` can still run most of the list:
+
+```sh
+mirror-cli ceremony verify-transcript \
+  --file docs/ceremony-run/membership-transcript.json \
+  --beacon-source-text "mirror-pool demo beacon 2026-07-27" \
+  --beacon-iterations-exp 16
+```
+
+This runs checks 1 and 3 to 13 in full - the whole chain, every proof of knowledge,
+every same-ratio pairing, beacon reproduction, the beacon-is-final rule, the
+disguised-beacon check - and prints the same contributor count. It does **not** run
+2, 14, 15 or 16, because those compare against key files it does not have, and it
+prints `TRANSCRIPT VERIFIED (no key files: the key-level checks did NOT run)` rather
+than pretending otherwise.
+
+One consequence is worth being explicit about: the chain is walked from the delta
+points in the transcript header, and without a key file nothing ties those points to
+a real proving key. What a reader can still do without any key is compare the
+header's `initial_key_digest`, which the report prints, against a locally re-derived
+`snarkjs groth16 setup` output, since that step is deterministic. Everything after
+that is chained to the header, so anchoring the header anchors the run.
 
 One rejection deserves a note, because it is the one the algebra *cannot* make:
 
@@ -335,6 +400,12 @@ MIRROR_PROVE_LIVE=1 cargo test --release -p mirror-cli -- --ignored ceremony_key
 That test additionally asserts that a ceremony-key proof is **rejected** by the old
 dev verifying key, so it cannot pass by accidentally exercising the old key.
 
+With `MIRROR_PROVE_LIVE=1` set, a missing build artifact makes that test **fail**,
+naming what is missing. It used to return early and report success, which meant the
+one test whose job is to prove that a ceremony key works could pass having proved
+nothing. Without the flag it still skips, which is the case it exists for (CI has no
+circuit artifacts).
+
 `prove-check` covers the **membership** circuit. The transaction circuit's ceremony
 verifies and exports identically, but building a full 2-in/2-out JoinSplit witness is
 not something this command does, so its end-to-end proof check is not automated here.
@@ -357,7 +428,31 @@ Contributions are merged into one contributor when they share any of:
 Contributions are **never counted at all** when their scalar cannot be secret:
 
 - `Deterministic` entropy (a fixed seed), because the toxic waste is reproducible;
-- `Beacon` steps, because the scalar is public by construction.
+- `Beacon` steps, because the scalar is public by construction. A step counts only
+  when **both** the structural `kind` and the self-reported `entropy_source` say it
+  is not a beacon; if the two disagree the step is not counted and `verify` rejects
+  the whole transcript.
+
+### Why the labels can be trusted this far
+
+The count reads metadata, so the obvious attack is to edit the metadata. Three things
+stand in the way, in increasing order of how much they buy you:
+
+1. **The metadata is in the entry hash.** Editing it changes the chain hash, which is
+   caught unless the whole chain is re-hashed.
+2. **The metadata is in the proof of knowledge.** Re-hashing is not enough: the
+   Schnorr challenge commits to `kind`, the beacon source and exponent, the machine
+   fingerprint, the entropy-source tag and the timestamp. Relabelling any step
+   invalidates its proof. So nobody who lacks a step's delta ratio - which is
+   everybody except its contributor - can relabel a published transcript. **This is
+   what stops a third party from turning a closing beacon into an extra
+   "contributor"; before it was bound in, that worked.**
+3. **The pre-committed beacon value.** The one party who *does* know a step's ratio
+   can always re-prove it under a new label, and a beacon's ratio is public, so for a
+   beacon that party is everybody. The defence is not cryptographic, it is
+   evidential: pass the announced beacon value to `verify`, which recomputes its
+   scalar and rejects any step that applies it without being recorded as that beacon,
+   as well as a ceremony closed on a different value than the one announced.
 
 ### What this can and cannot detect
 
@@ -371,6 +466,13 @@ It is a guard against **accidental self-inflation**, not a Sybil defence:
 - Timestamps are self-reported. They are used only for advisory warnings (for
   instance "these two contributions are 2s apart, which is fast for an out-of-band
   handoff"), never to change the count.
+- **Without the beacon pre-commitment, no verifier can tell a public beacon scalar
+  from a secret one.** A scalar carries no evidence of where it came from; that is
+  information-theoretic, not a gap in the implementation. `verify` says so in its
+  report whenever the pre-commitment was not supplied, and refuses to imply more.
+- The operator who runs the whole ceremony chooses every scalar, so they can
+  manufacture any count they like. The number is an **upper bound** on distinct
+  secret holders. It is never a proof that there was one.
 
 It also errs conservatively in the other direction: where environments look alike,
 fingerprints collide and genuinely independent contributors get merged. **The count
@@ -396,7 +498,39 @@ prints.
 
 **The only thing that makes a ceremony trustworthy is having an external reason to
 believe in at least one participant.** Publish who they were, publish the ceremony
-hash, and let people check.
+hash, publish the beacon source, and let people check.
+
+## 6.1 The recorded demo run, and how to check it
+
+`docs/ceremony-run/` contains the transcripts of the demonstration run recorded in
+`docs/PROOF.md`: `membership-transcript.json` (7 KB) and
+`transaction-transcript.json` (6 KB). They are the actual files the commands
+produced, and `verify-transcript` (section 4.4b) checks them:
+
+```sh
+mirror-cli ceremony verify-transcript \
+  --file docs/ceremony-run/membership-transcript.json \
+  --beacon-source-text "mirror-pool demo beacon 2026-07-27" \
+  --beacon-iterations-exp 16
+```
+
+What that establishes and what it does not:
+
+- **Established:** the chain is intact, every proof of knowledge verifies at its
+  position under its own label, every step moved `delta_g2` by the same scalar as
+  `delta_g1`, the beacon reproduces from the published source, nothing follows it,
+  and no step is that beacon in disguise. The published ceremony hash is
+  recomputable from the file.
+- **Not established:** anything that needs the key files. The proving keys are 4.7 MB
+  and 11 MB, they are gitignored build artifacts, and they are not published, so a
+  third party cannot check the initial-key binding, the final-key binding, the
+  untouched-part equality or the query scaling for *this* run. Those checks are
+  exercised by the test suite and by `ceremony verify` on a local run; the committed
+  transcripts do not carry them.
+- **Not claimed at all:** that this run is a trustworthy setup. Every contribution
+  came from one machine, so the tool reports one independent contributor, and the
+  beacon source is a fixed demo string rather than a value nobody could predict. It
+  demonstrates the machinery. It is not a production ceremony.
 
 ## 7. On-disk format
 
@@ -428,7 +562,9 @@ G2 = x_c1_be(32) || x_c0_be(32) || y_c1_be(32) || y_c0_be(32)  (128 bytes)
 
 Transcripts are small and meant to be published. Key files are multi-megabyte build
 artifacts, so `ceremony/` and `*.mpk` are gitignored; publish `transcript.json` and
-the final ceremony hash separately.
+the final ceremony hash separately. The transcripts of this repo's demonstration run
+are published under `docs/ceremony-run/` (section 6.1); the keys they refer to are
+not, which bounds what a third party can check.
 
 ## 8. Why not write snarkjs `.zkey` files?
 
@@ -456,8 +592,20 @@ needs is exported in the standard formats.
   Intermediate keys are committed by digest; a party holding an intermediate file can
   check it, a verifier holding only the endpoints relies on the per-step proofs of
   knowledge plus the endpoint scaling check.
-- The independent-contributor count is a heuristic (section 6).
+- The independent-contributor count is a heuristic and an upper bound (section 6).
+- **A verifier without the pre-committed beacon value cannot distinguish a public
+  beacon scalar from a secret contributor's scalar.** Binding the label into the
+  proof of knowledge stops third parties from relabelling a published transcript, but
+  the party who knows a step's ratio can re-prove it under any label, and a beacon's
+  ratio is public. Supplying the announced beacon value to `verify` is the check;
+  where it is absent the report says the check did not run.
+- Nothing binds a contribution to a real-world identity. The count is over
+  self-asserted labels that cannot be *rewritten*, not over identities that have been
+  *established*.
 - No protocol can verify that a contributor destroyed their scalar.
+- The demonstration run in `docs/PROOF.md` publishes its transcripts but not its
+  keys, so the key-level checks are not third-party reproducible for that run
+  (section 6.1).
 - The Fiat-Shamir challenge reduces a 256-bit SHA-256 digest into the ~254-bit scalar
   field, which is very slightly non-uniform. The residual min-entropy is above 254
   bits, far more than Schnorr soundness needs here, but it is a deviation from

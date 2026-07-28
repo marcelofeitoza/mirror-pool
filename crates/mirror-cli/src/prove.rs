@@ -613,6 +613,48 @@ mod tests {
         );
     }
 
+    /// Resolve the build artifacts a live test needs, or FAIL.
+    ///
+    /// A live test runs only when the operator explicitly asks for it with
+    /// `MIRROR_PROVE_LIVE=1`. Once they have, a missing artifact is a broken
+    /// environment, not a reason to pass: silently returning early would let the
+    /// test that is supposed to prove something report success while proving
+    /// nothing. Skipping is only legitimate BEFORE the flag is honoured.
+    fn require_live_artifacts(paths: &[&Path]) {
+        let missing: Vec<String> = paths
+            .iter()
+            .filter(|p| !p.exists())
+            .map(|p| p.display().to_string())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "MIRROR_PROVE_LIVE=1 was set, so this test must actually run, but these build \
+             artifacts are missing: {}. Build them with `bash circuits/build.sh` (and download the \
+             powers-of-tau) or unset MIRROR_PROVE_LIVE to skip.",
+            missing.join(", ")
+        );
+    }
+
+    /// The guard above is the whole point of BUG 3: with the live flag set, an
+    /// absent artifact must fail loudly rather than green-test nothing.
+    #[test]
+    fn live_prove_test_fails_when_artifacts_are_absent() {
+        let present = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        require_live_artifacts(&[&present]);
+
+        let absent = Path::new(env!("CARGO_MANIFEST_DIR")).join("no-such-artifact.r1cs");
+        let panicked = std::panic::catch_unwind(|| require_live_artifacts(&[&present, &absent]));
+        let payload = panicked.expect_err("a missing artifact must fail, not pass");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| "<non-string panic>".into());
+        assert!(
+            message.contains("no-such-artifact.r1cs") && message.contains("must actually run"),
+            "the failure must name what is missing and why: {message}"
+        );
+    }
+
     /// End-to-end `prove` proof generation through snarkjs against the REAL
     /// zkey/wasm. Gated behind MIRROR_PROVE_LIVE=1 and #[ignore] so CI without
     /// node/snarkjs/zkey still passes; the Surfpool soak exercises it live.
@@ -865,12 +907,8 @@ mod tests {
         let r1cs = repo.join("circuits/membership.r1cs");
         let ptau = repo.join("circuits/pot16_final.ptau");
         let initial_zkey = repo.join("circuits/membership_0000.zkey");
-        for p in [&r1cs, &ptau, &initial_zkey] {
-            if !p.exists() {
-                eprintln!("missing {}; skipping", p.display());
-                return;
-            }
-        }
+        let wasm = repo.join("circuits/membership_js/membership.wasm");
+        require_live_artifacts(&[&r1cs, &ptau, &initial_zkey, &wasm]);
 
         // A scratch ceremony directory, so this exercises the real on-disk flow a
         // contributor follows rather than an in-memory shortcut.
@@ -953,14 +991,9 @@ mod tests {
             &path,
         );
         let expected = membership_public_inputs(&path.root, &nullifier_hash, &action_hash, epoch);
-        let proof_bytes = crate::prove_rust::prove_with_key(
-            &repo.join("circuits/membership_js/membership.wasm"),
-            &r1cs,
-            &key.pk,
-            &input,
-            &expected,
-        )
-        .expect("proving under the ceremony key must succeed and ark-verify");
+        let proof_bytes =
+            crate::prove_rust::prove_with_key(&wasm, &r1cs, &key.pk, &input, &expected)
+                .expect("proving under the ceremony key must succeed and ark-verify");
 
         // The ceremony key is NOT the committed dev key: a proof under it must be
         // rejected by the committed verifying key.

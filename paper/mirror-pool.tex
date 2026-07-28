@@ -645,10 +645,14 @@ The final $\delta$ is the product of all contributions, giving the standard
 \textbf{1-of-N honest} property: the setup is safe if \emph{at least one} contributor
 destroyed their scalar. Each contribution carries a Schnorr proof of knowledge of $s$
 with respect to the previous key's $\delta_{G_1}$, whose Fiat--Shamir challenge is
-bound to the running transcript hash, the contribution index, and the contributor
-identifier; without extractable knowledge of the ratio, a contributor could publish a
-point derived from an earlier step and cancel an honest contributor's randomness.
-Entries are chained with SHA-256 over a canonical, length-prefixed serialization.
+bound to the running transcript hash, the contribution index, the contributor
+identifier, and the step's kind and provenance; without extractable knowledge of the
+ratio, a contributor could publish a point derived from an earlier step and cancel an
+honest contributor's randomness, and without the kind binding a closing beacon could
+be relabelled into an extra ``contributor''. Entries are chained with SHA-256 over a
+canonical, length-prefixed serialization. A beacon is \emph{final}: the tool refuses
+to append after one, and verification rejects a chain that has a step after the
+beacon or more than one beacon.
 
 \paragraph{Verification is reproducible by anyone.} Given the transcript, the initial
 key, and the final key, \code{ceremony verify} recomputes the whole chain and checks
@@ -658,7 +662,8 @@ check $e(\delta_{G_1}^{prev}, \delta_{G_2}^{new}) = e(\delta_{G_1}^{new},
 published source, the endpoint digests, byte-equality of every $\delta$-independent
 part of the key, and a batched pairing check that $h$ and $l$ were divided by exactly
 the accumulated ratio. It rejects a tampered delta, a forged or replayed proof of
-knowledge, a reordered chain, and a truncated chain; each rejection has a test,
+knowledge, a reordered chain, a truncated chain, a step appended after the closing
+beacon, and a beacon relabelled as a contributor; each rejection has a test,
 including the sophisticated variants where the adversary re-hashes the entire chain
 after tampering so only the algebra can object. Truncating \emph{both} the transcript
 and the key is a legitimately shorter ceremony that the algebra cannot reject, which
@@ -673,7 +678,14 @@ contributed from one machine, the tool reports \textbf{1 independent contributor
 4 steps}, not 4. We state its limits explicitly: identifiers and fingerprints are
 self-asserted, so this is a guard against accidental self-inflation and
 \emph{not} a Sybil defence; it can also under-count when environments look alike,
-which is the safe direction.
+which is the safe direction. One limit is worth stating precisely, because it is
+information-theoretic rather than an implementation gap: a scalar carries no evidence
+of where it came from, so a verifier who does \emph{not} hold the pre-committed
+beacon value cannot distinguish a public beacon scalar from a secret contributor's.
+Binding the kind into the proof of knowledge stops any third party from relabelling a
+published transcript, and passing the announced beacon value to \code{ceremony verify}
+turns the remaining case into a mechanical check; where that value is absent, the
+report says the check did not run rather than implying it did.
 
 \paragraph{End-to-end.} \code{ceremony prove-check} runs a ceremony, generates a real
 membership proof under the ceremony-produced proving key, and verifies it with the
@@ -929,7 +941,8 @@ mirror-cli ceremony contribute -{}-dir \$D -{}-id "bob@example.net"\\
 mirror-cli ceremony beacon -{}-dir \$D -{}-id coordinator \textbackslash\\
 \ \ -{}-source-hex \emph{<pre-committed value>} -{}-iterations-exp 16\\
 mirror-cli ceremony verify -{}-dir \$D \textbackslash\\
-\ \ -{}-r1cs circuits/membership.r1cs -{}-initial-zkey circuits/membership\_0000.zkey\\
+\ \ -{}-r1cs circuits/membership.r1cs -{}-initial-zkey circuits/membership\_0000.zkey \textbackslash\\
+\ \ -{}-beacon-source-hex \emph{<pre-committed value>} -{}-beacon-iterations-exp 16\\
 mirror-cli ceremony prove-check -{}-dir \$D -{}-out-dir /tmp/cproof
 \end{quote}
 The last command proves the membership circuit under the ceremony-produced key and

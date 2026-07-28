@@ -13,12 +13,17 @@
 //! # each contributor, on their own machine, in turn
 //! mirror-cli ceremony contribute --dir ceremony/membership --id "alice@example.org"
 //!
-//! # optional closing step, from a value pre-committed in public
+//! # closing step, from a value pre-committed in public. FINAL: nothing can be
+//! # appended afterwards, and `contribute` refuses from here on.
 //! mirror-cli ceremony beacon --dir ceremony/membership --id coordinator \
 //!     --source-hex <block hash> --iterations-exp 20
 //!
-//! # anyone, at any time
-//! mirror-cli ceremony verify --dir ceremony/membership
+//! # anyone, at any time. Pass the pre-committed beacon value if you have it.
+//! mirror-cli ceremony verify --dir ceremony/membership \
+//!     --beacon-source-hex <block hash> --beacon-iterations-exp 20
+//!
+//! # anyone holding only the published transcript.json
+//! mirror-cli ceremony verify-transcript --file transcript.json
 //! ```
 //!
 //! `verify` is the point of the whole thing: it recomputes the chain from the
@@ -49,10 +54,13 @@ pub enum CeremonyCommand {
     Start(StartArgs),
     /// Add your own entropy and hand the ceremony on.
     Contribute(ContributeArgs),
-    /// Close the ceremony with a public, pre-committed beacon value.
+    /// Close the ceremony with a public, pre-committed beacon value. Final: no
+    /// step can be added afterwards.
     Beacon(BeaconArgs),
     /// Recompute and check the whole chain. Anyone can run this.
     Verify(VerifyArgs),
+    /// Check a published `transcript.json` on its own, with no key files.
+    VerifyTranscript(VerifyTranscriptArgs),
     /// Show what a ceremony directory currently contains.
     Status(StatusArgs),
     /// Export the ceremony's verifying key (snarkjs JSON + on-chain Rust).
@@ -138,9 +146,55 @@ pub struct VerifyArgs {
     /// which is what makes the start of the chain reproducible from public inputs.
     #[arg(long)]
     initial_zkey: Option<PathBuf>,
+    #[command(flatten)]
+    precommitment: PrecommitmentArgs,
     /// Emit the report as JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+pub struct VerifyTranscriptArgs {
+    /// The published `transcript.json`.
+    #[arg(long)]
+    file: PathBuf,
+    #[command(flatten)]
+    precommitment: PrecommitmentArgs,
+    /// Emit the report as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+/// The beacon value the ceremony announced in public before it closed.
+///
+/// Supplying it is what turns "the coordinator says step 3 was the beacon" into a
+/// check, and it is the only way a verifier can tell a public beacon scalar from a
+/// secret contributor's scalar.
+#[derive(Args)]
+pub struct PrecommitmentArgs {
+    /// The pre-committed public value, as hex.
+    #[arg(long, conflicts_with = "beacon_source_text")]
+    beacon_source_hex: Option<String>,
+    /// The pre-committed public value, as text.
+    #[arg(long)]
+    beacon_source_text: Option<String>,
+    /// The iteration exponent announced with it.
+    #[arg(long, default_value_t = 20)]
+    beacon_iterations_exp: u32,
+}
+
+impl PrecommitmentArgs {
+    /// The announced source bytes, if any were given.
+    fn source(&self) -> Result<Option<Vec<u8>>> {
+        match (&self.beacon_source_hex, &self.beacon_source_text) {
+            (Some(hex), _) => Ok(Some(
+                hexfmt::decode("beacon source", hex, None)
+                    .map_err(|e| anyhow!("--beacon-source-hex must be hex: {e}"))?,
+            )),
+            (None, Some(text)) => Ok(Some(text.as_bytes().to_vec())),
+            (None, None) => Ok(None),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -198,6 +252,7 @@ pub fn run(args: CeremonyArgs) -> Result<()> {
         CeremonyCommand::Contribute(a) => contribute(a),
         CeremonyCommand::Beacon(a) => beacon(a),
         CeremonyCommand::Verify(a) => run_verify(a),
+        CeremonyCommand::VerifyTranscript(a) => run_verify_transcript(a),
         CeremonyCommand::Status(a) => status(a),
         CeremonyCommand::ExportVk(a) => export_vk(a),
         CeremonyCommand::InspectPtau(a) => inspect_ptau(a),
@@ -310,6 +365,11 @@ fn beacon(args: BeaconArgs) -> Result<()> {
     println!(
         "secrecy: its scalar is public, so it is never counted as an independent contributor."
     );
+    println!();
+    println!("This ceremony is now CLOSED. No further step can be added to it, and `verify`");
+    println!("rejects a transcript that has one. Publish the beacon source alongside the final");
+    println!("transcript hash: a verifier who has it can check mechanically that no step in the");
+    println!("chain is this public scalar wearing a contributor's name.");
     Ok(())
 }
 
@@ -335,15 +395,42 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
         );
     }
 
-    let report = session.verify()?;
-    if args.json {
+    let source = args.precommitment.source()?;
+    let opts = verify_options(source.as_deref(), args.precommitment.beacon_iterations_exp);
+    let initial = session.load_initial_key()?;
+    let final_key = session.load_head_key()?;
+    let report = verify::verify_with(&session.transcript, &initial, &final_key, &opts)?;
+    emit_report(&report, args.json)
+}
+
+fn run_verify_transcript(args: VerifyTranscriptArgs) -> Result<()> {
+    let text = std::fs::read_to_string(&args.file)
+        .with_context(|| format!("reading {}", args.file.display()))?;
+    let transcript = mirror_ceremony::Transcript::from_json(&text)?;
+    let source = args.precommitment.source()?;
+    let opts = verify_options(source.as_deref(), args.precommitment.beacon_iterations_exp);
+    let report = verify::verify_transcript(&transcript, &opts)?;
+    emit_report(&report, args.json)
+}
+
+fn verify_options(source: Option<&[u8]>, iterations_exp: u32) -> verify::VerifyOptions<'_> {
+    verify::VerifyOptions {
+        beacon_precommitment: source.map(|source| verify::BeaconPrecommitment {
+            source,
+            iterations_exp,
+        }),
+    }
+}
+
+fn emit_report(report: &verify::Report, json: bool) -> Result<()> {
+    if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&report).context("serializing report")?
+            serde_json::to_string_pretty(report).context("serializing report")?
         );
         return Ok(());
     }
-    print_report(&report);
+    print_report(report);
     Ok(())
 }
 
@@ -366,6 +453,14 @@ fn status(args: StatusArgs) -> Result<()> {
         );
     }
     println!("head key file:       {}", session.head_key_path().display());
+    println!(
+        "closed by beacon:    {}",
+        if session.closed_by_beacon() {
+            "yes - no further step can be added"
+        } else {
+            "no - still open for contributions"
+        }
+    );
     println!();
     println!(
         "Run `mirror-cli ceremony verify --dir {}` to check it.",
@@ -386,10 +481,15 @@ fn export_vk(args: ExportVkArgs) -> Result<()> {
     let order_refs: Vec<&str> = order.iter().map(String::as_str).collect();
 
     let provenance = format!(
-        "From the {} ceremony: {} step(s), {} independent contributor(s), final transcript hash {}.",
+        "From the {} ceremony: {} step(s), {} independent contributor(s), {}, final transcript hash {}.",
         session.transcript.circuit,
         report.steps,
         report.independence.independent_contributors,
+        if report.closed_by_beacon {
+            "closed by beacon"
+        } else {
+            "NOT closed by a beacon"
+        },
         report.final_transcript_hash
     );
 
@@ -412,6 +512,14 @@ fn export_vk(args: ExportVkArgs) -> Result<()> {
     }
     println!();
     println!("{provenance}");
+    if !report.closed_by_beacon {
+        println!();
+        println!("WARNING: this ceremony has no closing beacon, so whoever made the last");
+        println!("contribution could have retried until the final key suited them. Close it with");
+        println!(
+            "`ceremony beacon` from a publicly pre-committed value before deploying this key."
+        );
+    }
     println!();
     println!("Deploying this key means replacing the program's embedded verifying key and");
     println!("redeploying. Until that happens, the deployed program still verifies against");
@@ -603,11 +711,31 @@ fn print_phase1(p: &ptau::Phase1Provenance) {
 }
 
 fn print_report(r: &verify::Report) {
-    println!("CEREMONY VERIFIED");
+    if r.key_checks {
+        println!("CEREMONY VERIFIED");
+    } else {
+        println!("TRANSCRIPT VERIFIED (no key files: the key-level checks did NOT run)");
+    }
     println!("  circuit:                 {}", r.circuit);
     println!("  r1cs sha256:             {}", r.circuit_r1cs_digest);
     println!("  steps:                   {}", r.steps);
     println!("  of which beacons:        {}", r.beacon_steps);
+    println!(
+        "  closed by beacon:        {}",
+        if r.closed_by_beacon {
+            "yes"
+        } else {
+            "NO - the last contributor could still grind the final key"
+        }
+    );
+    println!(
+        "  beacon pre-commitment:   {}",
+        if r.beacon_precommitment_checked {
+            "checked against the value you supplied"
+        } else {
+            "NOT supplied - a relabelled beacon cannot be ruled out"
+        }
+    );
     println!("  initial key digest:      {}", r.initial_key_digest);
     println!("  final key digest:        {}", r.final_key_digest);
     println!("  final transcript hash:   {}", r.final_transcript_hash);
@@ -659,6 +787,14 @@ fn print_report(r: &verify::Report) {
     println!("  contributor suffices, and all k colluding is enough to break it.");
     println!();
     println!("  {}", r.independence.caveat);
+    if !r.key_checks {
+        println!();
+        println!("WHAT THIS RUN DID NOT CHECK");
+        println!("  Without the key files this cannot check that the initial key is the one the");
+        println!("  header names, that the final key is the one the chain ends at, that the");
+        println!("  delta-independent parts of the key never moved, or that h_query/l_query were");
+        println!("  divided by the accumulated ratio. Run `ceremony verify --dir ...` for those.");
+    }
 }
 
 fn default_public_inputs(circuit: &str) -> Vec<String> {

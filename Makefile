@@ -8,7 +8,7 @@
 SURFPOOL_RPC ?= http://127.0.0.1:8899
 PROGRAM_MANIFEST := programs/mirror-pool/Cargo.toml
 
-.PHONY: all fmt fmt-check clippy test build build-sbf harness soak ceremony-test check clean
+.PHONY: all fmt fmt-check clippy test build build-sbf harness soak ceremony-test ceremony-verify-run check clean
 
 all: fmt-check clippy test build-sbf
 
@@ -36,9 +36,23 @@ build-sbf:
 # over the membership circuit, prove under the ceremony-produced key, and verify with
 # the on-chain groth16-solana verifier. Needs the gitignored circuit build artifacts
 # (bash circuits/build.sh) plus the powers-of-tau and the initial zkey. See
-# docs/CEREMONY.md.
+# docs/CEREMONY.md. With MIRROR_PROVE_LIVE=1 set, a missing artifact FAILS this
+# target rather than skipping, so a green run means it really ran.
 ceremony-test:
 	MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored ceremony_key --nocapture
+
+# Re-verify the published transcripts of the recorded demonstration run
+# (docs/ceremony-run/) the way a third party would: no key files, beacon
+# pre-commitment supplied. Needs a built mirror-cli.
+ceremony-verify-run:
+	cargo run -p mirror-cli -- ceremony verify-transcript \
+	  --file docs/ceremony-run/membership-transcript.json \
+	  --beacon-source-text "mirror-pool demo beacon 2026-07-27" \
+	  --beacon-iterations-exp 16
+	cargo run -p mirror-cli -- ceremony verify-transcript \
+	  --file docs/ceremony-run/transaction-transcript.json \
+	  --beacon-source-text "mirror-pool demo beacon 2026-07-27" \
+	  --beacon-iterations-exp 16
 
 # Run the adversarial evaluation harness (prints the attacker-advantage table).
 harness:

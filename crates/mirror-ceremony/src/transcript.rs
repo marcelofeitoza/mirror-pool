@@ -35,11 +35,16 @@ use crate::ptau::Phase1Provenance;
 use crate::Result;
 
 /// Transcript format version.
-pub const TRANSCRIPT_VERSION: u32 = 1;
+///
+/// Version 2 binds the contribution kind and provenance into the proof of
+/// knowledge, and makes a beacon final. A version-1 transcript is rejected rather
+/// than re-interpreted: it was produced under weaker rules, and silently accepting
+/// it would let a v1 transcript claim v2 guarantees.
+pub const TRANSCRIPT_VERSION: u32 = 2;
 
-const GENESIS_TAG: &[u8] = b"mirror-pool/ceremony/v1/genesis";
-const ENTRY_TAG: &[u8] = b"mirror-pool/ceremony/v1/entry";
-pub(crate) const POK_TAG: &[u8] = b"mirror-pool/ceremony/v1/pok";
+const GENESIS_TAG: &[u8] = b"mirror-pool/ceremony/v2/genesis";
+const ENTRY_TAG: &[u8] = b"mirror-pool/ceremony/v2/entry";
+pub(crate) const POK_TAG: &[u8] = b"mirror-pool/ceremony/v2/pok";
 
 /// How the contributor's delta scalar was sampled. Recorded because it decides
 /// whether a contribution can be counted as an *independent* one at all.
@@ -64,7 +69,9 @@ impl EntropySource {
         matches!(self, EntropySource::Os | EntropySource::OsPlusUser)
     }
 
-    fn tag(self) -> u8 {
+    /// The one-byte code this variant contributes to every hash that binds it: the
+    /// entry hash and the proof-of-knowledge challenge.
+    pub fn tag(self) -> u8 {
         match self {
             EntropySource::Os => 0,
             EntropySource::OsPlusUser => 1,
@@ -109,10 +116,38 @@ pub enum ContributionKind {
 }
 
 impl ContributionKind {
-    fn tag(&self) -> u8 {
+    /// The one-byte code this variant contributes to every hash that binds it: the
+    /// entry hash and the proof-of-knowledge challenge. Because the challenge
+    /// commits to it, a step cannot be relabelled without invalidating its proof -
+    /// unless the relabeller knows that step's delta ratio, which for a beacon is
+    /// public. See [`crate::verify`] for what closes that residual gap.
+    pub fn tag(&self) -> u8 {
         match self {
             ContributionKind::Entropy => 0,
             ContributionKind::Beacon { .. } => 1,
+        }
+    }
+
+    /// Whether this step is recorded as a beacon.
+    pub fn is_beacon(&self) -> bool {
+        matches!(self, ContributionKind::Beacon { .. })
+    }
+
+    /// The beacon's iteration exponent, or 0 for an entropy step.
+    pub fn beacon_iterations_exp(&self) -> u32 {
+        match self {
+            ContributionKind::Beacon { iterations_exp, .. } => *iterations_exp,
+            ContributionKind::Entropy => 0,
+        }
+    }
+
+    /// The beacon's decoded source bytes, or an empty vector for an entropy step.
+    pub fn beacon_source_bytes(&self) -> Result<Vec<u8>> {
+        match self {
+            ContributionKind::Beacon { source, .. } => {
+                hexfmt::decode("beacon source", source, None)
+            }
+            ContributionKind::Entropy => Ok(Vec::new()),
         }
     }
 }
@@ -170,6 +205,27 @@ impl ContributionRecord {
     /// The contributor identifier, normalized for comparison (trimmed, lowercased).
     pub fn normalized_id(&self) -> String {
         self.contributor_id.trim().to_lowercase()
+    }
+
+    /// Whether the step's `kind` and its self-reported `entropy_source` tell the
+    /// same story about whether it is a beacon.
+    ///
+    /// The two fields are redundant on purpose, and a half-finished relabelling
+    /// shows up here. [`crate::verify`] rejects a record where they disagree, and
+    /// [`crate::independence`] never counts one.
+    pub fn kind_matches_provenance(&self) -> bool {
+        self.kind.is_beacon() == (self.provenance.entropy_source == EntropySource::Beacon)
+    }
+
+    /// Whether this step may be counted as an independent secret contributor.
+    ///
+    /// Both signals must agree that it is not a beacon, and the entropy source must
+    /// be one whose scalar can actually be secret. A beacon is never countable: its
+    /// scalar is a published value.
+    pub fn countable_as_independent(&self) -> bool {
+        !self.kind.is_beacon()
+            && self.kind_matches_provenance()
+            && self.provenance.entropy_source.can_be_independent()
     }
 }
 
@@ -246,6 +302,24 @@ impl Transcript {
         Ok(h.finish())
     }
 
+    /// The position of the first beacon in the chain, if there is one.
+    ///
+    /// A beacon closes a ceremony: nothing may be appended after it, and there is
+    /// at most one. Both [`crate::contribute`] and [`crate::verify`] enforce that
+    /// against this, so the two cannot drift apart.
+    pub fn first_beacon_index(&self) -> Option<usize> {
+        self.contributions.iter().position(|c| c.kind.is_beacon())
+    }
+
+    /// Whether the chain is closed: its last step, and only its last step, is a
+    /// beacon.
+    pub fn closed_by_beacon(&self) -> bool {
+        match self.first_beacon_index() {
+            Some(i) => i + 1 == self.contributions.len(),
+            None => false,
+        }
+    }
+
     /// The current head of the chain: the last entry's hash, or the genesis hash
     /// when there are no contributions yet.
     pub fn head_hash(&self) -> Result<[u8; 32]> {
@@ -255,28 +329,37 @@ impl Transcript {
         }
     }
 
+    /// The delta points the header declares for the phase-1-derived initial key.
+    ///
+    /// These are self-declared: [`crate::verify::verify`] checks them against a
+    /// real key file, while [`crate::verify::verify_transcript`] can only take them
+    /// as the chain's starting point and says so in its report.
+    pub fn header_deltas(&self) -> Result<(G1Affine, G2Affine)> {
+        Ok((
+            points::g1_from_bytes(
+                "initial delta_g1",
+                &hexfmt::decode(
+                    "initial_delta_g1",
+                    &self.initial_delta_g1,
+                    Some(points::G1_LEN),
+                )?,
+            )?,
+            points::g2_from_bytes(
+                "initial delta_g2",
+                &hexfmt::decode(
+                    "initial_delta_g2",
+                    &self.initial_delta_g2,
+                    Some(points::G2_LEN),
+                )?,
+            )?,
+        ))
+    }
+
     /// The delta points at the head of the chain.
     pub fn head_deltas(&self) -> Result<(G1Affine, G2Affine)> {
         match self.contributions.last() {
             Some(last) => last.deltas(),
-            None => Ok((
-                points::g1_from_bytes(
-                    "initial delta_g1",
-                    &hexfmt::decode(
-                        "initial_delta_g1",
-                        &self.initial_delta_g1,
-                        Some(points::G1_LEN),
-                    )?,
-                )?,
-                points::g2_from_bytes(
-                    "initial delta_g2",
-                    &hexfmt::decode(
-                        "initial_delta_g2",
-                        &self.initial_delta_g2,
-                        Some(points::G2_LEN),
-                    )?,
-                )?,
-            )),
+            None => self.header_deltas(),
         }
     }
 
@@ -299,14 +382,8 @@ pub fn entry_hash(prev_hash: &[u8; 32], rec: &ContributionRecord) -> Result<[u8;
     h.u32(rec.index);
     h.text(&rec.contributor_id);
     h.byte(rec.kind.tag());
-    if let ContributionKind::Beacon {
-        source,
-        iterations_exp,
-    } = &rec.kind
-    {
-        h.bytes(&hexfmt::decode("beacon source", source, None)?);
-        h.u32(*iterations_exp);
-    }
+    h.bytes(&rec.kind.beacon_source_bytes()?);
+    h.u32(rec.kind.beacon_iterations_exp());
     h.text(&rec.provenance.machine_fingerprint);
     h.byte(rec.provenance.entropy_source.tag());
     h.u64(rec.provenance.timestamp_unix);

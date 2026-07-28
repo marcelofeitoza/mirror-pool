@@ -94,7 +94,7 @@ honest against the tree.
 | Confidential value pool (on-chain) | `programs/mirror-pool` | **Implemented** - `InitValuePool` + `Transact`: own Poseidon value-note accumulator + root history + vault, on-chain Groth16 JoinSplit verify, nullifier PDAs, deposit/withdraw per `publicAmount`, fixed-denomination mode. Amounts never in cleartext except public deposit/withdraw. |
 | Confidential notes + client ops | `crates/mirror-core` + `mirror-cli` + `mirror-coordinator` | **Implemented** - ECIES encrypted notes + `scan` discovery; `value-keygen`/`shield`/`transfer`/`unshield` (pure-Rust ark-groth16 prove + emit, no Node); gasless `submit_transact` (transfer/unshield relay-only signed = the unlinkability). |
 | Confidential soak | `crates/mirror-soak` | **Implemented** - live shield -> hidden-amount transfer -> unshield + fixed-denom + adversarial, 25/25 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
-| Trusted-setup ceremony | `crates/mirror-ceremony` + `mirror-cli ceremony` | **Implemented** - distributable multi-party Groth16 phase-2 ceremony for both circuits: public phase-1 import + provenance reader, delta re-randomization, Schnorr proof of knowledge bound to the contributor id and the running transcript hash, SHA-256 transcript chain, reproducible verification (rejects tampered deltas, forged/replayed proofs, reordered and truncated chains - each tested), and an independent-contributor count that refuses to count self-runs. `ceremony prove-check` proves the membership circuit under a ceremony key and the on-chain `groth16-solana` verifier accepts it. **No production ceremony has been run: the deployed keys are still dev-setup keys.** See [`docs/CEREMONY.md`](docs/CEREMONY.md). |
+| Trusted-setup ceremony | `crates/mirror-ceremony` + `mirror-cli ceremony` | **Implemented** - distributable multi-party Groth16 phase-2 ceremony for both circuits: public phase-1 import + provenance reader, delta re-randomization, Schnorr proof of knowledge bound to the contributor id, the position in the chain and the step's kind and provenance, SHA-256 transcript chain, an enforced beacon-is-final rule, reproducible verification (rejects tampered deltas, forged/replayed proofs, reordered and truncated chains, post-beacon steps and relabelled beacons - each tested), and an independent-contributor count that refuses to count self-runs. `ceremony prove-check` proves the membership circuit under a ceremony key and the on-chain `groth16-solana` verifier accepts it; `ceremony verify-transcript` checks a published transcript with no key files. The demonstration run's transcripts are committed under `docs/ceremony-run/`. **No production ceremony has been run: the deployed keys are still dev-setup keys.** See [`docs/CEREMONY.md`](docs/CEREMONY.md). |
 
 "Implemented" means the component's core logic is complete and tested. The host
 workspace tests, 42 on-chain mollusk tests, `build-sbf`, and the two live Surfpool
@@ -260,9 +260,11 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   measure 28.80 (90.0% of nominal), with the residual 10% published rather than
   rounded away, and 7.66 if you use the same pool naively.
 - [`docs/CEREMONY.md`](docs/CEREMONY.md) - the multi-party Groth16 phase-2
-  trusted-setup ceremony: how to contribute, how to verify somebody else's, what the
-  beacon is for, how the independent-contributor count refuses to count self-runs,
-  and exactly what 1-of-N honest does and does not give you.
+  trusted-setup ceremony: how to contribute, how to verify somebody else's, why a
+  beacon is final and how that is enforced, how the independent-contributor count
+  refuses to count self-runs and what it still cannot rule out without the
+  pre-committed beacon value, and exactly what 1-of-N honest does and does not give
+  you.
 - [`docs/PROOF.md`](docs/PROOF.md) - the live Surfpool soak: both paths + the
   adversarial cases, with transaction signatures and on-chain assertions.
 - [`paper/mirror-pool.pdf`](paper/mirror-pool.pdf) - the design paper: the

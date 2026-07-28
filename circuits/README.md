@@ -129,10 +129,11 @@ A real multi-party **phase-2 ceremony is implemented** in
 `crates/mirror-ceremony`, driven from `mirror-cli ceremony ...`, and documented in
 [`../docs/CEREMONY.md`](../docs/CEREMONY.md). It imports a public phase-1
 powers-of-tau, re-randomizes `delta` per contribution with a Schnorr proof of
-knowledge bound to the contributor, chains the transcript with SHA-256, verifies
-the whole chain with pairing same-ratio checks anyone can reproduce, and reports a
-conservative independent-contributor count that refuses to count self-runs. The
-short version, per circuit:
+knowledge bound to the contributor and to the step's kind and provenance, chains the
+transcript with SHA-256, treats the closing beacon as final (nothing may follow it),
+verifies the whole chain with pairing same-ratio checks anyone can reproduce, and
+reports a conservative independent-contributor count that refuses to count self-runs.
+The short version, per circuit:
 
 ```sh
 # phase 1: a PUBLIC powers-of-tau. Check what is in it first.
@@ -145,10 +146,14 @@ mirror-cli ceremony start --circuit membership --dir ceremony/membership \
   --r1cs membership.r1cs --ptau <public>.ptau --initial-zkey membership_0000.zkey
 mirror-cli ceremony contribute --dir ceremony/membership --id "alice@example.org"
 # ... more contributors, each on their own machine ...
+# closes the ceremony: nothing can be appended after this
 mirror-cli ceremony beacon --dir ceremony/membership --id coordinator \
   --source-hex <pre-committed public value> --iterations-exp 20
+# pass the pre-committed value back in: it is what lets a verifier check that no
+# step counted as a contributor is the public beacon scalar under another name
 mirror-cli ceremony verify --dir ceremony/membership \
-  --r1cs membership.r1cs --initial-zkey membership_0000.zkey
+  --r1cs membership.r1cs --initial-zkey membership_0000.zkey \
+  --beacon-source-hex <pre-committed public value> --beacon-iterations-exp 20
 mirror-cli ceremony export-vk --dir ceremony/membership \
   --out-json artifacts/verification_key.json --out-rust ../programs/mirror-pool/src/vk.rs
 ```

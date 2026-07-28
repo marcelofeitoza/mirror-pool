@@ -111,7 +111,17 @@ impl Session {
             .map_err(|e| CeremonyError::io(format!("writing {}", path.display()), e))
     }
 
+    /// Whether the ceremony has been closed by its beacon.
+    ///
+    /// A closed ceremony accepts no further step: [`Session::contribute`] and
+    /// [`Session::beacon`] both refuse, because [`contribute::contribute`] does.
+    pub fn closed_by_beacon(&self) -> bool {
+        self.transcript.closed_by_beacon()
+    }
+
     /// Add an entropy contribution and write out the new key and transcript.
+    ///
+    /// Refuses once the ceremony has been closed by a beacon.
     pub fn contribute(
         &mut self,
         contributor_id: &str,
@@ -122,7 +132,8 @@ impl Session {
         self.finish_step(&out.key, &out.record)
     }
 
-    /// Add a beacon step and write out the new key and transcript.
+    /// Add a beacon step and write out the new key and transcript. This closes the
+    /// ceremony: nothing can be appended afterwards.
     pub fn beacon(
         &mut self,
         contributor_id: &str,

@@ -124,8 +124,15 @@ pub enum Check {
     /// A contribution left delta unchanged (a null contribution) or set it to the
     /// identity.
     NullContribution,
-    /// A beacon step's delta could not be reproduced from its published source.
+    /// A beacon step's delta could not be reproduced from its published source, or
+    /// a step that is not recorded as a beacon applies a known beacon's scalar.
     Beacon,
+    /// Something was appended after the beacon that closed the ceremony, or the
+    /// chain contains more than one beacon.
+    BeaconFinal,
+    /// A step's `kind` and its self-reported `entropy_source` disagree about whether
+    /// it is a beacon.
+    KindConsistency,
     /// The final key matches the digest and delta points of the last entry.
     FinalKey,
     /// A part of the key that a contribution must never touch was modified.
@@ -148,6 +155,8 @@ impl fmt::Display for Check {
             Check::SameRatio => "delta same-ratio pairing check",
             Check::NullContribution => "non-null contribution",
             Check::Beacon => "beacon reproducibility",
+            Check::BeaconFinal => "beacon-is-final rule",
+            Check::KindConsistency => "kind/provenance agreement",
             Check::FinalKey => "final-key binding",
             Check::FixedPart => "untouched-key-part equality",
             Check::QueryScaling => "h_query/l_query scaling pairing check",

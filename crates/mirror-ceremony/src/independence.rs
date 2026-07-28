@@ -23,7 +23,25 @@
 //!
 //! - **Deterministic** contributions: the scalar comes from a fixed seed, so its
 //!   toxic waste is reproducible by anyone reading the seed.
-//! - **Beacon** steps: the scalar is public by construction.
+//! - **Beacon** steps: the scalar is public by construction. A step counts only
+//!   when BOTH signals - the structural `kind` and the self-reported
+//!   `entropy_source` - say it is not a beacon. A step whose two signals disagree
+//!   is never counted, and [`crate::verify`] rejects it outright.
+//!
+//! # Why the metadata can be trusted this far, and no further
+//!
+//! Every field this module reads is bound into the step's proof of knowledge
+//! ([`crate::pok`]), so it cannot be rewritten in a published transcript by anyone
+//! who does not know that step's delta ratio. That is what stops a third party from
+//! taking a finished ceremony and relabelling its closing beacon into a fourth
+//! "contributor".
+//!
+//! It does not stop the party who KNOWS a step's ratio from re-proving it under a
+//! different label, and a beacon's ratio is public by design. The mechanical
+//! defence against that is [`crate::verify::VerifyOptions::beacon_precommitment`]:
+//! a verifier holding the announced beacon value recomputes its scalar and rejects
+//! any step that applies it without being recorded as that beacon. Without the
+//! pre-commitment, no verifier can tell the difference, and the report says so.
 //!
 //! # What it CANNOT detect
 //!
@@ -36,6 +54,9 @@
 //! - Contributions from `n` different machines that one person controls look
 //!   exactly like contributions from `n` different people.
 //! - Timestamps are self-reported and are used only for advisory warnings.
+//! - An operator who runs the whole ceremony chooses every scalar, so they can
+//!   always manufacture whatever count they want. The number is an upper bound on
+//!   distinct secret holders, never a proof of one.
 //!
 //! It also errs conservatively in the other direction: where the environment
 //! exposes nothing distinguishing, fingerprints collide and genuinely independent
@@ -50,9 +71,10 @@ use serde::Serialize;
 use crate::transcript::{ContributionRecord, EntropySource, Transcript};
 
 /// The standing caveat, carried in every report so it travels with the number.
-pub const CAVEAT: &str = "Heuristic against accidental self-inflation, NOT a Sybil defence: \
-contributor identifiers and machine fingerprints are self-asserted, so a determined operator \
-can fake any number of them. It can also under-count when environments look alike.";
+pub const CAVEAT: &str = "Upper bound on distinct secret holders, and a heuristic against \
+accidental self-inflation - NOT a Sybil defence: contributor identifiers and machine fingerprints \
+are self-asserted, and the operator of a ceremony picks every scalar, so a determined operator can \
+fake any number of them. It can also under-count when environments look alike.";
 
 /// Contributions judged to come from one party.
 #[derive(Debug, Clone, Serialize)]
@@ -72,11 +94,12 @@ pub struct Group {
 pub struct IndependenceReport {
     /// Every step in the chain.
     pub total_steps: usize,
-    /// Steps whose scalar could actually be secret.
+    /// Steps whose scalar could actually be secret: not a beacon by either signal,
+    /// and drawn from OS randomness rather than a fixed seed.
     pub secret_steps: usize,
     /// Steps derived from a fixed seed.
     pub deterministic_steps: usize,
-    /// Beacon steps.
+    /// Steps that either are recorded as a beacon or report beacon provenance.
     pub beacon_steps: usize,
     /// The number this module exists to produce: distinct parties that could have
     /// destroyed a secret.
@@ -90,6 +113,12 @@ pub struct IndependenceReport {
 }
 
 /// Assess a transcript.
+///
+/// **Only meaningful for a transcript [`crate::verify`] has accepted.** This
+/// function reads labels; it does not check a single proof of knowledge, so on its
+/// own it cannot tell an edited transcript from an honest one. What makes the labels
+/// hard to edit is the proof of knowledge they are bound into, and that is verified
+/// there, not here. `verify` runs the whole chain first and only then calls this.
 pub fn assess(transcript: &Transcript) -> IndependenceReport {
     let steps = &transcript.contributions;
     let n = steps.len();
@@ -127,7 +156,7 @@ pub fn assess(transcript: &Transcript) -> IndependenceReport {
         };
         group_positions[slot].push(i);
         groups[slot].members.push(step.index);
-        if step.provenance.entropy_source.can_be_independent() {
+        if step.countable_as_independent() {
             groups[slot].counted = true;
         }
     }
@@ -146,19 +175,32 @@ pub fn assess(transcript: &Transcript) -> IndependenceReport {
 
     let secret_steps = steps
         .iter()
-        .filter(|s| s.provenance.entropy_source.can_be_independent())
+        .filter(|s| s.countable_as_independent())
         .count();
     let deterministic_steps = steps
         .iter()
         .filter(|s| s.provenance.entropy_source == EntropySource::Deterministic)
         .count();
+    // A step counts as a beacon if EITHER signal says so, so a half-finished
+    // relabelling cannot hide one.
     let beacon_steps = steps
         .iter()
-        .filter(|s| s.provenance.entropy_source == EntropySource::Beacon)
+        .filter(|s| s.kind.is_beacon() || s.provenance.entropy_source == EntropySource::Beacon)
+        .count();
+    let inconsistent_steps = steps
+        .iter()
+        .filter(|s| !s.kind_matches_provenance())
         .count();
     let independent_contributors = groups.iter().filter(|g| g.counted).count();
 
     let mut warnings = Vec::new();
+    if inconsistent_steps > 0 {
+        warnings.push(format!(
+            "{inconsistent_steps} step(s) record a kind and an entropy source that disagree about \
+             whether they are a beacon; they are NOT counted, and `verify` rejects such a transcript \
+             outright"
+        ));
+    }
     if deterministic_steps > 0 {
         warnings.push(format!(
             "{deterministic_steps} step(s) used a fixed seed; their toxic waste is reproducible and \
@@ -231,8 +273,8 @@ fn timing_warnings(steps: &[ContributionRecord]) -> Vec<String> {
         }
         let gap = b.provenance.timestamp_unix - a.provenance.timestamp_unix;
         if gap < IMPLAUSIBLE_GAP_SECS
-            && a.provenance.entropy_source.can_be_independent()
-            && b.provenance.entropy_source.can_be_independent()
+            && a.countable_as_independent()
+            && b.countable_as_independent()
         {
             out.push(format!(
                 "contributions {} and {} are {gap}s apart, which is fast for an out-of-band handoff \

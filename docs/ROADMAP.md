@@ -101,19 +101,23 @@ on-chain syscall Poseidon, and the circuit agree byte-for-byte.
 A distributable multi-party Groth16 **phase-2** ceremony, in pure Rust, for both
 circuits: import a PUBLIC phase-1 powers-of-tau (the file's own contributor list is
 read back out of it), re-randomize `delta` per contribution with a Schnorr proof of
-knowledge bound to the contributor identifier and the running transcript hash, chain
-the whole thing with SHA-256 over a canonical serialization, and verify it with
-pairing same-ratio checks anyone can reproduce. Verification rejects a tampered
-delta, a forged or replayed proof of knowledge, a reordered chain and a truncated
-chain, each with its own test. The reported number is an **independent-contributor**
-count that refuses to count self-runs, deterministic contributions or beacons, and
-that documents precisely what it cannot detect.
+knowledge bound to the contributor identifier, the position in the chain, and the
+step's kind and provenance, chain the whole thing with SHA-256 over a canonical
+serialization, and verify it with pairing same-ratio checks anyone can reproduce.
+Verification rejects a tampered delta, a forged or replayed proof of knowledge, a
+reordered chain, a truncated chain, a step appended after the closing beacon and a
+beacon relabelled as a contributor, each with its own test. The reported number is an
+**independent-contributor** count that refuses to count self-runs, deterministic
+contributions or beacons, and that documents precisely what it cannot detect - in
+particular that without the pre-committed beacon value a public beacon scalar and a
+secret one are indistinguishable.
 
-Driven from `mirror-cli ceremony start | contribute | beacon | verify | export-vk |
-inspect-ptau | prove-check`. `prove-check` is the decisive one: it proves the
-membership circuit under a ceremony-produced key and runs the EXACT on-chain
-`groth16-solana` verifier over the result against the ceremony-exported verifying
-key. Full guide in `docs/CEREMONY.md`.
+Driven from `mirror-cli ceremony start | contribute | beacon | verify |
+verify-transcript | export-vk | inspect-ptau | prove-check`. `prove-check` is the
+decisive one: it proves the membership circuit under a ceremony-produced key and runs
+the EXACT on-chain `groth16-solana` verifier over the result against the
+ceremony-exported verifying key. Full guide in `docs/CEREMONY.md`; the demonstration
+run's transcripts are committed under `docs/ceremony-run/`.
 
 **What is not yet done:** no production ceremony has been *run*. The committed and
 deployed verifying keys still come from the insecure dev setup.
@@ -228,8 +232,9 @@ and its trusted setup.
 The ceremony itself is **built** (see "The trusted-setup ceremony" above and
 `docs/CEREMONY.md`). What remains is operational: recruit contributors who are
 independent of the project and of each other, run the chain for both circuits with a
-publicly pre-committed beacon, publish the transcripts and the ceremony hashes, then
-export the verifying keys and redeploy the program with them.
+publicly pre-committed beacon, publish the transcripts, the ceremony hashes AND the
+beacon source (a verifier needs it to check that no counted step is the beacon under
+another name), then export the verifying keys and redeploy the program with them.
 
 Until that is done the committed and deployed verifying keys are still the dev-setup
 keys, whose toxic waste is public by construction. The circuits and the on-chain
@@ -304,7 +309,7 @@ settlement trace.
 | Adversarial harness (FIFO/amount/gas-payer/fingerprint, real k) | Built |
 | Anti-Sybil entry fee + crowd-path dwell reward | Built |
 | Membership circuit + dev/test trusted setup + vendored verifying key | Built |
-| Multi-party phase-2 ceremony: delta re-randomization, Schnorr PoK, SHA-256 transcript, reproducible verify, self-run-refusing contributor count | Built |
+| Multi-party phase-2 ceremony: delta re-randomization, Schnorr PoK bound to kind and provenance, SHA-256 transcript, enforced beacon-is-final rule, reproducible verify (with optional beacon pre-commitment check), transcript-only verify, self-run-refusing contributor count | Built |
 | Confidential-value layer: ValuePool + 2-in/2-out JoinSplit `Transact` (shield/transfer/unshield) | Built |
 | Confidential JoinSplit circuit + dev/test setup + vendored verifying key | Built |
 | Value notes + encrypted-note discovery (ECIES, viewing key, `scan`) | Built |
