@@ -18,7 +18,12 @@ Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
 > behavioral and confidential mechanics on a live public cluster); it is NOT
 > evidence about the verifying-key registry. The program was NOT redeployed for
 > this change, and the soak drivers, though updated to publish the keys and pass
-> the accounts, have not been re-run against a public cluster since.
+> the accounts, have not been re-run against a public cluster since. The
+> behavioral soak WAS re-run end to end against a local Surfpool on a fresh
+> deployment of the current bytecode and passed 18/18 (the extra assertion being
+> the verifying-key publication); those local-validator signatures are recorded
+> in [`VK_REGISTRY.md`](VK_REGISTRY.md) section 8 and deliberately NOT merged
+> into the tables below, which belong to the earlier program.
 
 > **These are records of runs, not descriptions of the current tree.** Both runs
 > predate the move to in-process pure-Rust Groth16 proving, so several assertion

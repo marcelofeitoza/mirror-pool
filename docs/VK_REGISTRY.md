@@ -309,7 +309,81 @@ derives it itself.
 
 ---
 
-## 8. Status of the published devnet deployment
+## 8. Live check on a local validator
+
+The mollusk suite runs the real compiled SBF bytecode, so it already exercises
+account ownership, PDA derivation, the `sol_sha256` syscall and the create-account
+CPI. What it does not exercise is transaction assembly and the shipped CLI. That
+part was checked against a running Surfpool (a local mainnet mirror, treated as
+mainnet by this repo's convention), on a fresh deployment of the current
+bytecode:
+
+```text
+program GQJPJ51FMYRw2VeQ2cSvGZzJfckjjEBEvFNxCDggcnYB   (local Surfpool, fresh deploy)
+
+circuit       registry PDA                                    len  lamports  bump
+membership    F8WXC9XNj8hABebMqXb72DbMwvSK8LAdiVJXbfikyWRT    773  6270960   252
+transaction   CoZqWcnKaLZ94BAiqGJxtZkq3Ar3FKzUTUjXCRUXMYA9    965  7607280   255
+association   4U72nGfbWGPeuNFJJobTPKPxmna4quTNLm71HDg4tdhp    837  6716400   255
+```
+
+Each account came back program-owned, `version = 1`, the right `circuit_id`,
+`reserved = 0`, and its stored key hashing to exactly the constant in
+`vk_digest.rs`:
+
+```text
+membership   108733d1671cd3ea8aae375f1f6d232877b33826fef9370c196f72457cf1a6da
+transaction  9c310a0068a7036b1bbfbaed59d58c65740154d6aff4529b738ecff8c7601212
+association  77031fc732e4be82fbd2c77cb2076bf92b4fdb1ce9a74bf8cfa085464e3d23bd
+```
+
+Re-running `init-vk` for `membership` against the live registry failed on-chain
+with `custom program error: 0x1c` (28, `VkRegistryAlreadyInitialized`), after
+6,662 CU: the write-once property holds on a validator and not only in mollusk.
+
+The three bumps above (252, 255, 255) are also the concrete reason the
+per-verify CU deltas in section 4 are not constants: a bump of 252 costs three
+extra `create_program_address` attempts that a bump of 255 does not.
+
+### The whole behavioral flow, end to end
+
+The behavioral soak (`mirror-soak`) was then run in full against the same
+validator, on its own fresh deployment of the current bytecode
+(`7vUgz7eMA2HD1DrTrKp3YWvUgpmyyrab8ogmnfdHhuve`), driving the shipped CLI and the
+shipped coordinator:
+
+```text
+init_vk_membership  4RvZe2WFCXcEY568G11LQ8qt78v3KyN6UcY99unkrwSiooY9hvh4UePNu2UAN7HLCFnb1J4fTzDs6XhC12DvqzG8
+zk_settle           2AZeCMii7PJALPnqHGgdqRuANMHq1fJWTwFqgykHFcSjKNHSMd3L4jkCyU9dLd6uv4BvhZ6rNGV5gG2rEEVVQpfs
+
+SOAK RESULT: GREEN (18/18 assertions passed)
+```
+
+`zk_settle` is the one that matters here: a real Groth16 membership proof,
+verified on a validator against a key the program loaded from account
+`F8WXC9XNj8hABebMqXb72DbMwvSK8LAdiVJXbfikyWRT` and re-hashed against
+`MEMBERSHIP_VK_SHA256` inside the same instruction, releasing the escrow to the
+bound fresh recipient. The replay of the same settle was then rejected with
+`NullifierSpent`, so nothing about the anti-replay path changed either.
+
+That run is 18 assertions rather than the 17 recorded in `PROOF.md`: the extra
+one is the new "membership verifying key published into its write-once registry
+PDA" check. It is a different program on a different cluster, so it does not
+supersede any number in `PROOF.md`; the two are not comparable and neither is
+being restated as the other.
+
+These are local-validator signatures, not public-cluster ones. They are recorded
+here as a reproduction recipe, not as browser-verifiable proof. Reproduce with a
+running Surfpool:
+
+```sh
+cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml
+cargo run -p mirror-soak --release
+```
+
+---
+
+## 9. Status of the published devnet deployment
 
 The devnet program recorded in [`PROOF.md`](PROOF.md)
 (`EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`) was deployed **before** this

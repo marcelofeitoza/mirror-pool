@@ -280,7 +280,13 @@ another name), then export the verifying keys and redeploy the program with them
 
 Until that is done the committed and deployed verifying keys are still the dev-setup
 keys, whose toxic waste is public by construction. The circuits and the on-chain
-verifiers do not change; only the embedded verifying key does.
+verifiers do not change; what changes is the pinned SHA-256 in
+`programs/mirror-pool/src/vk_digest.rs` plus one `InitVk` publication per circuit
+against the redeployed program. The key itself no longer lives on a verify path:
+it sits in a write-once, program-owned registry account whose contents the
+program re-checks against that digest on every verify (`docs/VK_REGISTRY.md`).
+Rotation therefore still needs the upgrade, deliberately, because a pin a third
+party could move would not be a pin.
 
 ### Confidential deposits (hide even the shield amount)
 
