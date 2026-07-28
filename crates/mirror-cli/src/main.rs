@@ -420,6 +420,12 @@ struct InitPoolArgs {
     /// pool (0..=10000; fixed forever at init). See docs/INCENTIVES.md.
     #[arg(long, default_value_t = 0)]
     reward_bps: u16,
+    /// The single ZK opt-in escrow size in lamports, fixed forever at init and
+    /// required to be non-zero. `deposit-commit` escrows exactly this and a
+    /// settle pays exactly this, which is what stops a settle drawing more than
+    /// its leaf escrowed. A pool serving several sizes is several pools.
+    #[arg(long)]
+    zk_denomination: u64,
 }
 
 #[derive(Args)]
@@ -794,6 +800,12 @@ fn run_init_pool(args: InitPoolArgs) -> Result<()> {
     if args.reward_bps > 10_000 {
         return Err(anyhow!("--reward-bps must be <= 10000 (basis points)"));
     }
+    if args.zk_denomination == 0 {
+        return Err(anyhow!(
+            "--zk-denomination must be non-zero: a zero denomination would mean the ZK path \
+             accepts any amount, which is the escrow-accounting hole it exists to close"
+        ));
+    }
     let authority_kp = chain::read_keypair(&args.authority)?;
     let payer_kp = match &args.payer {
         Some(p) => chain::read_keypair(p)?,
@@ -812,6 +824,7 @@ fn run_init_pool(args: InitPoolArgs) -> Result<()> {
         args.k_floor,
         args.entry_fee,
         args.reward_bps,
+        args.zk_denomination,
     );
 
     // Fee payer first; add the authority only if it is a distinct signer.
@@ -831,6 +844,7 @@ fn run_init_pool(args: InitPoolArgs) -> Result<()> {
     println!("k_floor:        {}", args.k_floor);
     println!("entry_fee:      {} lamports", args.entry_fee);
     println!("reward_bps:     {}", args.reward_bps);
+    println!("zk_denomination:{} lamports", args.zk_denomination);
     println!("signature:      {sig}");
     Ok(())
 }
@@ -950,6 +964,21 @@ fn run_deposit_commit(args: DepositCommitArgs) -> Result<()> {
     let pool_state = chain.pool_state(&pool)?;
     if pool_state.epoch_slots == 0 {
         return Err(anyhow!("pool epoch_slots is 0"));
+    }
+    // Fail fast on the pool's fixed ZK escrow size rather than paying for a
+    // transaction the program will reject. The program is the authority here;
+    // this only saves the round trip and explains why.
+    if let Some(denomination) = pool_state.zk_denomination {
+        if args.amount != denomination {
+            return Err(anyhow!(
+                "--amount {} does not match the pool's fixed ZK denomination of {} lamports. \
+                 The ZK path admits exactly one size on both sides, which is what stops a \
+                 settle drawing more than its leaf escrowed; a pool serving another size is \
+                 another pool.",
+                args.amount,
+                denomination
+            ));
+        }
     }
     let slot = match args.slot {
         Some(s) => s,
@@ -1318,6 +1347,10 @@ fn run_status(args: StatusArgs) -> Result<()> {
     println!("epoch_slots:       {}", pool_state.epoch_slots);
     println!("k_floor:           {}", pool_state.k_floor);
     println!("entry_fee:         {} lamports", pool_state.entry_fee);
+    match pool_state.zk_denomination {
+        Some(d) => println!("zk_denomination:   {d} lamports"),
+        None => println!("zk_denomination:   (absent: pre-denomination pool layout)"),
+    }
     println!("commitment_count:  {}", pool_state.commitment_count);
     println!("current_root:      {}", to_hex(&pool_state.current_root));
     println!("current slot:      {slot}");

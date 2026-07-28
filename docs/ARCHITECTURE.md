@@ -250,9 +250,7 @@ That list is also complete in the other direction, and the gaps matter enough to
 name here rather than only in the threat model. `SettleZk` does **not** enforce a
 k-anonymity floor (it reads neither `pool.k_floor` nor any Epoch account and will
 settle a window holding one commitment), does **not** enforce a denomination or
-any link between the settled `amount` and what the leaf's owner escrowed (the
-escrow is a pool-wide pot, and a fee-only crowd `Commit` leaf satisfies the same
-membership circuit), and does **not** check that the recipient is fresh (it checks
+and does **not** check that the recipient is fresh (it checks
 only that the recipient matches the proof's `actionHash`; "fresh address" is a
 client convention). Each is deliberate and each is pinned by a test in
 `programs/mirror-pool/tests/integration.rs`. The reason none of them can be a

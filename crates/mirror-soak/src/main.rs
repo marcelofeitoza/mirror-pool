@@ -314,6 +314,10 @@ async fn main() -> Result<()> {
             args.k_floor,
             args.entry_fee,
             args.reward_bps,
+            // The pool's fixed ZK escrow size IS the amount this soak deposits
+            // and settles: `CommitDeposit` takes exactly it and `SettleZk` pays
+            // exactly it, so the two must agree or nothing lands.
+            args.zk_amount,
         )],
         &[&payer, &relay],
         &[],

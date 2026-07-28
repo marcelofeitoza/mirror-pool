@@ -711,6 +711,9 @@ async fn main() -> Result<()> {
             args.k_floor,
             args.entry_fee,
             args.reward_bps,
+            // zk_denomination: the sustained run drives the crowd path only, but
+            // the parameter is mandatory and must be non-zero.
+            250_000_000,
         )],
         &[&payer, &relay],
         &[],
@@ -902,7 +905,11 @@ async fn main() -> Result<()> {
                         commit_ms.push(t0.elapsed().as_millis() as u64);
                         commit_sigs.push(sig);
                         nullifiers.push(nf);
-                        leaves.push(commitment.0);
+                        // What the chain appends for a crowd COMMIT is the
+                        // domain-wrapped leaf, not the posted commitment, so the
+                        // off-chain reference has to wrap it too or every round
+                        // would report drift.
+                        leaves.push(mirror_core::crowd_leaf(&commitment.0));
                     }
                     Err(e) => errors.push(format!("commit {i}: {e}")),
                 }

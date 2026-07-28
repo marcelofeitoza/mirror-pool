@@ -22,6 +22,7 @@
 //! 1762    2               reward_bps         entry-fee share (bps) sent to reward pool
 //! 1764    8               reward_pool        lamports accrued for participation rewards
 //! 1772    8               total_unclaimed_dwell  sum of all dwell not yet claimed
+//! 1780    8               zk_denomination    the ONE ZK opt-in escrow size (lamports)
 //! ```
 //!
 //! `DEPTH` (and the hashing) live in [`crate::state::merkle`]. The frontier is
@@ -91,11 +92,16 @@ pub const REWARD_POOL_OFF: usize = REWARD_BPS_OFF + 2;
 /// denominator (u64 LE).
 pub const TOTAL_UNCLAIMED_DWELL_OFF: usize = REWARD_POOL_OFF + 8;
 
+/// The single escrow size the ZK opt-in path accepts, in lamports (u64 LE).
+/// Fixed at init like every other pool parameter, and never zero. ADDITIVE:
+/// appended after the incentive counters, so no offset above shifts.
+pub const ZK_DENOMINATION_OFF: usize = TOTAL_UNCLAIMED_DWELL_OFF + 8;
+
 /// Basis-point denominator for the entry-fee reward split. 100% = 10_000 bps.
 pub const BPS_DENOMINATOR: u16 = 10_000;
 
 /// Total account size. A layout constant, never inferred from the account.
-pub const LEN: usize = TOTAL_UNCLAIMED_DWELL_OFF + 8;
+pub const LEN: usize = ZK_DENOMINATION_OFF + 8;
 
 pub const VERSION_UNINITIALIZED: u8 = 0;
 pub const VERSION_V1: u8 = 1;
@@ -140,6 +146,18 @@ pub fn entry_fee(data: &[u8]) -> Result<u64, ProgramError> {
     read_u64(data, ENTRY_FEE_OFF)
 }
 
+/// The single escrow size the ZK opt-in path accepts, in lamports.
+///
+/// `COMMIT_DEPOSIT` refuses any other amount and `SETTLE_ZK` /
+/// `SETTLE_ZK_ASSOCIATED` refuse to pay any other amount, so a settle cannot draw
+/// more than the leaf it spends escrowed. Nothing on-chain can read the amount a
+/// leaf's `actionHash` bound (the leaf is one opaque field element), so admitting
+/// exactly one size on both sides is what keeps the two equal. Never zero: a zero
+/// here would mean "any amount", which is the hole it exists to close.
+pub fn zk_denomination(data: &[u8]) -> Result<u64, ProgramError> {
+    read_u64(data, ZK_DENOMINATION_OFF)
+}
+
 /// Stored Pool PDA bump.
 pub fn bump(data: &[u8]) -> Result<u8, ProgramError> {
     read_u8(data, BUMP_OFF)
@@ -175,6 +193,7 @@ pub fn init(
     k_floor: u32,
     entry_fee: u64,
     reward_bps: u16,
+    zk_denomination: u64,
     authority: &[u8; 32],
     bump: u8,
     empty_root: &[u8; 32],
@@ -183,6 +202,11 @@ pub fn init(
         return Err(ProgramError::InvalidAccountData);
     }
     if reward_bps > BPS_DENOMINATOR {
+        return Err(ProgramError::InvalidArgument);
+    }
+    // A zero denomination would mean "the ZK path accepts any amount", which is
+    // exactly the escrow-accounting hole the field exists to close.
+    if zk_denomination == 0 {
         return Err(ProgramError::InvalidArgument);
     }
     write_u8(data, VERSION_OFF, VERSION_V1)?;
@@ -203,6 +227,8 @@ pub fn init(
     write_u16(data, REWARD_BPS_OFF, reward_bps)?;
     write_u64(data, REWARD_POOL_OFF, 0)?;
     write_u64(data, TOTAL_UNCLAIMED_DWELL_OFF, 0)?;
+    // The ZK opt-in escrow size, fixed forever like every other parameter.
+    write_u64(data, ZK_DENOMINATION_OFF, zk_denomination)?;
     Ok(())
 }
 

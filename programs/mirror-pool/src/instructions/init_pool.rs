@@ -1,21 +1,31 @@
 //! INIT_POOL: one-time, immutable pool configuration.
 //!
-//! `epoch_slots`, `k_floor`, `authority`, and `entry_fee` are fixed at init and
-//! can never change: a mutable `k_floor` would let an operator lower the floor
-//! right before a targeted epoch settles, shrinking the anonymity set on demand.
-//! One pool also serves exactly one fixed action shape (bound off-chain via each
-//! commitment; the on-chain class hash is a v2 field).
+//! `epoch_slots`, `k_floor`, `authority`, `entry_fee`, and `zk_denomination` are
+//! fixed at init and can never change: a mutable `k_floor` would let an operator
+//! lower the floor right before a targeted epoch settles, shrinking the anonymity
+//! set on demand, and a mutable denomination would let one re-price escrows that
+//! are already committed. One pool also serves exactly one fixed action shape
+//! (bound off-chain via each commitment; the on-chain class hash is a v2 field).
 //!
 //! Body layout after the tag byte (see `wire::INIT_POOL_LEN`):
 //!
 //! ```text
 //! [epoch_slots: u64 LE][k_floor: u32 LE][entry_fee: u64 LE][reward_bps: u16 LE]
+//!   [zk_denomination: u64 LE]
 //! ```
 //!
 //! `reward_bps` is the basis-point share of each entry fee that accrues to the
 //! on-chain reward pool (`pool::reward_pool_lamports`); the remainder is the
 //! settlement reserve. Like every other pool parameter it is fixed forever at
 //! init and must be `<= 10_000`. See `docs/INCENTIVES.md`.
+//!
+//! `zk_denomination` is the single escrow size the ZK opt-in path accepts, in
+//! lamports, and must be NON-ZERO. It is a soundness parameter before it is a
+//! privacy one: `COMMIT_DEPOSIT` takes exactly it and both ZK settle paths pay
+//! exactly it, which is the only way to keep the amount a settle draws equal to
+//! the amount its leaf escrowed - the leaf is one opaque field element, so no
+//! on-chain check can read the amount its `actionHash` bound. A pool serving
+//! several sizes is several pools, which the fixed action shape already implies.
 //!
 //! Accounts:
 //!
@@ -67,6 +77,12 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
             .try_into()
             .map_err(|_| MirrorPoolError::MalformedInstruction)?,
     );
+    let zk_denomination = u64::from_le_bytes(
+        data.get(22..30)
+            .ok_or(MirrorPoolError::MalformedInstruction)?
+            .try_into()
+            .map_err(|_| MirrorPoolError::MalformedInstruction)?,
+    );
 
     // A zero-length window cannot batch, and a pool that may settle with
     // k < 2 is a deanonymization machine, not an anonymity set. A reward split
@@ -76,6 +92,12 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         return Err(ProgramError::InvalidArgument);
     }
     if reward_bps > wire::BPS_DENOMINATOR {
+        return Err(ProgramError::InvalidArgument);
+    }
+    // A zero denomination would mean "the ZK path accepts any amount", i.e. a
+    // settle could draw more than its leaf escrowed. There is no "disabled"
+    // value: a pool that wants no ZK deposits simply never receives any.
+    if zk_denomination == 0 {
         return Err(ProgramError::InvalidArgument);
     }
 
@@ -123,17 +145,19 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         k_floor,
         entry_fee,
         reward_bps,
+        zk_denomination,
         authority_key.as_array(),
         bump,
         &empty_root,
     )?;
 
     log!(
-        "mirror-pool: init_pool epoch_slots={} k_floor={} entry_fee={} reward_bps={}",
+        "mirror-pool: init_pool epoch_slots={} k_floor={} entry_fee={} reward_bps={} zk_denom={}",
         epoch_slots,
         k_floor,
         entry_fee,
-        reward_bps as u64
+        reward_bps as u64,
+        zk_denomination
     );
     Ok(())
 }

@@ -20,6 +20,22 @@
 //!
 //! [`verify_path`] recomputes a root from a leaf and its path, so both builders
 //! and the circuit's own recomputation can be cross-checked.
+//!
+//! # Two leaf domains
+//!
+//! The accumulator carries leaves from both settlement paths, and they are NOT
+//! the same shape. A `CommitDeposit` appends its commitment
+//! `Poseidon(secret, actionHash, epoch)` verbatim; a crowd `Commit` appends
+//! `mirror_core::crowd_leaf(commitment)`, a domain-wrapped value, because that
+//! path escrows nothing and would otherwise be a free way to place a spendable
+//! ZK leaf. Both builders here are agnostic - they hash whatever leaves they are
+//! given - so the caller owns the distinction:
+//!
+//! - [`incremental_path`] needs no other leaf at all (it walks the frontier
+//!   snapshot), so nothing to do: pass the deposit commitment.
+//! - [`SparseMerkle`] replays an ordered leaf set, so any CROWD commitment in
+//!   that list must be passed through `mirror_core::crowd_leaf` first, or the
+//!   rebuilt root will not match the chain's.
 
 use mirror_core::{merkle_node, Hash32};
 

@@ -293,6 +293,7 @@ fn build_zk_pool(env: &mut Env, authority: &Pubkey, lamports: u64) -> Pubkey {
         2,
         0,
         0,
+        ZK_AMOUNT,
         &authority.to_bytes(),
         bump,
         &circuit_empty_root(),

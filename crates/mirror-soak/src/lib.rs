@@ -437,6 +437,10 @@ pub fn note_is_spendable(path: &Path) -> Result<bool> {
 // ---------------------------------------------------------------------------
 
 /// Build the `InitPool` instruction (see instructions::init_pool).
+///
+/// `zk_denomination` is the single escrow size the ZK opt-in path accepts and
+/// must be non-zero; `DepositCommit` takes exactly it and a settle pays exactly
+/// it.
 #[allow(clippy::too_many_arguments)]
 pub fn init_pool_ix(
     program_id: &Pubkey,
@@ -447,6 +451,7 @@ pub fn init_pool_ix(
     k_floor: u32,
     entry_fee: u64,
     reward_bps: u16,
+    zk_denomination: u64,
 ) -> Instruction {
     let mut data = Vec::with_capacity(mirror_core::wire::INIT_POOL_LEN);
     data.push(mirror_core::wire::tag::INIT_POOL);
@@ -454,6 +459,8 @@ pub fn init_pool_ix(
     data.extend_from_slice(&k_floor.to_le_bytes());
     data.extend_from_slice(&entry_fee.to_le_bytes());
     data.extend_from_slice(&reward_bps.to_le_bytes());
+    data.extend_from_slice(&zk_denomination.to_le_bytes());
+    debug_assert_eq!(data.len(), mirror_core::wire::INIT_POOL_LEN);
     Instruction {
         program_id: *program_id,
         accounts: vec![

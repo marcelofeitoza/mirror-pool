@@ -4,7 +4,14 @@
 //! A frontier tree stores only the right-edge path (`filled_subtrees`, one
 //! sibling hash per level) plus the running root, so an append is O(DEPTH) in
 //! both compute and account bytes and the full tree is never materialized
-//! on-chain. Leaves are the opaque 32-byte commitments posted by COMMIT.
+//! on-chain.
+//!
+//! Leaves come from two instructions and live in two DISJOINT hash domains:
+//! `COMMIT_DEPOSIT` appends its 32-byte commitment verbatim (the ZK domain, the
+//! shape the membership and association circuits recompute), while `COMMIT`
+//! appends [`crowd_leaf`] of the value it was handed. See that function for why
+//! the separation is a fund-safety property and why it has to be applied to the
+//! FREE path, by the program.
 //!
 //! Hashing uses circomlib Poseidon over BN254 via the Solana `sol_poseidon`
 //! syscall (`hash_pair(l, r) = Poseidon(l, r)`), the exact node hash the
@@ -65,6 +72,41 @@ fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 #[inline(always)]
 fn hash_pair(_left: &[u8; 32], _right: &[u8; 32]) -> [u8; 32] {
     unreachable!("Poseidon hashing uses an on-chain syscall and never runs on the host")
+}
+
+/// Domain tag absorbed into every CROWD `COMMIT` leaf, and into nothing else.
+///
+/// `SHA-256("mirror-pool/leaf-domain/crowd/v1")` reduced into the BN254 scalar
+/// field, canonical big-endian. MIRRORED from `mirror_core::CROWD_LEAF_DOMAIN`
+/// (a Solana program must not depend on that std host crate); the host side's
+/// `crowd_leaf_domain_matches_its_derivation` test recomputes it from the domain
+/// string, and `crowd_leaf_matches_the_host_mirror` in `tests/integration.rs`
+/// asserts the two sides agree on real leaves through the compiled program.
+pub const CROWD_LEAF_DOMAIN: [u8; 32] = [
+    0x2e, 0x2a, 0x23, 0x5e, 0xaf, 0xc3, 0x3e, 0xf6, 0x4e, 0xfb, 0x63, 0xe2, 0xb1, 0x81, 0xc5, 0xdb,
+    0x9b, 0x5e, 0xbc, 0x4c, 0xbc, 0x2c, 0x26, 0xff, 0xa8, 0xe7, 0x21, 0xcb, 0x79, 0xf7, 0xec, 0x09,
+];
+
+/// The leaf a crowd `COMMIT` appends: `Poseidon(CROWD_LEAF_DOMAIN, commitment)`.
+///
+/// The crowd path accepts an opaque 32-byte `commitment` from anybody for the
+/// price of the entry fee, while the ZK opt-in path escrows lamports for a leaf
+/// of the shape `Poseidon(secret, actionHash, epoch)` that the membership and
+/// association circuits recompute. Appending the crowd value verbatim would
+/// therefore let a fee-only commit put a spendable ZK leaf into the accumulator
+/// and settle it against somebody else's escrow. Wrapping it here fixes that
+/// with one syscall:
+///
+///  - the crowd leaf is a WIDTH-2 Poseidon with a fixed first input and a ZK
+///    deposit leaf is a WIDTH-3 Poseidon, so no crowd leaf is a deposit leaf
+///    short of a Poseidon collision; and
+///  - the wrap happens ON-CHAIN over whatever the caller sent, so pre-hashing a
+///    tag client-side does not get a caller into the ZK domain either. That is
+///    the load-bearing half: a tag absorbed only into the DEPOSIT preimage would
+///    be forgeable, since the deposit leaf is caller-supplied bytes and the
+///    caller could post the tagged value for free through `COMMIT`.
+pub fn crowd_leaf(commitment: &[u8; 32]) -> [u8; 32] {
+    hash_pair(&CROWD_LEAF_DOMAIN, commitment)
 }
 
 /// Root of a completely empty tree: `zeros(DEPTH)` where `zeros(0) = ZERO_LEAF`

@@ -433,18 +433,24 @@ away from the program.
   floor that strands funds is not a safer floor, and a floor that counts crowd
   commits and mismatched amounts would have reported cover this path does not
   have.
-- **No denomination, and no link between the settled amount and any single
-  deposit.** The escrow is a **pool-wide pot**. Nothing on-chain ties the settled
-  `amount` to what the leaf's owner escrowed, and a fee-only crowd `Commit` leaf
-  satisfies the membership circuit as well as a deposit leaf does
-  (`settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend` demonstrates exactly
-  that: 22 crowd commits reproduce a leaf that then spends a different
-  participant's escrow). This is a **soundness** caveat, not only a privacy one:
-  **a v1 pool must not hold value it cannot afford to lose**, and the same
-  disclosure applies here as to the confidential layer's dev trusted setup.
-  Closing it needs a fixed denomination plus domain-separated leaves, i.e. a
-  layout and circuit change (`docs/ROADMAP.md`); shipping half of it would read
-  like a full fix.
+- **The settled amount is bound, and crowd leaves cannot spend escrow. FIXED.**
+  This was previously a soundness hole: the escrow was a pool-wide pot, nothing
+  tied the settled `amount` to what the leaf's owner escrowed, and a fee-only
+  crowd `Commit` leaf satisfied the membership circuit as well as a deposit leaf
+  did, so 22 free commits could reproduce a leaf that then spent a different
+  participant's escrow. It is closed by two changes that only work together:
+  the ZK pool now carries a **fixed denomination** fixed at init, so a settle
+  cannot draw an amount nobody deposited; and crowd leaves are **domain-separated
+  by the PROGRAM**, `crowd_leaf = Poseidon(CROWD_LEAF_DOMAIN, commitment)`, so a
+  crowd leaf is not a valid preimage for the ZK spend statement. The tag has to be
+  applied by the program to the FREE path, not by the client to the deposit path:
+  the deposit leaf is 32 caller-supplied bytes, so a client asked to tag its own
+  deposit would simply pre-compute the tagged value and post it for free.
+  `settle_zk_rejects_a_fee_only_crowd_leaf_spending_a_depositors_escrow` pins the
+  original attack now failing, and
+  `crowd_commit_leaf_is_domain_separated_from_the_zk_deposit_leaf` pins that the
+  pre-hashing dodge fails too. Note the fix needed NO circuit change, so no
+  verifying key was regenerated.
 - **No recipient freshness.** "The output goes to a fresh address" is a **client
   convention**, not a program guarantee: `SettleZk` only requires the recipient to
   match the proof's `actionHash`. Nor is freshness meaningfully enforceable here.
@@ -779,12 +785,13 @@ because a threat model that only enumerates its wins is untrustworthy.
     because the only party who can waive it is the one whose anonymity is at
     stake, and unacceptable to describe as an on-chain guarantee, which is why it
     is not described as one.
-11. **The ZK escrow is a shared pot (soundness, v1).** No on-chain check ties the
-    settled amount to any single deposit, and a fee-only crowd `Commit` leaf can
-    spend it (Section 4, with the test that demonstrates it). A v1 pool must not
-    hold value it cannot afford to lose. This is disclosed with the same bluntness
-    as the confidential layer's dev trusted setup, and the fix (fixed denomination
-    plus domain-separated leaves) is a v2 layout and circuit change.
+11. **The ZK escrow shared-pot hole is CLOSED.** It previously had no on-chain
+    link between the settled amount and any single deposit, and a fee-only crowd
+    `Commit` leaf could spend a depositor's escrow. Both halves are now fixed: a
+    fixed ZK denomination set at init, and program-applied domain separation of
+    crowd leaves from deposit leaves (Section 4, with the test that pins the
+    original attack now failing). No circuit change was needed, so no verifying
+    key moved.
 12. **Confidential-value boundary and TVL (optional layer only).** When the
     confidential-value layer is enabled, amounts are hidden *inside* the pool, but
     the public boundary is not: a shield exposes the deposited amount and depositor,

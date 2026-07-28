@@ -30,16 +30,13 @@
 //!   sufficient and safe: only the secret holder can produce this proof, the
 //!   window's size is public before they decide, and declining costs them
 //!   nothing but time. See `settle_zk_ignores_k_floor_and_needs_no_epoch_account`.
-//! - **No denomination, and no link between `amount` and any single deposit.**
-//!   The escrow is a pool-wide pot. Nothing ties the settled `amount` to what
-//!   the leaf's owner escrowed at `COMMIT_DEPOSIT`, and a crowd `COMMIT` leaf
-//!   (which escrows nothing) satisfies the membership circuit just as well as a
-//!   deposit leaf, since both paths append the same `Poseidon(secret,
-//!   actionHash, epoch)` shape to the same tree. A v1 pool therefore must not
-//!   hold value it cannot afford to lose. Closing this needs a fixed
-//!   denomination plus domain-separated leaves, which is a layout and circuit
-//!   change; a half fix would read like a full one. See
-//!   `settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend`.
+//! - **No per-leaf escrow ledger.** There is no on-chain record of "this leaf is
+//!   worth this much", and there cannot be: the leaf is one opaque field element
+//!   and the whole point is that a settle is unlinkable to a deposit. What bounds
+//!   the payout instead is the pair of rules under *Escrow soundness* below. A
+//!   settle still draws from the pool's whole balance rather than from an
+//!   earmarked slot; the bound is an aggregate one (total settled <= total
+//!   escrowed), not a per-transaction lookup.
 //! - **No recipient freshness.** `recipient` is only required to match the
 //!   proof's `actionHash`. "Fresh address" is a CLIENT convention, not a
 //!   property this program enforces, and it is not meaningfully enforceable
@@ -49,17 +46,44 @@
 //!   strand the escrow by dusting it with one lamport. See
 //!   `settle_zk_accepts_a_recipient_that_is_not_fresh`.
 //!
+//! # Escrow soundness
+//!
+//! Two on-chain rules, together, keep this instruction from paying out more than
+//! the leaf it spends put in. Neither is a per-leaf lookup; they work by making
+//! the only spendable leaves the ones that paid, and by making every payment the
+//! same size as every deposit.
+//!
+//! 1. **Leaf domain.** A crowd `COMMIT` costs only the entry fee and takes any 32
+//!    bytes, so its value is appended as `Poseidon(CROWD_LEAF_DOMAIN, commitment)`
+//!    (`state::merkle::crowd_leaf`), while `COMMIT_DEPOSIT` appends its
+//!    commitment verbatim. A membership proof recomputes
+//!    `Poseidon(secret, actionHash, epoch)` - a width-3 hash - so no crowd leaf
+//!    satisfies it short of a Poseidon collision. The wrap is applied by the
+//!    PROGRAM to the FREE path, which is the part that matters: a tag absorbed
+//!    into the deposit preimage instead would be forgeable, since a caller could
+//!    compute the tagged value and post it for free through `COMMIT`.
+//! 2. **Fixed denomination.** `COMMIT_DEPOSIT` escrows exactly
+//!    `pool.zk_denomination` and this handler pays exactly it, so the amount a
+//!    settle draws equals the amount its leaf escrowed without anything on-chain
+//!    having to read the leaf.
+//!
+//! Distinct settles burn distinct nullifier PDAs, and `nullifierHash =
+//! Poseidon(secret, epoch)` with the same `(secret, epoch)` inside the leaf, so
+//! distinct settles spend distinct leaves. Every leaf in the ZK domain escrowed
+//! one denomination, therefore total settled <= total escrowed.
+//!
 //! # What the anonymity set actually is
 //!
-//! The proof hides the member among EVERY leaf under the proven root. The two
-//! values this instruction publishes then narrow what an observer must consider:
-//! the `epoch` public input (the leaf binds it, so only leaves committed to that
-//! epoch can be the source) and `amount` (escrow amounts are public at
-//! `COMMIT_DEPOSIT`). So the set that actually covers an output is the window's
-//! ZK deposits OF THE SAME AMOUNT. That per-window narrowing is the price paid
-//! for the timing defense - binding the epoch is what forces every settle of a
-//! window to wait for the same close, which is what denies the FIFO matching
-//! that is the strongest published attack on this class of pool.
+//! The proof hides the member among EVERY leaf under the proven root that the
+//! circuit can satisfy, i.e. every ZK deposit leaf. The value this instruction
+//! publishes then narrows what an observer must consider: the `epoch` public
+//! input (the leaf binds it, so only leaves committed to that epoch can be the
+//! source). The `amount` publishes nothing extra now that every deposit and every
+//! settle is one fixed size. So the set that actually covers an output is the
+//! window's ZK deposits. That per-window narrowing is the price paid for the
+//! timing defense - binding the epoch is what forces every settle of a window to
+//! wait for the same close, which is what denies the FIFO matching that is the
+//! strongest published attack on this class of pool.
 //!
 //! Body layout after the tag byte (see `wire::SETTLE_ZK_LEN`):
 //!
@@ -89,7 +113,8 @@
 //! ```
 //!
 //! Checks run IN ORDER and fail closed: (1) authority is a signer and equals
-//! pool.authority; (2) the epoch's `u64` header agrees with the 32-byte public
+//! pool.authority; (1b) `amount` equals the pool's `zk_denomination`; (2) the
+//! epoch's `u64` header agrees with the 32-byte public
 //! input; (3) the epoch window has closed; (4) `root` is a known recent root;
 //! (5) the recomputed `actionHash` from (recipient, amount) equals the proof's
 //! `actionHash` so the relay cannot redirect the escrow; (6) the nullifier PDA
@@ -199,7 +224,7 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     if !pool_account.owned_by(program_id) {
         return Err(MirrorPoolError::PoolNotInitialized.into());
     }
-    let epoch_slots = {
+    let (epoch_slots, zk_denomination) = {
         let pool_data = pool_account.try_borrow()?;
         if pool_data.len() != pool::LEN || !pool::is_initialized(&pool_data)? {
             return Err(MirrorPoolError::PoolNotInitialized.into());
@@ -207,10 +232,21 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         if &pool::authority(&pool_data)? != authority.address().as_array() {
             return Err(MirrorPoolError::Unauthorized.into());
         }
-        pool::epoch_slots(&pool_data)?
+        (
+            pool::epoch_slots(&pool_data)?,
+            pool::zk_denomination(&pool_data)?,
+        )
     };
     if epoch_slots == 0 {
         return Err(ProgramError::InvalidAccountData);
+    }
+
+    // (1b) Fixed denomination: this path pays exactly one size, the same size
+    // `COMMIT_DEPOSIT` takes. That is the amount half of escrow soundness - see
+    // the module header. Checked before the proof is verified and before any
+    // account is created, so a mismatch costs nothing and changes nothing.
+    if amount != zk_denomination {
+        return Err(MirrorPoolError::DenominationMismatch.into());
     }
 
     // (2) The two epoch encodings must agree: the 32-byte public input is the

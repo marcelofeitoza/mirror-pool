@@ -388,6 +388,8 @@ fn build_zk_pool(env: &mut Env, authority: &Pubkey, epoch_slots: u64, lamports: 
         2,
         0,
         0,
+        // The fixed ZK denomination IS the amount the committed fixture binds.
+        ZK_AMOUNT,
         &authority.to_bytes(),
         bump,
         &circuit_empty_root(),
@@ -712,6 +714,54 @@ fn settle_zk_associated_accepts_fixture_and_transfers_escrow() {
     assert_eq!(nf_acct.owner, env.program_id);
     assert_eq!(nf_acct.data.len(), nullifier::LEN);
     assert_eq!(nf_acct.data[0], nullifier::SPENT);
+}
+
+/// The compliance path must not be a cheaper way to overdraw the pot than the
+/// plain one: it pays exactly the pool's `zk_denomination`, same as `SETTLE_ZK`.
+///
+/// This matters more here than it looks. Registering an association set is
+/// PERMISSIONLESS, so an attacker can always be their own curator and publish a
+/// root over their own leaf; if this path skipped the denomination check, the
+/// "compliance" instruction would be the soundness hole. The gate runs before the
+/// proof is verified and before the nullifier PDA is created, so an over-draw
+/// attempt leaves no trace.
+#[test]
+fn settle_zk_associated_rejects_an_off_denomination_amount() {
+    let mut env = Env::new();
+    let (authority, pool, _curator, assoc) = setup_associated(&mut env);
+    let recipient = zk_recipient();
+    let pool_start = env.get(&pool).lamports;
+    env.warp(120);
+
+    let nf = fixture::PUBLIC_INPUTS[1];
+    let nf_pda = env.nf_pda(&pool, ZK_EPOCH, &nf);
+    for amount in [ZK_AMOUNT + 1, 1, 5 * ZK_AMOUNT] {
+        let ix = env.settle_assoc_ix(
+            &pool,
+            &authority,
+            &nf_pda,
+            &recipient,
+            &assoc,
+            ZK_EPOCH,
+            amount,
+            &fixture::PUBLIC_INPUTS,
+        );
+        env.process(
+            &ix,
+            &[Check::err(custom(MirrorPoolError::DenominationMismatch))],
+        );
+    }
+    assert_eq!(env.get(&recipient).lamports, 0, "nothing may be paid out");
+    assert_eq!(
+        env.get(&pool).lamports,
+        pool_start,
+        "the pot must be untouched"
+    );
+    assert_ne!(
+        env.get(&nf_pda).owner,
+        env.program_id,
+        "no nullifier PDA may be created by a rejected settle"
+    );
 }
 
 #[test]
@@ -1190,6 +1240,7 @@ fn settle_zk_associated_unknown_pool_root_fails() {
         2,
         0,
         0,
+        ZK_AMOUNT,
         &authority.to_bytes(),
         bump,
         &circuit_empty_root(),

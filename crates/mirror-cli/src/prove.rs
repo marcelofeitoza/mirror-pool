@@ -1054,6 +1054,104 @@ mod tests {
             .expect("on-chain groth16-solana verifier must ACCEPT the Rust-generated proof");
     }
 
+    /// ARTIFACT PROVENANCE: a proof over inputs the committed fixture never saw
+    /// still verifies under the COMMITTED verifying key, through the real
+    /// on-chain `groth16-solana` verifier.
+    ///
+    /// The test above proves the fixture's own witness, so it would keep passing
+    /// if the proof and the key had drifted together away from the circuit. This
+    /// one shares nothing with the fixture: a different secret, epoch, recipient,
+    /// amount and leaf index, and a DENSE inclusion path (non-zero siblings at
+    /// every level) instead of the fixture's sparse zero ladder. A proving key
+    /// that no longer matched `circuits/artifacts/vk.rs` would fail here.
+    ///
+    /// Same gating as the test above: needs the gitignored r1cs/wasm/zkey, no
+    /// Node. Run with:
+    ///   MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored fresh_inputs
+    #[test]
+    #[ignore = "requires the built r1cs/wasm/zkey (bash circuits/build.sh); set MIRROR_PROVE_LIVE=1"]
+    fn rust_prove_fresh_inputs_verifies_under_the_committed_vk() {
+        use groth16_solana::groth16::Groth16Verifier;
+
+        if std::env::var("MIRROR_PROVE_LIVE").ok().as_deref() != Some("1") {
+            eprintln!("MIRROR_PROVE_LIVE != 1; skipping fresh-input prove test");
+            return;
+        }
+        let repo = repo_root();
+
+        // Nothing here comes from the fixture.
+        const LEAF_INDEX: u64 = 0x0005_2a91;
+        let secret = mirror_core::Secret::from_bytes(
+            groth16::to_be32("880123456789012345678901234567890123456789").unwrap(),
+        );
+        let mut recipient = [0u8; 32];
+        for (i, b) in recipient.iter_mut().enumerate() {
+            *b = (0xa0 ^ i) as u8;
+        }
+        let amount: u64 = 1_337_000_001;
+        let epoch: u64 = 4_242;
+        let action_hash = transfer_action_hash(&recipient, amount);
+        let nullifier_hash = nullifier(&secret, Epoch(epoch)).0;
+        let leaf = commit_with_action_hash(&secret, &action_hash, Epoch(epoch)).0;
+
+        // A DENSE path: every sibling is a real (non-empty) node, so no level of
+        // the Merkle climb degenerates into the zero ladder the fixture uses.
+        let mut elements = Vec::with_capacity(tree::DEPTH);
+        let mut indices = Vec::with_capacity(tree::DEPTH);
+        for level in 0..tree::DEPTH {
+            let mut sibling = [0u8; 32];
+            sibling[31] = (level as u8).wrapping_mul(7).wrapping_add(3);
+            sibling[30] = 0x11;
+            elements.push(sibling);
+            indices.push(((LEAF_INDEX >> level) & 1) as u8);
+        }
+        let root = tree::verify_path(&leaf, &elements, &indices);
+        let path = MerklePath {
+            elements,
+            indices,
+            root,
+        };
+
+        // These really are new inputs.
+        let ps = fixture_public_signals();
+        assert_ne!(be32_to_decimal(&path.root), ps[0]);
+        assert_ne!(be32_to_decimal(&nullifier_hash), ps[1]);
+        assert_ne!(be32_to_decimal(&action_hash), ps[2]);
+
+        let input = membership_input_json(
+            &path.root,
+            &nullifier_hash,
+            &action_hash,
+            epoch,
+            &secret.0,
+            &path,
+        );
+        let expected = membership_public_inputs(&path.root, &nullifier_hash, &action_hash, epoch);
+        let proof_bytes = crate::prove_rust::prove(
+            &crate::prove_rust::Artifacts {
+                wasm: &repo.join("circuits/membership_js/membership.wasm"),
+                r1cs: &repo.join("circuits/membership.r1cs"),
+                zkey: &repo.join("circuits/membership_final.zkey"),
+            },
+            &input,
+            &expected,
+        )
+        .expect("in-process Rust proving must succeed and ark-verify");
+
+        let mut verifier = Groth16Verifier::new(
+            &proof_bytes.proof_a,
+            &proof_bytes.proof_b,
+            &proof_bytes.proof_c,
+            &expected,
+            &committed_vk::VERIFYINGKEY,
+        )
+        .expect("verifier construction");
+        verifier.verify().expect(
+            "the committed verifying key must accept a fresh proof over new inputs; if this \
+             fails the proving key and the committed vk have drifted apart",
+        );
+    }
+
     /// THE decisive ceremony test: run a real multi-contribution phase-2 ceremony
     /// over the membership circuit's phase-1-derived initial key, then prove the
     /// membership circuit under the CEREMONY-produced proving key and confirm the

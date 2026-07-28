@@ -60,8 +60,17 @@
 //! one spent-set: a commitment cannot be settled once with an attestation and
 //! again without one.
 //!
+//! Escrow soundness is identical to `SETTLE_ZK`'s and is enforced identically:
+//! the leaves this proof can be made for are the domain-separated ZK deposit
+//! leaves, and `amount` must equal the pool's `zk_denomination`. Registering an
+//! association set is permissionless, so a curator who vouches for its own leaf
+//! is always available to an attacker; this path must therefore never be a
+//! cheaper way to draw from the pot than the plain one. See the `settle_zk`
+//! module header.
+//!
 //! Checks run IN ORDER and fail closed: (1) authority is a signer and equals
-//! pool.authority; (2) the epoch's `u64` header agrees with the 32-byte public
+//! pool.authority; (1b) `amount` equals the pool's `zk_denomination`; (2) the
+//! epoch's `u64` header agrees with the 32-byte public
 //! input; (3) the epoch window has closed; (4) `root` is a known recent POOL
 //! root; (5) `associationRoot` is a known recent root of the passed
 //! AssociationSet, which must be program-owned, initialized, bound to THIS pool,
@@ -160,7 +169,7 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     if !pool_account.owned_by(program_id) {
         return Err(MirrorPoolError::PoolNotInitialized.into());
     }
-    let epoch_slots = {
+    let (epoch_slots, zk_denomination) = {
         let pool_data = pool_account.try_borrow()?;
         if pool_data.len() != pool::LEN || !pool::is_initialized(&pool_data)? {
             return Err(MirrorPoolError::PoolNotInitialized.into());
@@ -168,10 +177,22 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         if &pool::authority(&pool_data)? != authority.address().as_array() {
             return Err(MirrorPoolError::Unauthorized.into());
         }
-        pool::epoch_slots(&pool_data)?
+        (
+            pool::epoch_slots(&pool_data)?,
+            pool::zk_denomination(&pool_data)?,
+        )
     };
     if epoch_slots == 0 {
         return Err(ProgramError::InvalidAccountData);
+    }
+
+    // (1b) Fixed denomination, identical to `SETTLE_ZK`'s. The compliance path
+    // must not be a cheaper way to overdraw the pot than the plain one: an
+    // association set is permissionless to register, so a curator vouching for
+    // its own leaf is always available to an attacker. See the `settle_zk` module
+    // header's "Escrow soundness".
+    if amount != zk_denomination {
+        return Err(MirrorPoolError::DenominationMismatch.into());
     }
 
     // (2) The two epoch encodings must agree.

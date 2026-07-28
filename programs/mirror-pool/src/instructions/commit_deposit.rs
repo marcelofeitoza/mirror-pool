@@ -9,16 +9,26 @@
 //! relay cannot redirect it.
 //!
 //! The commitment is `Poseidon(secret, actionHash, epoch)` computed client-side;
-//! on-chain it is an opaque leaf appended to the SAME accumulator the crowd path
-//! uses, so both paths share one accumulator and one recent-root history.
+//! on-chain it is an opaque leaf appended VERBATIM to the SAME accumulator the
+//! crowd path uses, so both paths share one accumulator and one recent-root
+//! history. "Verbatim" is the point: a crowd `COMMIT` gets its value wrapped
+//! into a separate leaf domain (`merkle::crowd_leaf`) precisely because it pays
+//! no escrow, so the leaves the ZK circuits can prove membership of are exactly
+//! the leaves that paid one here.
 //!
-//! Two consequences of that sharing, both stated in full in the `settle_zk`
-//! module header because they bound what this path promises: the escrow is a
-//! POOL-WIDE POT (the leaf is opaque, so nothing on-chain can tie the `amount`
-//! escrowed here to the `amount` the leaf's `actionHash` binds, and a fee-only
-//! crowd leaf satisfies the membership circuit too), and the set that actually
-//! covers a settled output is this window's ZK deposits OF THE SAME AMOUNT,
-//! since `SETTLE_ZK` publishes both the epoch and the amount.
+//! `amount` must equal the pool's `zk_denomination`. The leaf is one opaque
+//! field element, so nothing on-chain can read the amount its `actionHash`
+//! binds; admitting a single size on this side, and paying that same single size
+//! at settle, is what keeps a settle from drawing more than its leaf escrowed.
+//! Total settled is then bounded by total escrowed: distinct settles burn
+//! distinct nullifiers, hence spend distinct leaves, and every leaf in the ZK
+//! domain paid exactly one denomination.
+//!
+//! What this path still does NOT promise, stated in full in the `settle_zk`
+//! module header: the set that covers a settled output is this window's ZK
+//! deposits, since `SETTLE_ZK` publishes the epoch, and the amount is public at
+//! both ends anyway (a fixed denomination makes it uninformative rather than
+//! hidden).
 //!
 //! Like the crowd `COMMIT`, this path also collects the pool's anti-Sybil entry
 //! fee (on top of the escrow) and splits its `reward_bps` share into the reward
@@ -78,6 +88,8 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     );
 
     // A zero escrow has no action to settle; reject rather than commit a no-op.
+    // (The denomination check below would also reject it, since a pool's
+    // denomination is never zero, but the shape check is cheaper and clearer.)
     if amount == 0 {
         return Err(ProgramError::InvalidArgument);
     }
@@ -97,15 +109,29 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
     if !pool_account.owned_by(program_id) {
         return Err(MirrorPoolError::PoolNotInitialized.into());
     }
-    let (epoch_slots, entry_fee) = {
+    let (epoch_slots, entry_fee, zk_denomination) = {
         let pool_data = pool_account.try_borrow()?;
         if pool_data.len() != pool::LEN || !pool::is_initialized(&pool_data)? {
             return Err(MirrorPoolError::PoolNotInitialized.into());
         }
-        (pool::epoch_slots(&pool_data)?, pool::entry_fee(&pool_data)?)
+        (
+            pool::epoch_slots(&pool_data)?,
+            pool::entry_fee(&pool_data)?,
+            pool::zk_denomination(&pool_data)?,
+        )
     };
     if epoch_slots == 0 {
         return Err(ProgramError::InvalidAccountData);
+    }
+
+    // Fixed denomination: the escrow must be exactly the pool's ZK size. This is
+    // the amount half of escrow soundness. The leaf is one opaque field element,
+    // so nothing on-chain can read the amount the leaf's `actionHash` bound and
+    // compare it to what was escrowed; admitting exactly one size here and paying
+    // exactly one size at settle keeps the two equal by construction. Checked
+    // before any lamport moves, so a mismatch is a clean no-op.
+    if amount != zk_denomination {
+        return Err(MirrorPoolError::DenominationMismatch.into());
     }
 
     // Derive the current epoch from the Clock sysvar.

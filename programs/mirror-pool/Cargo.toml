@@ -75,6 +75,12 @@ ark-ff = "0.5"
 # match, so a key edit that forgets the digest fails the suite. On-chain the same
 # hash comes from the `sol_sha256` syscall. Dev-only; never in the .so.
 sha2 = "0.10"
+# The shared host crate this program MIRRORS by hand (the `wire` module and the
+# crowd leaf-domain constant are redefined here so the .so never links a std host
+# crate). Pulled in for tests ONLY, so `mirrored_constants_match_mirror_core` can
+# assert the two copies are equal instead of trusting a comment. `cargo
+# build-sbf` never compiles dev-dependencies, so the deployed .so is unchanged.
+mirror-core = { path = "../../crates/mirror-core" }
 
 [lints.rust]
 # pinocchio macros expand cfg(target_os = "solana") / cfg(target_arch = "bpf")

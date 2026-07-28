@@ -456,6 +456,9 @@ async fn main() -> Result<()> {
             args.k_floor,
             0, // entry_fee: the funding soak measures provenance, not fees
             0, // reward_bps
+            // zk_denomination: this soak only drives crowd commits into the
+            // behavioral pool, but the parameter is mandatory and non-zero.
+            250_000_000,
         )],
         &[&payer, &pool_authority],
         &[],

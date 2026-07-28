@@ -156,8 +156,11 @@ mod pool_off {
     pub const REWARD_BPS: usize = MIN_LEN; // 1762
     pub const REWARD_POOL: usize = REWARD_BPS + 2; // 1764
     pub const TOTAL_UNCLAIMED_DWELL: usize = REWARD_POOL + 8; // 1772
+    /// The single ZK opt-in escrow size (u64 LE). Read when the account is long
+    /// enough, so the decoder still accepts a shorter (older) pool.
+    pub const ZK_DENOMINATION: usize = TOTAL_UNCLAIMED_DWELL + 8; // 1780
     /// The full account length at the time of writing.
-    pub const LEN: usize = TOTAL_UNCLAIMED_DWELL + 8; // 1780
+    pub const LEN: usize = ZK_DENOMINATION + 8; // 1788
 }
 
 /// A decoded snapshot of a Pool account, as read over RPC.
@@ -173,6 +176,10 @@ pub struct PoolState {
     pub frontier: Vec<Hash32>,
     /// The recent-root ring buffer (the last `ROOT_HISTORY_SIZE` roots).
     pub root_ring: Vec<Hash32>,
+    /// The single escrow size the ZK opt-in path accepts, when the account is
+    /// long enough to carry it. `None` only for an account written by an older
+    /// layout; the decoder stays tolerant rather than refusing to read a pool.
+    pub zk_denomination: Option<u64>,
 }
 
 impl PoolState {
@@ -216,6 +223,8 @@ impl PoolState {
             entry_fee: read_u64(pool_off::ENTRY_FEE),
             frontier,
             root_ring,
+            zk_denomination: (data.len() >= pool_off::LEN)
+                .then(|| read_u64(pool_off::ZK_DENOMINATION)),
         })
     }
 
@@ -551,10 +560,14 @@ impl Chain {
 
 /// Build the `InitPool` instruction.
 ///
-/// Body: `[epoch_slots(8 LE)][k_floor(4 LE)][entry_fee(8 LE)][reward_bps(2 LE)]`.
+/// Body: `[epoch_slots(8 LE)][k_floor(4 LE)][entry_fee(8 LE)][reward_bps(2 LE)]
+/// [zk_denomination(8 LE)]`.
 /// `reward_bps` is the basis-point share of each entry fee that accrues to the
 /// on-chain reward pool (must be `<= 10_000`); the program fixes it forever at
-/// init. Accounts (see `instructions::init_pool`): pool(w), authority(signer),
+/// init. `zk_denomination` is the ONE escrow size the ZK opt-in path accepts and
+/// must be non-zero: `DepositCommit` takes exactly it and a settle pays exactly
+/// it, which is what stops a settle drawing more than its leaf escrowed.
+/// Accounts (see `instructions::init_pool`): pool(w), authority(signer),
 /// payer(signer, w), system_program. `authority` becomes `pool.authority`, so it
 /// must sign; `payer` funds the Pool PDA rent.
 #[allow(clippy::too_many_arguments)]
@@ -567,6 +580,7 @@ pub fn init_pool_ix(
     k_floor: u32,
     entry_fee: u64,
     reward_bps: u16,
+    zk_denomination: u64,
 ) -> Instruction {
     let mut data = Vec::with_capacity(wire::INIT_POOL_LEN);
     data.push(wire::tag::INIT_POOL);
@@ -574,6 +588,7 @@ pub fn init_pool_ix(
     data.extend_from_slice(&k_floor.to_le_bytes());
     data.extend_from_slice(&entry_fee.to_le_bytes());
     data.extend_from_slice(&reward_bps.to_le_bytes());
+    data.extend_from_slice(&zk_denomination.to_le_bytes());
     debug_assert_eq!(data.len(), wire::INIT_POOL_LEN);
     Instruction {
         program_id: *program_id,
@@ -790,8 +805,10 @@ mod tests {
         assert_eq!(pool_off::MIN_LEN, 1762);
         assert_eq!(pool_off::ROOT_HEAD, 734);
         assert_eq!(pool_off::ROOT_RING, 738);
-        // The additive incentive tail (documented; not read by the CLI).
-        assert_eq!(pool_off::LEN, 1780);
+        // The additive tail (documented; not read by the CLI). 1780 before the ZK
+        // denomination was added; the field is 8 bytes and lives at the end, so
+        // every offset above is unchanged.
+        assert_eq!(pool_off::LEN, 1788);
     }
 
     #[test]
@@ -833,7 +850,17 @@ mod tests {
         let pool = Pubkey::new_from_array([1u8; 32]);
         let authority = Pubkey::new_from_array([2u8; 32]);
         let payer = Pubkey::new_from_array([3u8; 32]);
-        let ix = init_pool_ix(&program, &pool, &authority, &payer, 150, 10, 1_000, 2_500);
+        let ix = init_pool_ix(
+            &program,
+            &pool,
+            &authority,
+            &payer,
+            150,
+            10,
+            1_000,
+            2_500,
+            250_000_000,
+        );
         assert_eq!(ix.program_id, program);
         assert_eq!(ix.data.len(), wire::INIT_POOL_LEN);
         assert_eq!(ix.data[0], wire::tag::INIT_POOL);
@@ -841,6 +868,7 @@ mod tests {
         assert_eq!(ix.data[9..13], 10u32.to_le_bytes());
         assert_eq!(ix.data[13..21], 1_000u64.to_le_bytes());
         assert_eq!(ix.data[21..23], 2_500u16.to_le_bytes());
+        assert_eq!(ix.data[23..31], 250_000_000u64.to_le_bytes());
         // pool(w, !s), authority(!w, s), payer(w, s), system(!w, !s).
         assert!(ix.accounts[0].is_writable && !ix.accounts[0].is_signer);
         assert!(!ix.accounts[1].is_writable && ix.accounts[1].is_signer);

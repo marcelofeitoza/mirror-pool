@@ -1,12 +1,21 @@
 //! COMMIT: a participant posts a commitment into the current epoch.
 //!
 //! The commitment is `H(secret, action, epoch)` computed client-side
-//! (`mirror_core::commit`); on-chain it is an opaque 32-byte leaf appended to
-//! the frontier accumulator. Binding the action and epoch into the hash is what
-//! makes the relay untrusted: at settlement it cannot substitute a different
-//! action for a committed one without invalidating the commitment. The only
-//! signal a commit leaks is timing, and shared-epoch batching absorbs exactly
-//! that: everyone in the window settles together on one timestamp.
+//! (`mirror_core::commit`); on-chain it is an opaque 32-byte value. Binding the
+//! action and epoch into the hash is what makes the relay untrusted: at
+//! settlement it cannot substitute a different action for a committed one
+//! without invalidating the commitment. The only signal a commit leaks is
+//! timing, and shared-epoch batching absorbs exactly that: everyone in the
+//! window settles together on one timestamp.
+//!
+//! What lands in the accumulator is `merkle::crowd_leaf(commitment)`, NOT the
+//! posted bytes. This path is the cheap one - it escrows nothing and takes any
+//! 32 bytes from any signer - so appending verbatim would let a fee-only commit
+//! place a leaf of the ZK deposit shape into the tree and have `SETTLE_ZK` pay it
+//! out of somebody else's escrow. The wrap is applied here, on the free path, and
+//! on-chain: a tag absorbed into the DEPOSIT preimage instead would be forgeable,
+//! because the caller supplies those bytes too and could post the already-tagged
+//! value through this instruction. See `state::merkle::crowd_leaf`.
 //!
 //! Body layout after the tag byte (see `wire::COMMIT_LEN`):
 //!
@@ -148,10 +157,15 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         .invoke()?;
     }
 
-    // Append the commitment leaf to the frontier accumulator.
+    // Append the commitment leaf to the frontier accumulator, in the CROWD leaf
+    // domain. The posted bytes are never appended verbatim: a crowd commit costs
+    // only the entry fee, so if it could place a leaf of the ZK deposit shape
+    // into the tree it could be spent by `SETTLE_ZK` against escrow it never
+    // paid. `merkle::crowd_leaf` wraps whatever it is handed, so pre-hashing the
+    // tag client-side does not get a caller into the ZK domain either.
     let new_root = {
         let mut pool_data = pool_account.try_borrow_mut()?;
-        merkle::append(&mut pool_data, &commitment)?
+        merkle::append(&mut pool_data, &merkle::crowd_leaf(&commitment))?
     };
 
     // Split the collected entry fee: the pool's `reward_bps` share accrues to the

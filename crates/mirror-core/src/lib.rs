@@ -25,10 +25,19 @@
 //! this code:
 //!
 //! ```text
-//! commitment    = Poseidon(secret, actionHash, epoch)   // the Merkle leaf
+//! commitment    = Poseidon(secret, actionHash, epoch)   // the ZK deposit leaf
+//! crowdLeaf     = Poseidon(CROWD_LEAF_DOMAIN, commitment) // the crowd leaf
 //! nullifierHash = Poseidon(secret, epoch)               // epoch-scoped tag
 //! Merkle node   = Poseidon(left, right)
 //! ```
+//!
+//! The two accumulator leaves live in DISJOINT domains and that separation is a
+//! fund-safety property, not a nicety: a crowd `Commit` costs only the entry fee
+//! while a `CommitDeposit` escrows lamports, so if the two produced leaves of the
+//! same shape a free crowd leaf could satisfy the ZK spend circuit and settle
+//! against somebody else's escrow. The domain tag is absorbed by the PROGRAM (see
+//! [`crowd_leaf`]), never by the caller, because the caller supplies the 32-byte
+//! commitment verbatim and could otherwise pre-hash any tag it liked.
 //!
 //! All values are canonical 32-byte BIG-ENDIAN encodings of BN254 scalars,
 //! which is the byte order circom/snarkjs and `groth16-solana` use for public
@@ -212,6 +221,54 @@ pub fn commit_with_action_hash(secret: &Secret, action_hash: &Hash32, epoch: Epo
     let a = field::from_be(action_hash);
     let e = field::from_u64(epoch.0);
     Commitment(field::poseidon(&[s, a, e]))
+}
+
+/// Domain tag absorbed into every CROWD `Commit` leaf, and into nothing else.
+///
+/// `SHA-256("mirror-pool/leaf-domain/crowd/v1")` reduced into the BN254 scalar
+/// field and encoded canonically big-endian - the same derivation
+/// [`action_hash`] uses, so there is one convention for "a domain string as a
+/// field element" in this repo. [`crowd_leaf_domain`] recomputes it and the unit
+/// test below asserts the constant equals that derivation, so the literal is
+/// never hand-maintained.
+pub const CROWD_LEAF_DOMAIN: Hash32 = [
+    0x2e, 0x2a, 0x23, 0x5e, 0xaf, 0xc3, 0x3e, 0xf6, 0x4e, 0xfb, 0x63, 0xe2, 0xb1, 0x81, 0xc5, 0xdb,
+    0x9b, 0x5e, 0xbc, 0x4c, 0xbc, 0x2c, 0x26, 0xff, 0xa8, 0xe7, 0x21, 0xcb, 0x79, 0xf7, 0xec, 0x09,
+];
+
+/// The string [`CROWD_LEAF_DOMAIN`] is derived from, and that derivation.
+pub fn crowd_leaf_domain() -> Hash32 {
+    let digest: Hash32 = Sha256::digest(b"mirror-pool/leaf-domain/crowd/v1").into();
+    field::to_be(&field::from_be(&digest))
+}
+
+/// The accumulator leaf a CROWD `Commit` appends:
+/// `Poseidon(CROWD_LEAF_DOMAIN, commitment)`.
+///
+/// The crowd path takes an opaque 32-byte `commitment` from an unauthenticated
+/// caller and pays nothing but the entry fee for it, while the ZK path escrows
+/// lamports for a leaf of the shape `Poseidon(secret, actionHash, epoch)` that
+/// the membership and association circuits recompute. Wrapping the crowd
+/// commitment here puts the free leaves in a domain no ZK proof can reach:
+///
+///  - a crowd leaf is a WIDTH-2 Poseidon whose first input is a fixed tag, a ZK
+///    deposit leaf is a WIDTH-3 Poseidon, so no crowd leaf is a deposit leaf
+///    short of a Poseidon collision; and
+///  - the wrap is applied ON-CHAIN, so a caller who submits an already-tagged
+///    value gets it tagged AGAIN and still lands outside the ZK domain. This is
+///    the part that matters: absorbing a tag into the deposit preimage instead
+///    would be worthless, because the deposit leaf is caller-supplied bytes and
+///    the caller could simply compute the tagged value itself and post it for
+///    free through `Commit`.
+///
+/// The on-chain program computes the identical hash with the `sol_poseidon`
+/// syscall (`state::merkle::crowd_leaf`); this is the host mirror, used by
+/// anything that reconstructs the accumulator off-chain.
+pub fn crowd_leaf(commitment: &Hash32) -> Hash32 {
+    field::poseidon(&[
+        field::from_be(&CROWD_LEAF_DOMAIN),
+        field::from_be(commitment),
+    ])
 }
 
 /// Derive the nullifier for `(secret, epoch)`: `Poseidon(secret, epoch)`.
@@ -428,14 +485,21 @@ pub mod wire {
     }
 
     /// INIT_POOL layout:
-    /// `[tag(1)][epoch_slots(8)][k_floor(4)][entry_fee(8)][reward_bps(2 LE)]` -
-    /// the operator fixes the epoch window, the k-anonymity floor, the per-commit
-    /// anti-Sybil entry fee (lamports; 0 disables it), and `reward_bps`, the
-    /// basis-point share of each entry fee that accrues to the on-chain reward
-    /// pool (the remainder covers relay/settlement cost; `reward_bps` must be
-    /// `<= 10_000`). MUST stay byte-identical to the program's
+    /// `[tag(1)][epoch_slots(8)][k_floor(4)][entry_fee(8)][reward_bps(2 LE)]
+    /// [zk_denomination(8 LE)]` - the operator fixes the epoch window, the
+    /// k-anonymity floor, the per-commit anti-Sybil entry fee (lamports; 0
+    /// disables it), `reward_bps`, the basis-point share of each entry fee that
+    /// accrues to the on-chain reward pool (the remainder covers
+    /// relay/settlement cost; `reward_bps` must be `<= 10_000`), and
+    /// `zk_denomination`, the ONE escrow size the ZK opt-in path accepts.
+    ///
+    /// `zk_denomination` must be non-zero: it is what makes a settle unable to
+    /// draw more than the leaf it spends escrowed, since `CommitDeposit` refuses
+    /// any other amount and both ZK settle paths refuse to pay any other amount.
+    /// A pool serving several sizes is several pools, exactly as the fixed
+    /// action shape already implies. MUST stay byte-identical to the program's
     /// `wire::INIT_POOL_LEN`.
-    pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8 + 2;
+    pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8 + 2 + 8;
 
     /// CLAIM_REWARD layout: `[tag(1)]`. The claimant is the signer; their dwell
     /// PDA (seeds `["dwell", pool, participant]`) carries the accumulated dwell,
@@ -448,7 +512,9 @@ pub mod wire {
     pub const BPS_DENOMINATOR: u16 = 10_000;
 
     /// COMMIT layout: [tag(1)][commitment(32)] - the participant posts only the
-    /// commitment; the action + secret stay client-side until settlement.
+    /// commitment; the action + secret stay client-side until settlement. The
+    /// program appends [`super::crowd_leaf`] of this value, not the value
+    /// itself, so a free crowd leaf can never be a ZK deposit leaf.
     pub const COMMIT_LEN: usize = 1 + 32;
 
     /// SETTLE_EPOCH header: [tag(1)][epoch(8)][n_nullifiers(4)] followed by
@@ -458,8 +524,10 @@ pub mod wire {
     /// COMMIT_DEPOSIT layout: [tag(1)][commitment(32)][amount(8 LE)] - the ZK
     /// opt-in escrow. Escrows `amount` lamports and posts the commitment whose
     /// `actionHash` binds `(recipient, amount)` (see
-    /// [`super::transfer_action_hash`]). MUST stay byte-identical to the
-    /// program's `wire::COMMIT_DEPOSIT_LEN`.
+    /// [`super::transfer_action_hash`]). `amount` MUST equal the pool's
+    /// `zk_denomination`; any other size is rejected. The commitment is appended
+    /// verbatim, which is what makes it a ZK-domain leaf. MUST stay
+    /// byte-identical to the program's `wire::COMMIT_DEPOSIT_LEN`.
     pub const COMMIT_DEPOSIT_LEN: usize = 1 + 32 + 8;
 
     /// SETTLE_ZK layout (ONE membership per call; the coordinator batches calls):
@@ -585,7 +653,7 @@ pub mod wire {
 
     // Layout sanity: keep the documented sizes honest at compile time and in
     // lockstep with the on-chain program's mirrored constants.
-    const _: () = assert!(INIT_POOL_LEN == 23);
+    const _: () = assert!(INIT_POOL_LEN == 31);
     const _: () = assert!(COMMIT_LEN == 33);
     const _: () = assert!(SETTLE_HEADER_LEN == 13);
     const _: () = assert!(COMMIT_DEPOSIT_LEN == 41);
@@ -1018,6 +1086,37 @@ mod tests {
         let c = commit(&s, &action(), Epoch(2)).0;
         let n = nullifier(&s, Epoch(2)).0;
         assert_ne!(c, n);
+    }
+
+    /// The pinned domain constant must equal its own derivation, so the literal
+    /// in the source (and the one mirrored into the on-chain program) is never
+    /// hand-maintained.
+    #[test]
+    fn crowd_leaf_domain_matches_its_derivation() {
+        assert_eq!(CROWD_LEAF_DOMAIN, crowd_leaf_domain());
+        // A canonical BN254 scalar: its top byte is below the field order's.
+        assert!(CROWD_LEAF_DOMAIN[0] < 0x30);
+    }
+
+    /// The fund-safety statement in one test: no commitment a free `Commit` can
+    /// post produces the same leaf as the ZK deposit path, because the program
+    /// wraps the crowd value and the wrap is a different Poseidon width with a
+    /// fixed first input. In particular, pre-wrapping client-side does not help:
+    /// the program wraps whatever it is given.
+    #[test]
+    fn crowd_leaves_are_disjoint_from_zk_deposit_leaves() {
+        let s = Secret([0x21u8; 32]);
+        let epoch = Epoch(7);
+        let deposit_leaf = commit(&s, &action(), epoch).0;
+
+        // The obvious attack: post the deposit leaf itself through the free path.
+        assert_ne!(crowd_leaf(&deposit_leaf), deposit_leaf);
+        // The next attack: pre-compute the wrap client-side and post that.
+        assert_ne!(crowd_leaf(&crowd_leaf(&deposit_leaf)), deposit_leaf);
+        // And the wrap is injective in practice, so crowd leaves stay distinct.
+        assert_ne!(crowd_leaf(&[0u8; 32]), crowd_leaf(&[1u8; 32]));
+        // A zero commitment does not stay the zero (empty) leaf either.
+        assert_ne!(crowd_leaf(&[0u8; 32]), [0u8; 32]);
     }
 
     #[test]

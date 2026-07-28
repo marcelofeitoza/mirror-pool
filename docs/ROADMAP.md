@@ -231,12 +231,14 @@ program-side crowd execution.
 
 ### Denominated ZK deposits with per-leaf escrow
 
-The v1 ZK escrow is a pool-wide pot: the leaf is opaque, so nothing on-chain ties
-the `amount` a settle releases to the `amount` its owner escrowed, and because both
-paths append the same leaf shape to one accumulator, a fee-only crowd `Commit` leaf
-satisfies the membership circuit too (`docs/THREAT_MODEL.md` section 4 and residual
-11, with the test that demonstrates it). The consequence is the disclosed limit that
-a v1 pool must not hold value it cannot afford to lose.
+DONE. The ZK escrow was a pool-wide pot: the leaf was opaque, nothing on-chain tied
+the `amount` a settle released to the `amount` its owner escrowed, and because both
+paths appended the same leaf shape to one accumulator, a fee-only crowd `Commit`
+leaf satisfied the membership circuit too. Closed by a fixed ZK denomination set at
+init plus program-applied domain separation of crowd leaves
+(`crowd_leaf = Poseidon(CROWD_LEAF_DOMAIN, commitment)`), which together mean a free
+crowd leaf is neither a valid preimage for the ZK spend statement nor able to draw an
+amount nobody deposited. See `docs/THREAT_MODEL.md` section 4 and residual 11.
 
 The fix is the same one Tornado-style pools use, and it is deliberately a v2
 because it is two coordinated breaking changes rather than a patch:

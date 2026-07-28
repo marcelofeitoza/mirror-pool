@@ -225,6 +225,7 @@ impl Env {
         k_floor: u32,
         entry_fee: u64,
         reward_bps: u16,
+        zk_denomination: u64,
     ) -> Instruction {
         let mut data = Vec::with_capacity(mirror_pool::wire::INIT_POOL_LEN);
         data.push(tag::INIT_POOL);
@@ -232,6 +233,7 @@ impl Env {
         data.extend_from_slice(&k_floor.to_le_bytes());
         data.extend_from_slice(&entry_fee.to_le_bytes());
         data.extend_from_slice(&reward_bps.to_le_bytes());
+        data.extend_from_slice(&zk_denomination.to_le_bytes());
         Instruction {
             program_id: self.program_id,
             accounts: vec![
@@ -420,13 +422,28 @@ fn init_pool(
     init_pool_with_reward(env, epoch_slots, k_floor, entry_fee, 0)
 }
 
-/// Init a pool with an explicit `reward_bps` entry-fee split.
+/// Init a pool with an explicit `reward_bps` entry-fee split. `zk_denomination`
+/// defaults to [`ZK_AMOUNT`], the size the committed ZK fixture binds, so the
+/// ZK tests can deposit and settle without restating it.
 fn init_pool_with_reward(
     env: &mut Env,
     epoch_slots: u64,
     k_floor: u32,
     entry_fee: u64,
     reward_bps: u16,
+) -> (Pubkey, Pubkey, Pubkey) {
+    init_pool_full(env, epoch_slots, k_floor, entry_fee, reward_bps, ZK_AMOUNT)
+}
+
+/// Init a pool with every parameter spelled out, including the fixed ZK escrow
+/// denomination.
+fn init_pool_full(
+    env: &mut Env,
+    epoch_slots: u64,
+    k_floor: u32,
+    entry_fee: u64,
+    reward_bps: u16,
+    zk_denomination: u64,
 ) -> (Pubkey, Pubkey, Pubkey) {
     let authority = Pubkey::new_unique();
     let payer = Pubkey::new_unique();
@@ -443,6 +460,7 @@ fn init_pool_with_reward(
         k_floor,
         entry_fee,
         reward_bps,
+        zk_denomination,
     );
     env.process(&ix, &[Check::success()]);
     (authority, payer, pool)
@@ -472,10 +490,41 @@ fn init_pool_creates_v1_and_reinit_fails() {
     );
 
     // Re-initializing the same pool must fail closed.
-    let ix = env.init_ix(&pool, &authority, &payer, 10, 3, 5_000, 0);
+    let ix = env.init_ix(&pool, &authority, &payer, 10, 3, 5_000, 0, ZK_AMOUNT);
     env.process(
         &ix,
         &[Check::err(custom(MirrorPoolError::PoolAlreadyInitialized))],
+    );
+}
+
+/// A pool must name the ONE escrow size its ZK opt-in path accepts, and it may
+/// not be zero.
+///
+/// The denomination is half of the escrow-soundness argument (the other half is
+/// the crowd/ZK leaf-domain split): nothing on-chain can read the amount a leaf's
+/// `actionHash` bound, so admitting exactly one size at `COMMIT_DEPOSIT` and
+/// paying exactly one size at settle is what keeps a settle from drawing more
+/// than its leaf put in. A zero would mean "any amount", which is the hole
+/// itself, so there is deliberately no "disabled" value.
+#[test]
+fn init_pool_rejects_a_zero_zk_denomination() {
+    let mut env = Env::new();
+    let authority = Pubkey::new_unique();
+    let payer = Pubkey::new_unique();
+    env.fund(payer, 100 * SOL);
+    env.fund(authority, SOL);
+    let pool = env.pool_pda(&authority);
+
+    let ix = env.init_ix(&pool, &authority, &payer, 10, 3, 5_000, 0, 0);
+    env.process(&ix, &[Check::err(ProgramError::InvalidArgument)]);
+
+    // A non-zero denomination is stored verbatim and read back.
+    let ix = env.init_ix(&pool, &authority, &payer, 10, 3, 5_000, 0, 7_777);
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        pool::zk_denomination(&env.get(&pool).data).unwrap(),
+        7_777,
+        "the denomination must be fixed at init and readable"
     );
 }
 
@@ -534,14 +583,21 @@ const ARKWORKS_GADGET_ROOT_HEX: &str =
     "17eb8b099a02413857616f6707ae037e92f08aa788d501f49da9a78a67b6a7c2";
 
 /// GADGET <-> SYSCALL: append the arkworks circuit's commitment leaf through the
-/// real `COMMIT` instruction and require the accumulator root - twenty nested
-/// `sol_poseidon` syscall calls inside the SBF VM - to equal the root the
+/// real `COMMIT_DEPOSIT` instruction and require the accumulator root - twenty
+/// nested `sol_poseidon` syscall calls inside the SBF VM - to equal the root the
 /// in-circuit Merkle climb produced.
 ///
 /// `empty_root_matches_circuit_zero_ladder` only covers the all-zeros tree, where
 /// the leaf value never enters. Here the leaf is a real
 /// `Poseidon(secret, actionHash, epoch)` commitment, so every level mixes a
 /// non-trivial value with a zero-ladder sibling.
+///
+/// The deposit path is the one that appends a commitment VERBATIM, and it is the
+/// only path whose leaves a membership proof can be made for, so it is also the
+/// only path this equivalence is about. A crowd `COMMIT` of the same bytes lands
+/// in a different leaf domain (`merkle::crowd_leaf`) and would produce a
+/// different root by design - see
+/// `crowd_commit_leaf_is_domain_separated_from_the_zk_deposit_leaf`.
 #[test]
 fn on_chain_accumulator_matches_the_arkworks_gadget_vector() {
     let mut env = Env::new();
@@ -550,7 +606,7 @@ fn on_chain_accumulator_matches_the_arkworks_gadget_vector() {
     let epoch_acct = env.epoch_pda(&pool_key, 0);
 
     let leaf = hex32(ARKWORKS_GADGET_LEAF_HEX);
-    let ix = env.commit_ix(&pool_key, &epoch_acct, &payer, &leaf);
+    let ix = env.commit_deposit_ix(&pool_key, &epoch_acct, &payer, &leaf, ZK_AMOUNT);
     env.process(&ix, &[Check::success()]);
 
     assert_eq!(
@@ -638,11 +694,15 @@ fn commit_root_matches_host_frontier_for_varied_leaves() {
         "empty accumulators must agree before any append"
     );
 
-    for (i, leaf) in varied_leaves().iter().enumerate() {
-        let ix = env.commit_ix(&pool_key, &epoch_acct, &payer, leaf);
+    for (i, commitment) in varied_leaves().iter().enumerate() {
+        let ix = env.commit_ix(&pool_key, &epoch_acct, &payer, commitment);
         env.process(&ix, &[Check::success()]);
 
-        let expected = host.append(leaf);
+        // What COMMIT appends is the DOMAIN-WRAPPED leaf, not the posted
+        // commitment, so the host reference wraps it too. Using the mirror-core
+        // implementation here also cross-checks the two copies of the domain
+        // constant against the syscall the program actually ran.
+        let expected = host.append(&mirror_core::crowd_leaf(commitment));
         let data = env.get(&pool_key).data;
         assert_eq!(
             pool::current_root(&data).unwrap(),
@@ -687,7 +747,7 @@ fn root_history_ring_wraps_and_evicts_oldest() {
         let leaf = ring_leaf(i);
         let ix = env.commit_ix(&pool_key, &epoch_acct, &payer, &leaf);
         env.process(&ix, &[Check::success()]);
-        let expected = host.append(&leaf);
+        let expected = host.append(&mirror_core::crowd_leaf(&leaf));
         assert_eq!(
             pool::current_root(&env.get(&pool_key).data).unwrap(),
             expected,
@@ -945,6 +1005,9 @@ fn build_zk_pool(
         k_floor,
         0,
         0,
+        // The fixed ZK denomination IS the amount the committed fixture binds,
+        // so a fixture settle is an in-denomination settle.
+        ZK_AMOUNT,
         &authority.to_bytes(),
         bump,
         &empty_root,
@@ -965,14 +1028,16 @@ fn build_zk_pool(
 #[test]
 fn commit_deposit_escrows_and_appends() {
     let mut env = Env::new();
-    let (_authority, payer, pool) = init_pool(&mut env, 10, 2, 0);
+    // The escrow size is the pool's, not the caller's: init the pool with the
+    // denomination this test deposits.
+    let amount = 400_000_000u64;
+    let (_authority, payer, pool) = init_pool_full(&mut env, 10, 2, 0, 0, amount);
     let pool_after_init = env.get(&pool).lamports;
     let root0 = pool::current_root(&env.get(&pool).data).unwrap();
 
     env.warp(3);
     let epoch_id = 0u64;
     let epoch_acct = env.epoch_pda(&pool, epoch_id);
-    let amount = 400_000_000u64;
     let commitment = [7u8; 32];
     let ix = env.commit_deposit_ix(&pool, &epoch_acct, &payer, &commitment, amount);
     env.process(&ix, &[Check::success()]);
@@ -1225,6 +1290,7 @@ fn settle_zk_unknown_root_fails() {
             2,
             0,
             0,
+            ZK_AMOUNT,
             &authority.to_bytes(),
             bump,
             &empty_root,
@@ -1393,23 +1459,31 @@ fn settle_zk_accepts_a_recipient_that_is_not_fresh() {
     );
 }
 
-/// The ZK escrow is a POOL-WIDE POT with no per-leaf accounting, and the
-/// membership proof does not care which instruction appended the leaf.
+/// FUND THEFT, REJECTED: a fee-only crowd `COMMIT` cannot produce a leaf the ZK
+/// settle path will spend.
 ///
-/// Here the leaf is appended by 22 fee-only crowd `COMMIT`s (which escrow
-/// nothing), a different participant's `COMMIT_DEPOSIT` funds the escrow, and
-/// the fixture proof then releases that escrow to the leaf owner's recipient.
-/// Two consequences, both documented rather than papered over:
+/// This is the same scenario the pool used to lose money to, run against the
+/// fixed program. Mallory pays for crowd commits only - no escrow, entry fee 0 -
+/// and replays the exact sequence that used to reproduce the committed fixture's
+/// tree: 21 zero leaves, then the fixture leaf at `ZK_LEAF_INDEX`. Bob is the
+/// only participant who escrows anything.
 ///
-///  - Anonymity: the set a membership proof hides in is every leaf under the
-///    proven root, crowd and ZK alike - not the epoch's ZK deposits.
-///  - Soundness: no on-chain check ties the settled `amount` to what the leaf's
-///    owner escrowed, so a v1 pool must not hold value it cannot afford to lose.
-///    Closing this needs a fixed denomination plus domain-separated leaves (a
-///    layout and circuit change), which is why v1 discloses it instead of
-///    shipping a partial fix that would look like a full one.
+/// What stops her is the LEAF DOMAIN. `COMMIT` appends
+/// `Poseidon(CROWD_LEAF_DOMAIN, commitment)` rather than the posted bytes, so no
+/// sequence of crowd commits reproduces a root over ZK deposit leaves, and the
+/// membership proof's `root` public input is not a root this pool ever had. The
+/// settle dies at the recent-root check with `RootNotKnown`, before a nullifier
+/// PDA is created and before a lamport moves. Bob's escrow is untouched.
+///
+/// Note where the fix has to live. Absorbing a domain tag into the DEPOSIT
+/// preimage instead - the obvious reading of "domain-separate the leaves" -
+/// would close nothing: the deposit leaf is 32 caller-supplied bytes, so Mallory
+/// would simply compute the tagged value herself and post it here for free. The
+/// tag has to be applied by the PROGRAM to the FREE path, which is what
+/// `merkle::crowd_leaf` does. `crowd_commit_leaf_is_domain_separated_from_the_zk_deposit_leaf`
+/// pins that the pre-hashing dodge fails too.
 #[test]
-fn settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend() {
+fn settle_zk_rejects_a_fee_only_crowd_leaf_spending_a_depositors_escrow() {
     let mut env = Env::new();
     let (authority, _payer, pool) = init_pool(&mut env, 10, 2, 0);
 
@@ -1420,9 +1494,8 @@ fn settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend() {
     let commit_epoch = 0u64;
     let epoch_acct = env.epoch_pda(&pool, commit_epoch);
 
-    // Reproduce the fixture's tree: empty leaves at 0..21, the fixture leaf at
-    // ZK_LEAF_INDEX. Note the append window (epoch 0) is NOT the epoch the leaf
-    // binds (epoch 7): the program never relates the two.
+    // The old attack: reproduce the fixture's tree with free commits - empty
+    // leaves at 0..21 and the fixture leaf at ZK_LEAF_INDEX.
     for _ in 0..ZK_LEAF_INDEX {
         let ix = env.commit_ix(&pool, &epoch_acct, &mallory, &[0u8; 32]);
         env.process(&ix, &[Check::success()]);
@@ -1430,10 +1503,14 @@ fn settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend() {
     let leaf = zk_fixture_leaf();
     let ix = env.commit_ix(&pool, &epoch_acct, &mallory, &leaf);
     env.process(&ix, &[Check::success()]);
-    assert_eq!(
+    assert_ne!(
         pool::current_root(&env.get(&pool).data).unwrap(),
         fixture::PUBLIC_INPUTS[0],
-        "22 crowd commits must reproduce the fixture's root exactly"
+        "crowd commits must NOT be able to reproduce a root over ZK deposit leaves"
+    );
+    assert!(
+        !pool::is_known_root(&env.get(&pool).data, &fixture::PUBLIC_INPUTS[0]).unwrap(),
+        "and the fixture root must not have entered the recent-root ring"
     );
 
     // Bob is the only participant who escrows anything.
@@ -1447,8 +1524,9 @@ fn settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend() {
         pool_before_deposit + ZK_AMOUNT,
         "Bob's escrow is the only value in the pot"
     );
+    let pool_after_deposit = env.get(&pool).lamports;
 
-    // Mallory settles her crowd leaf against Bob's escrow.
+    // Mallory tries to settle her crowd leaf against Bob's escrow.
     let recipient = zk_recipient();
     env.fund(recipient, 0);
     env.warp(80);
@@ -1463,17 +1541,208 @@ fn settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend() {
         ZK_AMOUNT,
         &fixture::PUBLIC_INPUTS,
     );
-    env.process(&ix, &[Check::success()]);
+    env.process(&ix, &[Check::err(custom(MirrorPoolError::RootNotKnown))]);
+
+    // Fail closed, all the way: no payout, no drain, no nullifier burnt.
     assert_eq!(
         env.get(&recipient).lamports,
-        ZK_AMOUNT,
-        "the fee-only crowd leaf spent the depositor's escrow"
+        0,
+        "the fee-only crowd leaf must not have been paid anything"
     );
     assert_eq!(
         env.get(&pool).lamports,
-        pool_before_deposit,
-        "the pot is drained back to its pre-deposit balance"
+        pool_after_deposit,
+        "Bob's escrow must still be in the pot"
     );
+    assert_ne!(
+        env.get(&nf_pda).owner,
+        env.program_id,
+        "a rejected settle must not create the nullifier PDA"
+    );
+}
+
+/// The domain separation itself, stated directly against the accumulator: the
+/// leaf a crowd `COMMIT` appends is never the leaf a `COMMIT_DEPOSIT` of the same
+/// bytes appends, and pre-hashing the domain tag client-side does not change
+/// that.
+///
+/// This is the property `settle_zk_rejects_a_fee_only_crowd_leaf_spending_a_depositors_escrow`
+/// depends on, isolated so a regression names itself.
+#[test]
+fn crowd_commit_leaf_is_domain_separated_from_the_zk_deposit_leaf() {
+    let mut env = Env::new();
+    let (_authority, payer, pool) = init_pool(&mut env, 1_000, 2, 0);
+    env.warp(3);
+    let epoch_acct = env.epoch_pda(&pool, 0);
+
+    // A crowd COMMIT of `c` appends crowd_leaf(c), which the host mirror agrees
+    // on (this also cross-checks the program's mirrored domain constant against
+    // mirror-core's).
+    let c = zk_fixture_leaf();
+    let ix = env.commit_ix(&pool, &epoch_acct, &payer, &c);
+    env.process(&ix, &[Check::success()]);
+    let mut host = host::HostFrontier::new();
+    assert_eq!(
+        pool::current_root(&env.get(&pool).data).unwrap(),
+        host.append(&mirror_core::crowd_leaf(&c)),
+        "COMMIT must append the domain-wrapped leaf, not the posted commitment"
+    );
+
+    // Pre-hashing the tag client-side does not get a caller into the ZK domain:
+    // the program wraps whatever it is handed, so the result is wrapped twice.
+    let ix = env.commit_ix(&pool, &epoch_acct, &payer, &mirror_core::crowd_leaf(&c));
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        pool::current_root(&env.get(&pool).data).unwrap(),
+        host.append(&mirror_core::crowd_leaf(&mirror_core::crowd_leaf(&c))),
+        "a pre-wrapped commitment is wrapped again, never unwrapped"
+    );
+
+    // A COMMIT_DEPOSIT of the SAME bytes appends them verbatim: a different leaf.
+    let mut env2 = Env::new();
+    let (_a2, payer2, pool2) = init_pool(&mut env2, 1_000, 2, 0);
+    env2.warp(3);
+    let epoch2 = env2.epoch_pda(&pool2, 0);
+    env2.fund(payer2, 100 * SOL);
+    let ix = env2.commit_deposit_ix(&pool2, &epoch2, &payer2, &c, ZK_AMOUNT);
+    env2.process(&ix, &[Check::success()]);
+    let mut host2 = host::HostFrontier::new();
+    assert_eq!(
+        pool::current_root(&env2.get(&pool2).data).unwrap(),
+        host2.append(&c),
+        "COMMIT_DEPOSIT must append the commitment verbatim (the ZK domain)"
+    );
+    assert_ne!(
+        mirror_core::crowd_leaf(&c),
+        c,
+        "the two domains must not coincide for any commitment"
+    );
+}
+
+/// The mirrored constants really are mirrors. The program redefines
+/// `mirror_core`'s wire layout and crowd leaf-domain tag by hand so the deployed
+/// `.so` never links a std host crate; this asserts the two copies agree instead
+/// of trusting the comment that says they must.
+#[test]
+fn mirrored_constants_match_mirror_core() {
+    use mirror_core::wire as cw;
+    use mirror_pool::wire as pw;
+
+    assert_eq!(
+        mirror_pool::state::merkle::CROWD_LEAF_DOMAIN,
+        mirror_core::CROWD_LEAF_DOMAIN,
+        "the crowd leaf-domain tag must be identical on both sides"
+    );
+    assert_eq!(pw::INIT_POOL_LEN, cw::INIT_POOL_LEN);
+    assert_eq!(pw::COMMIT_LEN, cw::COMMIT_LEN);
+    assert_eq!(pw::COMMIT_DEPOSIT_LEN, cw::COMMIT_DEPOSIT_LEN);
+    assert_eq!(pw::SETTLE_ZK_LEN, cw::SETTLE_ZK_LEN);
+    assert_eq!(pw::SETTLE_ZK_ASSOCIATED_LEN, cw::SETTLE_ZK_ASSOCIATED_LEN);
+    assert_eq!(pw::tag::COMMIT, cw::tag::COMMIT);
+    assert_eq!(pw::tag::COMMIT_DEPOSIT, cw::tag::COMMIT_DEPOSIT);
+    assert_eq!(pw::tag::SETTLE_ZK, cw::tag::SETTLE_ZK);
+}
+
+/// The amount half of escrow soundness on the deposit side: a pool takes exactly
+/// its `zk_denomination` and nothing else.
+///
+/// Without this, a depositor could escrow one lamport while binding an
+/// `actionHash` over a large amount, then settle for the large amount - the leaf
+/// is one opaque field element, so no on-chain check can compare the two.
+#[test]
+fn commit_deposit_rejects_an_off_denomination_escrow() {
+    let mut env = Env::new();
+    let (_authority, payer, pool) = init_pool(&mut env, 10, 2, 0);
+    let pool_before = env.get(&pool).lamports;
+    env.warp(3);
+    let epoch_acct = env.epoch_pda(&pool, 0);
+
+    for amount in [1u64, ZK_AMOUNT - 1, ZK_AMOUNT + 1, 10 * ZK_AMOUNT] {
+        let ix = env.commit_deposit_ix(&pool, &epoch_acct, &payer, &[3u8; 32], amount);
+        env.process(
+            &ix,
+            &[Check::err(custom(MirrorPoolError::DenominationMismatch))],
+        );
+    }
+    assert_eq!(
+        env.get(&pool).lamports,
+        pool_before,
+        "a rejected deposit must move no lamports"
+    );
+    assert_eq!(
+        pool::commitment_count(&env.get(&pool).data).unwrap(),
+        0,
+        "and must append no leaf"
+    );
+
+    // The pool's own size is accepted.
+    let ix = env.commit_deposit_ix(&pool, &epoch_acct, &payer, &[3u8; 32], ZK_AMOUNT);
+    env.process(&ix, &[Check::success()]);
+}
+
+/// The amount half of escrow soundness on the settle side: a settle pays exactly
+/// the pool's `zk_denomination`.
+///
+/// The pool below is funded far above one denomination (as a live pool with many
+/// deposits would be), so the only thing standing between a settle and the rest
+/// of the pot is this check. It runs before the proof is verified and before the
+/// nullifier PDA is created, so an over-draw attempt leaves no trace.
+#[test]
+fn settle_zk_rejects_an_off_denomination_amount() {
+    let mut env = Env::new();
+    let authority = Pubkey::new_unique();
+    env.fund(authority, SOL);
+    let pool_start = 50 * SOL;
+    let pool = build_zk_pool(&mut env, &authority, 10, 2, pool_start);
+    let recipient = zk_recipient();
+    env.fund(recipient, 0);
+    env.warp(80);
+
+    // The proof's actionHash binds (recipient, ZK_AMOUNT), so a settle for a
+    // different amount would fail the actionHash check too - but the denomination
+    // gate is what fires, and it fires FIRST, before any state is touched.
+    let nf = fixture::PUBLIC_INPUTS[1];
+    let nf_pda = env.nf_pda(&pool, ZK_EPOCH, &nf);
+    for amount in [ZK_AMOUNT + 1, 10 * ZK_AMOUNT, 1] {
+        let ix = env.settle_zk_ix(
+            &pool,
+            &authority,
+            &nf_pda,
+            &recipient,
+            ZK_EPOCH,
+            amount,
+            &fixture::PUBLIC_INPUTS,
+        );
+        env.process(
+            &ix,
+            &[Check::err(custom(MirrorPoolError::DenominationMismatch))],
+        );
+    }
+    assert_eq!(env.get(&recipient).lamports, 0, "nothing may be paid out");
+    assert_eq!(
+        env.get(&pool).lamports,
+        pool_start,
+        "the pot must be untouched"
+    );
+    assert_ne!(
+        env.get(&nf_pda).owner,
+        env.program_id,
+        "no nullifier PDA may be created by a rejected settle"
+    );
+
+    // The in-denomination settle still works, so the gate is not just refusing
+    // everything.
+    let ix = env.settle_zk_ix(
+        &pool,
+        &authority,
+        &nf_pda,
+        &recipient,
+        ZK_EPOCH,
+        ZK_AMOUNT,
+        &fixture::PUBLIC_INPUTS,
+    );
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(env.get(&recipient).lamports, ZK_AMOUNT);
 }
 
 #[test]
@@ -1558,12 +1827,12 @@ fn commit_deposit_splits_into_reward_pool() {
     let mut env = Env::new();
     let entry_fee = 20_000u64;
     let reward_bps = 2_500u16; // 25%
-    let (_authority, payer, pool) = init_pool_with_reward(&mut env, 10, 2, entry_fee, reward_bps);
+    let amount = 400_000_000u64;
+    let (_authority, payer, pool) = init_pool_full(&mut env, 10, 2, entry_fee, reward_bps, amount);
     let pool_after_init = env.get(&pool).lamports;
 
     env.warp(3);
     let e0 = env.epoch_pda(&pool, 0);
-    let amount = 400_000_000u64;
     let ix = env.commit_deposit_ix(&pool, &e0, &payer, &[7u8; 32], amount);
     env.process(&ix, &[Check::success()]);
 

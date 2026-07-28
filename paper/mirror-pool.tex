@@ -932,14 +932,20 @@ leaks and what we do not claim.
         same reason recipient \emph{freshness} is a client convention rather than
         a check: a dusted recipient address would otherwise strand the escrow.
         Both properties are pinned by mollusk tests.
-  \item \textbf{The ZK escrow is a shared pot (v1 soundness).} The leaf is opaque,
-        so nothing on-chain ties a settled amount to what its owner escrowed, and
-        because both paths append the same leaf shape to one accumulator, a
-        fee-only crowd \code{Commit} leaf satisfies the membership circuit too (a
-        test demonstrates exactly this). A v1 pool must therefore not hold value it
-        cannot afford to lose. Closing it needs a fixed denomination plus
-        domain-separated leaves, a layout and circuit change; a partial fix would
-        read like a full one.
+  \item \textbf{The ZK escrow shared-pot hole is closed.} It previously was one:
+        the leaf is opaque, so nothing on-chain tied a settled amount to what its
+        owner escrowed, and because both paths appended the same leaf shape to one
+        accumulator, a fee-only crowd \code{Commit} leaf satisfied the membership
+        circuit as well as a deposit leaf did. Both halves are fixed: the ZK pool
+        carries a fixed denomination set at init, and crowd leaves are
+        domain-separated \emph{by the program},
+        $\mathit{crowdLeaf} = \mathrm{Poseidon}(\mathit{CROWD\_LEAF\_DOMAIN},
+        \mathit{commitment})$. The tag must be applied by the program to the free
+        path rather than by the client to the deposit path, since a deposit leaf is
+        32 caller-supplied bytes and a client would simply pre-compute the tagged
+        value. Two tests pin it: the original attack now failing, and the
+        pre-hashing dodge failing. No circuit change was required, so no verifying
+        key was regenerated.
 \end{itemize}
 
 \section{Related work}

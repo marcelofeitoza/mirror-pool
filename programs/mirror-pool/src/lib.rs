@@ -56,10 +56,20 @@
 //!   root (a small root-history ring buffer on the Pool), enforces per-nullifier
 //!   anti-replay, binds the recipient+amount into the proof's `actionHash` so the
 //!   relay cannot redirect, and executes the v1 action (transfer the escrow to
-//!   the bound recipient). It enforces NO k-anonymity floor, NO denomination, and
-//!   NO recipient freshness: the `settle_zk` module header states exactly why
-//!   each of those cannot be a settle-time check on a path whose escrow has no
-//!   refund, and where the compensating control lives instead.
+//!   the bound recipient). It enforces NO k-anonymity floor and NO recipient
+//!   freshness: the `settle_zk` module header states exactly why neither can be a
+//!   settle-time check on a path whose escrow has no refund, and where the
+//!   compensating control lives instead.
+//!
+//! Escrow soundness on the ZK path rests on two on-chain rules, both stated in
+//! full in the `settle_zk` module header. LEAF DOMAIN: a crowd `COMMIT` appends
+//! `Poseidon(CROWD_LEAF_DOMAIN, commitment)` while `COMMIT_DEPOSIT` appends its
+//! commitment verbatim, so the only leaves in the domain the ZK circuits prove
+//! membership in are leaves that paid an escrow. DENOMINATION: `COMMIT_DEPOSIT`
+//! takes exactly `pool.zk_denomination` and both ZK settle paths pay exactly it,
+//! so a settle cannot draw more than its leaf put in. Together they bound total
+//! settled by total escrowed: distinct settles burn distinct nullifiers, which
+//! means distinct leaves, each of which escrowed one denomination.
 //!   Swap/stake-from-pool are documented extensions of the same pattern (execute
 //!   a different action from the pool authority via CPI).
 //!
@@ -174,6 +184,10 @@ pub mod wire {
 
     /// COMMIT layout: `[tag(1)][commitment(32)]`.
     /// MUST match `mirror_core::wire::COMMIT_LEN`.
+    ///
+    /// The appended leaf is `state::merkle::crowd_leaf(commitment)`, NOT the
+    /// posted bytes: crowd leaves live in their own hash domain so a free commit
+    /// can never be spent by the ZK settle paths.
     pub const COMMIT_LEN: usize = 1 + 32;
 
     /// SETTLE_EPOCH header: `[tag(1)][epoch(8 LE)][n_nullifiers(4 LE)]`
@@ -182,7 +196,8 @@ pub mod wire {
     pub const SETTLE_HEADER_LEN: usize = 1 + 8 + 4;
 
     /// INIT_POOL layout:
-    /// `[tag(1)][epoch_slots(8 LE)][k_floor(4 LE)][entry_fee(8 LE)][reward_bps(2 LE)]`.
+    /// `[tag(1)][epoch_slots(8 LE)][k_floor(4 LE)][entry_fee(8 LE)][reward_bps(2 LE)]
+    /// [zk_denomination(8 LE)]`.
     /// MUST match `mirror_core::wire::INIT_POOL_LEN`.
     ///
     /// `entry_fee` is a per-commit anti-Sybil deposit (lamports) transferred
@@ -191,7 +206,11 @@ pub mod wire {
     /// the on-chain reward pool (`reward_pool_lamports`); the remainder stays in
     /// the pool as the settlement reserve. `reward_bps` must be `<= 10_000`; a
     /// zero `entry_fee` (or zero `reward_bps`) leaves the reward pool empty.
-    pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8 + 2;
+    /// `zk_denomination` is the single escrow size the ZK opt-in path accepts
+    /// and must be non-zero: COMMIT_DEPOSIT takes exactly it and both ZK settle
+    /// paths pay exactly it, which is what caps a settle at what its leaf
+    /// escrowed.
+    pub const INIT_POOL_LEN: usize = 1 + 8 + 4 + 8 + 2 + 8;
 
     /// CLAIM_REWARD layout: `[tag(1)]` (no body). The claimant signs; their dwell
     /// PDA carries the accumulated dwell used to size the payout.
@@ -206,7 +225,10 @@ pub mod wire {
     ///
     /// The ZK opt-in escrow: escrow `amount` lamports into the pool and append
     /// the commitment (whose `actionHash` binds `(recipient, amount)`) to the
-    /// SAME frontier accumulator the crowd `COMMIT` path uses.
+    /// SAME frontier accumulator the crowd `COMMIT` path uses - but VERBATIM,
+    /// where a crowd commit is domain-wrapped first, so only a leaf that paid an
+    /// escrow lands in the domain the ZK circuits prove membership in. `amount`
+    /// must equal the pool's `zk_denomination`.
     pub const COMMIT_DEPOSIT_LEN: usize = 1 + 32 + 8;
 
     /// SETTLE_ZK layout (ONE membership per call; batch at the coordinator).
@@ -369,7 +391,7 @@ pub mod wire {
     // Layout sanity: keep the documented sizes honest at compile time.
     const _: () = assert!(COMMIT_LEN == 33);
     const _: () = assert!(SETTLE_HEADER_LEN == 13);
-    const _: () = assert!(INIT_POOL_LEN == 23);
+    const _: () = assert!(INIT_POOL_LEN == 31);
     const _: () = assert!(COMMIT_DEPOSIT_LEN == 41);
     const _: () = assert!(SETTLE_ZK_LEN == 401);
     const _: () = assert!(CLAIM_REWARD_LEN == 1);
@@ -489,12 +511,23 @@ pub enum MirrorPoolError {
     ValuePoolAlreadyInitialized = 21,
     /// The referenced ValuePool account has not been initialized.
     ValuePoolNotInitialized = 22,
-    /// TRANSACT: the ValuePool pins a fixed denomination (`denomination = Some(d)`)
-    /// and the public deposit/withdraw magnitude is not exactly `d`. Fixed-denom
-    /// pools give amount k-anonymity: every public value crossing is byte-identical,
-    /// so amounts cannot single out a participant. Internal transfers (publicAmount
-    /// == 0) move no public value and are exempt. Fail closed: the check runs before
-    /// the Groth16 proof is verified, so a mismatch is rejected with no state change.
+    /// A fixed-denomination pool was handed an off-denomination amount.
+    ///
+    /// Two callers raise it. TRANSACT: the ValuePool pins a denomination
+    /// (`denomination = Some(d)`) and the public deposit/withdraw magnitude is
+    /// not exactly `d` (internal transfers, `publicAmount == 0`, move no public
+    /// value and are exempt). COMMIT_DEPOSIT / SETTLE_ZK / SETTLE_ZK_ASSOCIATED:
+    /// the behavioral Pool's `zk_denomination` is the ONE escrow size the ZK
+    /// opt-in path accepts, and the settled `amount` must be exactly it.
+    ///
+    /// Fixed denominations buy amount k-anonymity - every value crossing the
+    /// boundary is byte-identical, so amounts cannot single out a participant -
+    /// and, on the behavioral pool, they are also the SOUNDNESS control that caps
+    /// a settle at what its leaf escrowed: nothing on-chain can read the amount a
+    /// leaf's `actionHash` bound, so the only way to keep the two equal is to
+    /// admit exactly one size on both sides. Fail closed: the check runs before
+    /// the Groth16 proof is verified, so a mismatch is rejected with no state
+    /// change.
     DenominationMismatch = 23,
     /// INIT_ASSOCIATION on an AssociationSet PDA that is already registered.
     AssociationAlreadyInitialized = 24,

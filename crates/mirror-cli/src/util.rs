@@ -42,6 +42,12 @@ fn hex_nibble(b: u8) -> u8 {
 /// in the file's order - which IS the ordering the root is built over, so this
 /// parser is what binds a proof to a set. Every command that takes `--leaves`
 /// reads it through here.
+///
+/// These are ACCUMULATOR LEAVES, not raw posted commitments. A `CommitDeposit`
+/// leaf is its commitment verbatim, but a crowd `Commit` leaf is
+/// `mirror_core::crowd_leaf(commitment)` - the two paths live in separate hash
+/// domains (see `crate::tree`) - so a file that lists crowd commitments raw
+/// rebuilds a root the chain never had.
 pub fn read_leaves(path: &Path) -> Result<Vec<Hash32>> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading leaves file {}", path.display()))?;

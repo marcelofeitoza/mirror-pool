@@ -304,10 +304,12 @@ reasoning, and the set the ZK path actually gives, are in
   amount*, not the pool's total deposits; and the program will settle into a set
   of one. The floor is a client check (`mirror-cli prove` refuses below `k_floor`
   unless waived), because the ZK escrow has no refund path and an on-chain floor
-  would strand it. Related and stated with the same bluntness: the ZK escrow is a
-  **pool-wide pot**, so no on-chain check ties a settled amount to any single
-  deposit, and a fee-only crowd commit can spend it. A v1 pool must not hold value
-  it cannot afford to lose. Both limits are pinned by tests and explained in
+  would strand it. **The related escrow-soundness hole is now CLOSED**: crowd
+  `Commit` leaves are domain-separated from ZK deposit leaves by the PROGRAM, and
+  the ZK pool carries a fixed denomination, so a fee-only crowd commit can no
+  longer spend a depositor's escrow. Pinned by
+  `settle_zk_rejects_a_fee_only_crowd_leaf_spending_a_depositors_escrow` and
+  `crowd_commit_leaf_is_domain_separated_from_the_zk_deposit_leaf`. See
   [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) section 4.
 - **It does not manufacture anonymity from operator-owned cover traffic.**
   Decoys the operator controls inflate the nominal count and add zero real
