@@ -42,7 +42,7 @@ use crate::chain::{self, Chain};
 use crate::groth16::{self, SnarkjsProof};
 use crate::note::{ActionRecord, Note};
 use crate::tree::{self, MerklePath};
-use crate::util::{be32_to_decimal, from_hex32, to_hex};
+use crate::util::{be32_to_decimal, from_hex32, read_leaves, to_hex};
 
 /// `prove` arguments.
 pub struct ProveOpts {
@@ -149,15 +149,45 @@ pub struct SettleZkEmit {
     pub anonymity: AnonymitySet,
 }
 
-pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
-    let note = Note::load(&opts.note_path)?;
+/// A ZK opt-in note, resolved into everything BOTH proving commands need, with
+/// every consistency check the client owes the user already made.
+///
+/// `prove` and `prove-associated` prove different statements, but they bind the
+/// same note the same way, so this binding (and its validation) has exactly one
+/// definition: recompute `action_hash`, `nullifier_hash` and the leaf from the
+/// note's own secret, refuse a leaf that disagrees with the note's commitment,
+/// rebuild the pool inclusion path, self-check it against its own root, and
+/// refuse a root the pool would not accept.
+pub(crate) struct ZkWitness {
+    pub program_id: Pubkey,
+    pub pool: Pubkey,
+    pub recipient: Pubkey,
+    pub amount: u64,
+    pub secret: mirror_core::Secret,
+    pub action_hash: Hash32,
+    pub nullifier_hash: Hash32,
+    pub leaf: Hash32,
+    pub path: MerklePath,
+    /// The connected RPC, so the caller can keep reading without reconnecting.
+    pub chain: Chain,
+    /// The pool account this proof was checked against.
+    pub pool_state: chain::PoolState,
+}
 
+pub(crate) fn resolve_zk_note(
+    note: &Note,
+    note_path: &Path,
+    leaves: Option<&Path>,
+    rpc_url: &str,
+    command: &str,
+) -> Result<ZkWitness> {
     // A ZK proof only exists for the transfer (opt-in) path.
     let (recipient_str, amount) = match &note.action {
         ActionRecord::Transfer { recipient, amount } => (recipient.clone(), *amount),
         ActionRecord::Crowd { .. } => bail!(
-            "note {} is a crowd-path note; `prove` is only for ZK opt-in (deposit-commit) notes",
-            opts.note_path.display()
+            "note {} is a crowd-path note; `{command}` is only for ZK opt-in \
+             (deposit-commit) notes",
+            note_path.display()
         ),
     };
 
@@ -171,7 +201,7 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
     let secret = mirror_core::Secret::from_bytes(from_hex32(&note.secret_hex)?);
     let epoch = Epoch(note.epoch);
 
-    // (1) Recompute the bound values and confirm the leaf matches the note.
+    // Recompute the bound values and confirm the leaf matches the note.
     let action_hash = transfer_action_hash(&recipient.to_bytes(), amount);
     let nullifier_hash = nullifier(&secret, epoch).0;
     let leaf = commit_with_action_hash(&secret, &action_hash, epoch).0;
@@ -184,23 +214,21 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
         );
     }
 
-    // (2) Rebuild the inclusion path off-chain.
-    let path = build_path(&note, &leaf, opts.leaves.as_deref())?;
+    // Rebuild the pool inclusion path off-chain and self-check the rebuild.
+    let path = build_path(note, &leaf, leaves)?;
     if path.elements.len() != tree::DEPTH {
         bail!(
-            "rebuilt path has {} levels, expected {}",
+            "rebuilt pool path has {} levels, expected {}",
             path.elements.len(),
             tree::DEPTH
         );
     }
-    // The path must verify to its own root (self-check on the client-side rebuild).
-    let recomputed = tree::verify_path(&leaf, &path.elements, &path.indices);
-    if recomputed != path.root {
-        bail!("client-side path does not verify to its root (rebuild bug)");
+    if tree::verify_path(&leaf, &path.elements, &path.indices) != path.root {
+        bail!("client-side pool path does not verify to its root (rebuild bug)");
     }
 
     // Confirm the Pool currently accepts this root (current root or in the ring).
-    let chain = Chain::new(opts.rpc_url.clone());
+    let chain = Chain::new(rpc_url.to_string());
     let pool_state = chain
         .pool_state(&pool)
         .context("reading the pool account to check the proof root is known")?;
@@ -212,6 +240,44 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
             pool_state.root_ring.len()
         );
     }
+
+    Ok(ZkWitness {
+        program_id,
+        pool,
+        recipient,
+        amount,
+        secret,
+        action_hash,
+        nullifier_hash,
+        leaf,
+        path,
+        chain,
+        pool_state,
+    })
+}
+
+pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
+    let note = Note::load(&opts.note_path)?;
+    // (1)+(2) Bind and validate the note, rebuild the pool path, check the root.
+    let ZkWitness {
+        program_id,
+        pool,
+        recipient,
+        amount,
+        secret,
+        action_hash,
+        nullifier_hash,
+        path,
+        chain,
+        pool_state,
+        ..
+    } = resolve_zk_note(
+        &note,
+        &opts.note_path,
+        opts.leaves.as_deref(),
+        &opts.rpc_url,
+        "prove",
+    )?;
 
     // (3) The anonymity gate. `SettleZk` publishes the epoch and the amount, so
     // the set that covers this output is the window's same-amount ZK deposits;
@@ -380,24 +446,6 @@ pub(crate) fn build_path(note: &Note, leaf: &Hash32, leaves: Option<&Path>) -> R
         frontier.push(from_hex32(h)?);
     }
     Ok(tree::incremental_path(leaf, leaf_index, &frontier))
-}
-
-/// Read a leaf set: one 64-char hex commitment per non-empty line, in order.
-fn read_leaves(path: &Path) -> Result<Vec<Hash32>> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading leaves file {}", path.display()))?;
-    let mut leaves = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        leaves.push(
-            from_hex32(line)
-                .with_context(|| format!("leaf on line {} of {}", i + 1, path.display()))?,
-        );
-    }
-    Ok(leaves)
 }
 
 /// The circom `input.json` object for the membership circuit (decimal field
@@ -692,6 +740,84 @@ mod tests {
         assert!(set(1, 1).meets_floor());
     }
 
+    /// The committed proving fixture (`circuits/artifacts/proof_fixture.json`),
+    /// rebuilt from mirror-core + our tree code: ONE leaf at index 21 in an
+    /// otherwise-empty depth-20 tree, secret 1111..9999, epoch 7, recipient bytes
+    /// 0x01..0x20, amount 0.25 SOL. Every sibling is therefore the empty-subtree
+    /// hash for its level (a sparse membership vector, not a dense frontier).
+    ///
+    /// Every test that proves under this witness gets it from HERE, so the
+    /// fixture the tests reproduce has exactly one definition.
+    struct Fixture {
+        secret: mirror_core::Secret,
+        amount: u64,
+        epoch: u64,
+        action_hash: [u8; 32],
+        nullifier_hash: [u8; 32],
+        path: MerklePath,
+    }
+
+    fn fixture_witness() -> Fixture {
+        const LEAF_INDEX: u64 = 21;
+        let secret = mirror_core::Secret::from_bytes(
+            groth16::to_be32("111122223333444455556666777788889999").unwrap(),
+        );
+        let mut recipient = [0u8; 32];
+        for (i, b) in recipient.iter_mut().enumerate() {
+            *b = (i + 1) as u8;
+        }
+        let amount: u64 = 250_000_000;
+        let epoch: u64 = 7;
+        let action_hash = transfer_action_hash(&recipient, amount);
+        let nullifier_hash = nullifier(&secret, Epoch(epoch)).0;
+        let leaf = commit_with_action_hash(&secret, &action_hash, Epoch(epoch)).0;
+        let zeros = tree::zero_ladder(tree::DEPTH);
+        let mut elements = Vec::with_capacity(tree::DEPTH);
+        let mut indices = Vec::with_capacity(tree::DEPTH);
+        for (level, zero) in zeros.iter().enumerate().take(tree::DEPTH) {
+            elements.push(*zero);
+            indices.push(((LEAF_INDEX >> level) & 1) as u8);
+        }
+        let root = tree::verify_path(&leaf, &elements, &indices);
+        Fixture {
+            secret,
+            amount,
+            epoch,
+            action_hash,
+            nullifier_hash,
+            path: MerklePath {
+                elements,
+                indices,
+                root,
+            },
+        }
+    }
+
+    /// The committed fixture's `publicSignals`, as decimal strings.
+    fn fixture_public_signals() -> Vec<String> {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../circuits/artifacts/proof_fixture.json"
+        )))
+        .unwrap();
+        fixture["publicSignals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The repo root: this crate lives at `crates/mirror-cli`.
+    fn repo_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
     /// DECISIVE offline check: `prove`'s client-side building blocks reproduce the
     /// committed circuit fixture's root, nullifierHash, and actionHash EXACTLY.
     ///
@@ -705,53 +831,25 @@ mod tests {
     /// against a root this CLI (and the on-chain accumulator) produce.
     #[test]
     fn client_rebuild_reproduces_fixture_public_signals() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../circuits/artifacts/proof_fixture.json"
-        )))
-        .unwrap();
-        let ps = fixture["publicSignals"].as_array().unwrap();
-        let want_root = ps[0].as_str().unwrap();
-        let want_nullifier = ps[1].as_str().unwrap();
-        let want_action = ps[2].as_str().unwrap();
-        let epoch: u64 = ps[3].as_str().unwrap().parse().unwrap();
+        let ps = fixture_public_signals();
+        let f = fixture_witness();
 
-        // Rebuild the fixture inputs with mirror-core + our tree code.
-        let secret = mirror_core::Secret::from_bytes(
-            groth16::to_be32("111122223333444455556666777788889999").unwrap(),
-        );
-        let mut recipient = [0u8; 32];
-        for (i, b) in recipient.iter_mut().enumerate() {
-            *b = (i + 1) as u8;
-        }
-        let amount: u64 = 250_000_000;
-        let action_hash = transfer_action_hash(&recipient, amount);
-        let nullifier_hash = nullifier(&secret, Epoch(epoch)).0;
-        let leaf = commit_with_action_hash(&secret, &action_hash, Epoch(epoch)).0;
-
-        // Single leaf at index 21: every sibling is the empty-subtree hash for
-        // its level (the fixture's sparse membership vector).
-        let zeros = tree::zero_ladder(tree::DEPTH);
-        let leaf_index: u64 = 21;
-        let mut elements = Vec::with_capacity(tree::DEPTH);
-        let mut indices = Vec::with_capacity(tree::DEPTH);
-        for (level, zero) in zeros.iter().enumerate().take(tree::DEPTH) {
-            elements.push(*zero);
-            indices.push(((leaf_index >> level) & 1) as u8);
-        }
-        let root = tree::verify_path(&leaf, &elements, &indices);
-
-        assert_eq!(be32_to_decimal(&root), want_root, "root must match fixture");
         assert_eq!(
-            be32_to_decimal(&nullifier_hash),
-            want_nullifier,
+            be32_to_decimal(&f.path.root),
+            ps[0],
+            "root must match fixture"
+        );
+        assert_eq!(
+            be32_to_decimal(&f.nullifier_hash),
+            ps[1],
             "nullifierHash must match fixture"
         );
         assert_eq!(
-            be32_to_decimal(&action_hash),
-            want_action,
+            be32_to_decimal(&f.action_hash),
+            ps[2],
             "actionHash must match fixture"
         );
+        assert_eq!(f.epoch.to_string(), ps[3], "epoch must match fixture");
     }
 
     /// Resolve the build artifacts a live test needs, or FAIL.
@@ -809,45 +907,20 @@ mod tests {
             eprintln!("MIRROR_PROVE_LIVE != 1; skipping live prove pipeline test");
             return;
         }
-        // Resolve circuit artifacts relative to the repo root (crate is crates/mirror-cli).
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        // Resolve circuit artifacts relative to the repo root.
+        let root = repo_root();
         let wasm = root.join("circuits/membership_js/membership.wasm");
         let zkey = root.join("circuits/membership_final.zkey");
         let vk = root.join("circuits/artifacts/verification_key.json");
 
-        // Reproduce the fixture witness (single leaf at index 21).
-        let secret = mirror_core::Secret::from_bytes(
-            groth16::to_be32("111122223333444455556666777788889999").unwrap(),
-        );
-        let mut recipient = [0u8; 32];
-        for (i, b) in recipient.iter_mut().enumerate() {
-            *b = (i + 1) as u8;
-        }
-        let amount: u64 = 250_000_000;
-        let epoch: u64 = 7;
-        let action_hash = transfer_action_hash(&recipient, amount);
-        let nullifier_hash = nullifier(&secret, Epoch(epoch)).0;
-        let leaf = commit_with_action_hash(&secret, &action_hash, Epoch(epoch)).0;
-        // Single leaf at index 21: every sibling is the empty-subtree hash for its
-        // level, reproducing the committed fixture's exact membership vector.
-        let zeros = tree::zero_ladder(tree::DEPTH);
-        let mut elements = Vec::with_capacity(tree::DEPTH);
-        let mut indices = Vec::with_capacity(tree::DEPTH);
-        for (level, zero) in zeros.iter().enumerate().take(tree::DEPTH) {
-            elements.push(*zero);
-            indices.push(((21u64 >> level) & 1) as u8);
-        }
-        let root = tree::verify_path(&leaf, &elements, &indices);
-        let path = MerklePath {
-            elements,
-            indices,
-            root,
-        };
+        let Fixture {
+            secret,
+            amount,
+            epoch,
+            action_hash,
+            nullifier_hash,
+            path,
+        } = fixture_witness();
 
         let work = std::env::temp_dir().join("mirror-cli-prove-live-test");
         std::fs::create_dir_all(&work).unwrap();
@@ -917,53 +990,21 @@ mod tests {
             eprintln!("MIRROR_PROVE_LIVE != 1; skipping live Rust prove test");
             return;
         }
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-
-        // Reproduce the committed fixture witness (single leaf at index 21 in an
-        // otherwise-empty depth-20 tree), so the public signals also match the
-        // committed proof_fixture.json.
-        let secret = mirror_core::Secret::from_bytes(
-            groth16::to_be32("111122223333444455556666777788889999").unwrap(),
-        );
-        let mut recipient = [0u8; 32];
-        for (i, b) in recipient.iter_mut().enumerate() {
-            *b = (i + 1) as u8;
-        }
-        let amount: u64 = 250_000_000;
-        let epoch: u64 = 7;
-        let action_hash = transfer_action_hash(&recipient, amount);
-        let nullifier_hash = nullifier(&secret, Epoch(epoch)).0;
-        let leaf = commit_with_action_hash(&secret, &action_hash, Epoch(epoch)).0;
-
-        let zeros = tree::zero_ladder(tree::DEPTH);
-        let mut elements = Vec::with_capacity(tree::DEPTH);
-        let mut indices = Vec::with_capacity(tree::DEPTH);
-        for (level, zero) in zeros.iter().enumerate().take(tree::DEPTH) {
-            elements.push(*zero);
-            indices.push(((21u64 >> level) & 1) as u8);
-        }
-        let root = tree::verify_path(&leaf, &elements, &indices);
-        let path = MerklePath {
-            elements,
-            indices,
-            root,
-        };
+        let repo = repo_root();
+        let Fixture {
+            secret,
+            amount,
+            epoch,
+            action_hash,
+            nullifier_hash,
+            path,
+        } = fixture_witness();
 
         // Cross-check the reproduced public signals against the committed fixture.
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../circuits/artifacts/proof_fixture.json"
-        )))
-        .unwrap();
-        let ps = fixture["publicSignals"].as_array().unwrap();
-        assert_eq!(be32_to_decimal(&path.root), ps[0].as_str().unwrap());
-        assert_eq!(be32_to_decimal(&nullifier_hash), ps[1].as_str().unwrap());
-        assert_eq!(be32_to_decimal(&action_hash), ps[2].as_str().unwrap());
+        let ps = fixture_public_signals();
+        assert_eq!(be32_to_decimal(&path.root), ps[0]);
+        assert_eq!(be32_to_decimal(&nullifier_hash), ps[1]);
+        assert_eq!(be32_to_decimal(&action_hash), ps[2]);
 
         // Prove entirely in Rust (no Node). `prove_rust::prove` verifies with
         // ark-groth16 internally and bails on failure.
@@ -1039,12 +1080,7 @@ mod tests {
             eprintln!("MIRROR_PROVE_LIVE != 1; skipping live ceremony test");
             return;
         }
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        let repo = repo_root();
         let r1cs = repo.join("circuits/membership.r1cs");
         let ptau = repo.join("circuits/pot16_final.ptau");
         let initial_zkey = repo.join("circuits/membership_0000.zkey");
@@ -1096,32 +1132,14 @@ mod tests {
             "the ceremony must have moved delta"
         );
 
-        // Reproduce the fixture witness (single leaf at index 21).
-        let secret = mirror_core::Secret::from_bytes(
-            groth16::to_be32("111122223333444455556666777788889999").unwrap(),
-        );
-        let mut recipient = [0u8; 32];
-        for (i, b) in recipient.iter_mut().enumerate() {
-            *b = (i + 1) as u8;
-        }
-        let amount: u64 = 250_000_000;
-        let epoch: u64 = 7;
-        let action_hash = transfer_action_hash(&recipient, amount);
-        let nullifier_hash = nullifier(&secret, Epoch(epoch)).0;
-        let leaf = commit_with_action_hash(&secret, &action_hash, Epoch(epoch)).0;
-        let zeros = tree::zero_ladder(tree::DEPTH);
-        let mut elements = Vec::with_capacity(tree::DEPTH);
-        let mut indices = Vec::with_capacity(tree::DEPTH);
-        for (level, zero) in zeros.iter().enumerate().take(tree::DEPTH) {
-            elements.push(*zero);
-            indices.push(((21u64 >> level) & 1) as u8);
-        }
-        let root = tree::verify_path(&leaf, &elements, &indices);
-        let path = MerklePath {
-            elements,
-            indices,
-            root,
-        };
+        let Fixture {
+            secret,
+            epoch,
+            action_hash,
+            nullifier_hash,
+            path,
+            ..
+        } = fixture_witness();
 
         let input = membership_input_json(
             &path.root,

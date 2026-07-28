@@ -12,6 +12,8 @@ use std::path::Path;
 
 use super::*;
 use crate::groth16;
+use crate::util::from_hex32;
+use mirror_core::{commit_with_action_hash, nullifier, transfer_action_hash, Epoch};
 
 /// The committed on-chain ASSOCIATION verifying key (byte-for-byte the one the
 /// program embeds in `programs/mirror-pool/src/association_vk.rs`), included so

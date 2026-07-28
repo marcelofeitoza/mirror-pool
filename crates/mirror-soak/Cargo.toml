@@ -53,6 +53,13 @@ solana-rpc-client = "4"
 solana-rpc-client-api = "4"
 solana-transaction-status-client-types = "4"
 
+# The scaffolding every soak binary shares: process spawning, funding, the two
+# wire-format instruction builders, v0 submission, and the PASS/FAIL report. Each
+# binary keeps its own assertions and prose; none of them re-declare this.
+[lib]
+name = "mirror_soak"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mirror-soak"
 path = "src/main.rs"

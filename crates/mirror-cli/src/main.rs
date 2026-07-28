@@ -200,6 +200,19 @@ impl TxProveArgs {
     }
 }
 
+/// The two flags every on-chain subcommand takes. Flattened rather than repeated,
+/// so the CLI surface is unchanged: each subcommand still accepts `--rpc-url` and
+/// `--program-id` exactly as before.
+#[derive(Args)]
+struct ChainArgs {
+    /// RPC endpoint.
+    #[arg(long, default_value = DEFAULT_RPC_URL)]
+    rpc_url: String,
+    /// mirror-pool program id (base58).
+    #[arg(long)]
+    program_id: String,
+}
+
 #[derive(Args)]
 struct ValueKeygenArgs {
     /// Seed for a deterministic (reproducible) wallet. Omit for OS randomness.
@@ -212,12 +225,8 @@ struct ValueKeygenArgs {
 
 #[derive(Args)]
 struct InitValuePoolArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// Keypair that becomes `vpool.authority` (the Transact relay). Signs InitValuePool.
     #[arg(long)]
     authority: PathBuf,
@@ -235,12 +244,8 @@ struct InitValuePoolArgs {
 
 #[derive(Args)]
 struct ShieldArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// The ValuePool PDA (base58) to deposit into.
     #[arg(long)]
     pool: String,
@@ -262,12 +267,8 @@ struct ShieldArgs {
 
 #[derive(Args)]
 struct TransferArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// The ValuePool PDA (base58).
     #[arg(long)]
     pool: String,
@@ -292,12 +293,8 @@ struct TransferArgs {
 
 #[derive(Args)]
 struct UnshieldArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// The ValuePool PDA (base58).
     #[arg(long)]
     pool: String,
@@ -325,12 +322,8 @@ struct UnshieldArgs {
 /// `crate::funding` and `docs/EFFECTIVE_K.md`.
 #[derive(Args)]
 struct FundCommitArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// The ValuePool PDA (base58) to withdraw from. Prefer a DENOMINATED pool:
     /// a uniform withdrawal amount is what makes deposit-to-withdrawal matching hard.
     #[arg(long)]
@@ -385,12 +378,8 @@ struct ScanArgs {
 
 #[derive(Args)]
 struct InitVkArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// Which circuit's key to publish: membership, transaction, or association.
     /// Publish every circuit the deployment will actually use; a verify path
     /// whose registry is missing fails closed.
@@ -409,12 +398,8 @@ struct InitVkArgs {
 
 #[derive(Args)]
 struct InitPoolArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// Keypair file that becomes `pool.authority` (the settle relay). It must
     /// sign InitPool, so its keypair is required here.
     #[arg(long)]
@@ -439,12 +424,8 @@ struct InitPoolArgs {
 
 #[derive(Args)]
 struct CommitArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// The Pool PDA (base58) to commit into.
     #[arg(long)]
     pool: String,
@@ -470,12 +451,8 @@ struct CommitArgs {
 
 #[derive(Args)]
 struct DepositCommitArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// The Pool PDA (base58) to commit into.
     #[arg(long)]
     pool: String,
@@ -634,12 +611,8 @@ enum AssocCommand {
 
 #[derive(Args)]
 struct AssocInitArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// The Pool PDA (base58) this set will curate.
     #[arg(long)]
     pool: String,
@@ -653,12 +626,8 @@ struct AssocInitArgs {
 
 #[derive(Args)]
 struct AssocPublishArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// The Pool PDA (base58) this set curates.
     #[arg(long)]
     pool: String,
@@ -673,12 +642,8 @@ struct AssocPublishArgs {
 
 #[derive(Args)]
 struct AssocShowArgs {
-    /// RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL)]
-    rpc_url: String,
-    /// mirror-pool program id (base58).
-    #[arg(long)]
-    program_id: String,
+    #[command(flatten)]
+    chain: ChainArgs,
     /// The Pool PDA (base58).
     #[arg(long)]
     pool: String,
@@ -825,7 +790,7 @@ fn main() -> Result<()> {
 }
 
 fn run_init_pool(args: InitPoolArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     if args.reward_bps > 10_000 {
         return Err(anyhow!("--reward-bps must be <= 10000 (basis points)"));
     }
@@ -855,7 +820,7 @@ fn run_init_pool(args: InitPoolArgs) -> Result<()> {
         signers.push(&authority_kp);
     }
 
-    let chain = Chain::new(args.rpc_url);
+    let chain = Chain::new(args.chain.rpc_url);
     let sig = chain
         .submit(&[ix], &signers)
         .context("submitting InitPool")?;
@@ -879,7 +844,7 @@ fn run_init_pool(args: InitPoolArgs) -> Result<()> {
 /// buys is that the key in force becomes readable straight off the chain
 /// instead of only by disassembling the program. See `docs/VK_REGISTRY.md`.
 fn run_init_vk(args: InitVkArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let circuit_id = vk::circuit_id(&args.circuit)?;
     let canonical = vk::canonical(circuit_id)?;
     let registry = chain::vk_registry_pda(&program_id, circuit_id);
@@ -896,7 +861,7 @@ fn run_init_vk(args: InitVkArgs) -> Result<()> {
 
     let payer_kp = chain::read_keypair(&args.payer)?;
     let ix = chain::init_vk_ix(&program_id, &payer_kp.pubkey(), circuit_id, &canonical);
-    let chain = Chain::new(args.rpc_url);
+    let chain = Chain::new(args.chain.rpc_url);
     let sig = chain
         .submit(&[ix], &[&payer_kp])
         .context("submitting InitVk")?;
@@ -905,12 +870,12 @@ fn run_init_vk(args: InitVkArgs) -> Result<()> {
 }
 
 fn run_commit(args: CommitArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let pool = parse_pubkey(&args.pool, "pool")?;
     let participant_kp = chain::read_keypair(&args.keypair)?;
     let participant = participant_kp.pubkey();
 
-    let chain = Chain::new(args.rpc_url);
+    let chain = Chain::new(args.chain.rpc_url);
     let pool_state = chain.pool_state(&pool)?;
     let slot = match args.slot {
         Some(s) => s,
@@ -973,13 +938,13 @@ fn run_deposit_commit(args: DepositCommitArgs) -> Result<()> {
             "--amount must be > 0 (a zero escrow has no action to settle)"
         ));
     }
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let pool = parse_pubkey(&args.pool, "pool")?;
     let recipient = parse_pubkey(&args.recipient, "recipient")?;
     let depositor_kp = chain::read_keypair(&args.keypair)?;
     let depositor = depositor_kp.pubkey();
 
-    let chain = Chain::new(args.rpc_url);
+    let chain = Chain::new(args.chain.rpc_url);
     // Read the pool BEFORE the append: commitment_count is our leaf index, and
     // filled_subtrees is the pre-insert frontier snapshot `prove` walks.
     let pool_state = chain.pool_state(&pool)?;
@@ -1241,7 +1206,7 @@ fn run_assoc_build_root(args: AssocBuildRootArgs) -> Result<()> {
 }
 
 fn run_assoc_init(args: AssocInitArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let pool = parse_pubkey(&args.pool, "pool")?;
     let curator_kp = chain::read_keypair(&args.curator)?;
     let payer_kp = match &args.payer {
@@ -1258,7 +1223,7 @@ fn run_assoc_init(args: AssocInitArgs) -> Result<()> {
     if curator != payer {
         signers.push(&curator_kp);
     }
-    let chain_client = Chain::new(args.rpc_url);
+    let chain_client = Chain::new(args.chain.rpc_url);
     let sig = chain_client
         .submit(&[ix], &signers)
         .context("submitting InitAssociation")?;
@@ -1277,7 +1242,7 @@ fn run_assoc_init(args: AssocInitArgs) -> Result<()> {
 }
 
 fn run_assoc_publish(args: AssocPublishArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let pool = parse_pubkey(&args.pool, "pool")?;
     let curator_kp = chain::read_keypair(&args.curator)?;
     let curator = curator_kp.pubkey();
@@ -1287,7 +1252,7 @@ fn run_assoc_publish(args: AssocPublishArgs) -> Result<()> {
     let root = util::from_hex32(&emit.association_root_hex)?;
 
     let ix = chain::update_association_root_ix(&program_id, &assoc, &curator, &root);
-    let chain_client = Chain::new(args.rpc_url);
+    let chain_client = Chain::new(args.chain.rpc_url);
     let sig = chain_client
         .submit(&[ix], &[&curator_kp])
         .context("submitting UpdateAssociationRoot")?;
@@ -1307,12 +1272,12 @@ fn run_assoc_publish(args: AssocPublishArgs) -> Result<()> {
 }
 
 fn run_assoc_show(args: AssocShowArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let pool = parse_pubkey(&args.pool, "pool")?;
     let curator = parse_pubkey(&args.curator, "curator")?;
     let assoc = chain::association_pda(&program_id, &pool, &curator);
 
-    let chain_client = Chain::new(args.rpc_url);
+    let chain_client = Chain::new(args.chain.rpc_url);
     let state = chain_client.association_state(&assoc)?;
 
     println!("association set {assoc}");
@@ -1389,7 +1354,7 @@ fn run_value_keygen(args: ValueKeygenArgs) -> Result<()> {
 }
 
 fn run_init_value_pool(args: InitValuePoolArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let authority_kp = chain::read_keypair(&args.authority)?;
     let payer_kp = match &args.payer {
         Some(p) => chain::read_keypair(p)?,
@@ -1415,7 +1380,7 @@ fn run_init_value_pool(args: InitValuePoolArgs) -> Result<()> {
     if authority != payer {
         signers.push(&authority_kp);
     }
-    let chain = Chain::new(args.rpc_url);
+    let chain = Chain::new(args.chain.rpc_url);
     let sig = chain
         .submit(&[ix], &signers)
         .context("submitting InitValuePool")?;
@@ -1433,13 +1398,13 @@ fn run_init_value_pool(args: InitValuePoolArgs) -> Result<()> {
 }
 
 fn run_shield(args: ShieldArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let value_pool = parse_pubkey(&args.pool, "pool")?;
     let to = value_note::ValueAddress::parse(&args.to).context("--to")?;
     let depositor_kp = chain::read_keypair(&args.depositor)?;
 
     let emit = value::run_shield(value::ShieldOpts {
-        rpc_url: args.rpc_url,
+        rpc_url: args.chain.rpc_url,
         program_id,
         value_pool,
         depositor: depositor_kp.pubkey(),
@@ -1454,7 +1419,7 @@ fn run_shield(args: ShieldArgs) -> Result<()> {
 }
 
 fn run_transfer(args: TransferArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let value_pool = parse_pubkey(&args.pool, "pool")?;
     let to = value_note::ValueAddress::parse(&args.to).context("--to")?;
     let change_to = match &args.change_to {
@@ -1463,7 +1428,7 @@ fn run_transfer(args: TransferArgs) -> Result<()> {
     };
 
     let emit = value::run_transfer(value::TransferOpts {
-        rpc_url: args.rpc_url,
+        rpc_url: args.chain.rpc_url,
         program_id,
         value_pool,
         note: args.note,
@@ -1479,12 +1444,12 @@ fn run_transfer(args: TransferArgs) -> Result<()> {
 }
 
 fn run_unshield(args: UnshieldArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let value_pool = parse_pubkey(&args.pool, "pool")?;
     let recipient = parse_pubkey(&args.recipient, "recipient")?;
 
     let emit = value::run_unshield(value::UnshieldOpts {
-        rpc_url: args.rpc_url,
+        rpc_url: args.chain.rpc_url,
         program_id,
         value_pool,
         note: args.note,
@@ -1499,14 +1464,14 @@ fn run_unshield(args: UnshieldArgs) -> Result<()> {
 }
 
 fn run_fund_commit(args: FundCommitArgs) -> Result<()> {
-    let program_id = parse_pubkey(&args.program_id, "program-id")?;
+    let program_id = parse_pubkey(&args.chain.program_id, "program-id")?;
     let value_pool = parse_pubkey(&args.pool, "pool")?;
 
     // The pool's denomination decides the withdrawal amount: under a denominated
     // pool every funding withdrawal is the same number, which is what makes the
     // deposit-to-withdrawal matching hard. Read it from chain rather than trusting
     // a flag.
-    let chain = Chain::new(args.rpc_url.clone());
+    let chain = Chain::new(args.chain.rpc_url.clone());
     let vpool = chain
         .value_pool_state(&value_pool)
         .context("reading the value pool")?;
@@ -1523,7 +1488,7 @@ fn run_fund_commit(args: FundCommitArgs) -> Result<()> {
     let recipient = commit_wallet.pubkey();
 
     let emit = value::run_unshield(value::UnshieldOpts {
-        rpc_url: args.rpc_url,
+        rpc_url: args.chain.rpc_url,
         program_id,
         value_pool,
         note: args.note,

@@ -388,19 +388,6 @@ impl KAnon {
     }
 }
 
-/// Errors shared across crates.
-#[derive(Debug, thiserror::Error)]
-pub enum MirrorError {
-    #[error("epoch not yet settleable: current slot {current} < settle slot {settle}")]
-    EpochNotClosed { current: u64, settle: u64 },
-    #[error("k-anonymity floor not met: real_k={real_k} < k_floor={k_floor}")]
-    BelowKFloor { real_k: u32, k_floor: u32 },
-    #[error("nullifier already spent this epoch")]
-    NullifierSpent,
-    #[error("malformed instruction data")]
-    MalformedInstruction,
-}
-
 /// The on-chain wire format. The coordinator/cli build instruction data with
 /// these tags and offsets; the Pinocchio program parses the same layout. Kept
 /// in one place so the two sides cannot silently drift.

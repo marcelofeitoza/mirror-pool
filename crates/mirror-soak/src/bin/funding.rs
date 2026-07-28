@@ -52,7 +52,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,40 +67,22 @@ use mirror_coordinator::{
     ValueTransactRequest,
 };
 use mirror_core::{commit as core_commit, ActionClass, Epoch, Secret, SizeBucket};
+use mirror_soak::{
+    airdrop, begin_proof_section, checks_table, cli_bin, clone_keypair, commit_ix, first_line,
+    hex_decode, init_pool_ix, install_vk, lamports, load_keypair, new_keypair, note_is_spendable,
+    parse_kv, pool_pda, read_vpool, repo_root, run_cli, run_cli_expect_fail, send, sigs_table,
+    value_pool_pda, value_vault_pda, wait_until_slot, write_lines, Report, DEFAULT_RPC_URL,
+};
 
-use solana_instruction::{AccountMeta, Instruction};
+use solana_instruction::AccountMeta;
 use solana_keypair::Keypair;
-use solana_message::{v0, VersionedMessage};
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
-use solana_transaction::versioned::VersionedTransaction;
-
-// ---------------------------------------------------------------------------
-// Fixed addresses + PDA seeds (byte-identical to the on-chain `pda` module)
-// ---------------------------------------------------------------------------
-
-const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::from_str_const("11111111111111111111111111111111");
-const CLOCK_SYSVAR_ID: Pubkey =
-    Pubkey::from_str_const("SysvarC1ock11111111111111111111111111111111");
-const VALUE_POOL_SEED: &[u8] = b"vpool";
-const VALUE_VAULT_SEED: &[u8] = b"vvault";
-
-fn value_pool_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[VALUE_POOL_SEED, authority.as_ref()], program_id).0
-}
-fn value_vault_pda(program_id: &Pubkey, vpool: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[VALUE_VAULT_SEED, vpool.as_ref()], program_id).0
-}
-fn pool_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", authority.as_ref()], program_id).0
-}
 
 // ---------------------------------------------------------------------------
 // CLI args
 // ---------------------------------------------------------------------------
-
-const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8899";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -149,223 +130,13 @@ struct Args {
 // Report
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-struct Report {
-    checks: Vec<(String, bool, String)>,
-    sigs: Vec<(String, String)>,
-    notes: Vec<String>,
-}
-
-impl Report {
-    fn check(&mut self, label: &str, pass: bool, detail: impl Into<String>) {
-        self.checks.push((label.to_string(), pass, detail.into()));
-        let mark = if pass { "PASS" } else { "FAIL" };
-        println!("  [{mark}] {label} - {}", self.checks.last().unwrap().2);
-    }
-    fn sig(&mut self, label: &str, sig: impl Into<String>) {
-        let sig = sig.into();
-        println!("  tx  {label}: {sig}");
-        self.sigs.push((label.to_string(), sig));
-    }
-    /// An honest observation that is not a pass/fail assertion.
-    fn note(&mut self, note: impl Into<String>) {
-        let note = note.into();
-        println!("  note: {note}");
-        self.notes.push(note);
-    }
-    fn all_passed(&self) -> bool {
-        self.checks.iter().all(|(_, p, _)| *p)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Environment helpers
 // ---------------------------------------------------------------------------
 
-fn repo_root() -> Result<PathBuf> {
-    if let Ok(r) = std::env::var("MIRROR_REPO_ROOT") {
-        return Ok(PathBuf::from(r));
-    }
-    let exe = std::env::current_exe().context("current_exe")?;
-    let root = exe
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .ok_or_else(|| anyhow!("cannot derive repo root from {}", exe.display()))?;
-    Ok(root.to_path_buf())
-}
-
-fn cli_bin() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("MIRROR_CLI_BIN") {
-        return Ok(PathBuf::from(p));
-    }
-    let exe = std::env::current_exe().context("current_exe")?;
-    let sibling = exe
-        .parent()
-        .ok_or_else(|| anyhow!("no parent for {}", exe.display()))?
-        .join("mirror-cli");
-    if sibling.exists() {
-        return Ok(sibling);
-    }
-    bail!(
-        "mirror-cli binary not found at {} (build it with `cargo build -p mirror-cli`, or set MIRROR_CLI_BIN)",
-        sibling.display()
-    )
-}
-
-fn airdrop(rpc_url: &str, pubkey: &Pubkey, sol: u64) -> Result<()> {
-    let out = Command::new("solana")
-        .args([
-            "airdrop",
-            &sol.to_string(),
-            &pubkey.to_string(),
-            "--url",
-            rpc_url,
-        ])
-        .output()
-        .context("spawning `solana airdrop`")?;
-    if !out.status.success() {
-        bail!(
-            "solana airdrop {sol} {pubkey} failed:\n{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(())
-}
-
-fn new_keypair(dir: &Path, name: &str) -> Result<Keypair> {
-    let kp = Keypair::new();
-    let path = dir.join(format!("{name}.json"));
-    std::fs::write(&path, serde_json::to_string(&kp.to_bytes().to_vec())?)
-        .with_context(|| format!("writing keypair {}", path.display()))?;
-    Ok(kp)
-}
-
-fn run_cli(cli: &Path, cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(cli)
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .with_context(|| format!("spawning {}", cli.display()))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    if !out.status.success() {
-        bail!(
-            "mirror-cli {:?} failed:\n{stdout}\n{}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(stdout)
-}
-
-/// Publish a circuit's verifying key into its write-once, digest-pinned registry
-/// PDA, through the SHIPPED `mirror-cli init-vk`.
-///
-/// Every verifying instruction now reads its key from a registry account instead
-/// of from the program's own code, so a fresh deployment needs one of these per
-/// circuit it will use. Nothing here is a choice: the program hashes the bytes
-/// and accepts only the key its bytecode pins, so this is publication, not
-/// configuration. See docs/VK_REGISTRY.md.
-fn install_vk(
-    cli: &Path,
-    cwd: &Path,
-    rpc_url: &str,
-    program_id: &Pubkey,
-    payer_path: &Path,
-    circuit: &str,
-) -> Result<String> {
-    let out = run_cli(
-        cli,
-        cwd,
-        &[
-            "init-vk",
-            "--rpc-url",
-            rpc_url,
-            "--program-id",
-            &program_id.to_string(),
-            "--circuit",
-            circuit,
-            "--payer",
-            &payer_path.to_string_lossy(),
-        ],
-    )?;
-    Ok(parse_kv(&out, "signature:").unwrap_or_default().to_string())
-}
-
-/// Run `mirror-cli` EXPECTING failure; return combined output on a nonzero exit.
-fn run_cli_expect_fail(cli: &Path, cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(cli)
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .with_context(|| format!("spawning {}", cli.display()))?;
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if out.status.success() {
-        bail!("mirror-cli {:?} unexpectedly SUCCEEDED:\n{combined}", args);
-    }
-    Ok(combined)
-}
-
-fn parse_kv(text: &str, key: &str) -> Option<String> {
-    text.lines()
-        .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
-}
-
-fn first_line(s: &str) -> String {
-    s.replace('\n', " ").chars().take(240).collect()
-}
-
-fn write_lines(path: &Path, lines: &[String]) -> Result<()> {
-    std::fs::write(path, format!("{}\n", lines.join("\n")))
-        .with_context(|| format!("writing {}", path.display()))
-}
-
 // ---------------------------------------------------------------------------
 // On-chain reads
 // ---------------------------------------------------------------------------
-
-struct VPoolView {
-    denomination: Option<u64>,
-    commitment_count: u64,
-}
-
-impl VPoolView {
-    fn decode(data: &[u8]) -> Result<VPoolView> {
-        if data.len() < 92 {
-            bail!("value pool account too short: {} bytes", data.len());
-        }
-        let read_u64 = |off: usize| u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
-        Ok(VPoolView {
-            denomination: if data[41] == 0 {
-                None
-            } else {
-                Some(read_u64(42))
-            },
-            commitment_count: read_u64(52),
-        })
-    }
-}
-
-async fn read_vpool(client: &dyn SolanaClient, vpool: &Pubkey) -> Result<VPoolView> {
-    let acc = client
-        .get_account(vpool)
-        .await?
-        .ok_or_else(|| anyhow!("value pool {vpool} not found"))?;
-    VPoolView::decode(&acc.data)
-}
-
-async fn lamports(client: &dyn SolanaClient, key: &Pubkey) -> Result<u64> {
-    Ok(client
-        .get_account(key)
-        .await?
-        .map(|a| a.lamports)
-        .unwrap_or(0))
-}
 
 /// Epoch account: version 0, epoch_id 1, nominal_k 9, settled 13.
 async fn epoch_commit_count(client: &dyn SolanaClient, epoch_account: &Pubkey) -> Result<u32> {
@@ -374,89 +145,6 @@ async fn epoch_commit_count(client: &dyn SolanaClient, epoch_account: &Pubkey) -
             Ok(u32::from_le_bytes(acc.data[9..13].try_into().unwrap()))
         }
         _ => Ok(0),
-    }
-}
-
-/// Build the `InitPool` instruction (see instructions::init_pool).
-fn init_pool_ix(
-    program_id: &Pubkey,
-    pool: &Pubkey,
-    authority: &Pubkey,
-    payer: &Pubkey,
-    epoch_slots: u64,
-    k_floor: u32,
-) -> Instruction {
-    let mut data = Vec::with_capacity(mirror_core::wire::INIT_POOL_LEN);
-    data.push(mirror_core::wire::tag::INIT_POOL);
-    data.extend_from_slice(&epoch_slots.to_le_bytes());
-    data.extend_from_slice(&k_floor.to_le_bytes());
-    data.extend_from_slice(&0u64.to_le_bytes()); // entry_fee
-    data.extend_from_slice(&0u16.to_le_bytes()); // reward_bps
-    Instruction {
-        program_id: *program_id,
-        accounts: vec![
-            AccountMeta::new(*pool, false),
-            AccountMeta::new_readonly(*authority, true),
-            AccountMeta::new(*payer, true),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-        ],
-        data,
-    }
-}
-
-/// Build the crowd-path `Commit` instruction (see instructions::commit).
-fn commit_ix(
-    program_id: &Pubkey,
-    pool: &Pubkey,
-    epoch_account: &Pubkey,
-    participant: &Pubkey,
-    commitment: &[u8; 32],
-) -> Instruction {
-    let mut data = Vec::with_capacity(mirror_core::wire::COMMIT_LEN);
-    data.push(mirror_core::wire::tag::COMMIT);
-    data.extend_from_slice(commitment);
-    Instruction {
-        program_id: *program_id,
-        accounts: vec![
-            AccountMeta::new(*pool, false),
-            AccountMeta::new(*epoch_account, false),
-            AccountMeta::new(*participant, true),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR_ID, false),
-        ],
-        data,
-    }
-}
-
-/// Build, sign, and send a v0 transaction. `signers[0]` is the fee payer.
-async fn send(
-    client: &dyn SolanaClient,
-    ixs: &[Instruction],
-    signers: &[&Keypair],
-) -> std::result::Result<String, String> {
-    let payer = signers.first().ok_or_else(|| "no signers".to_string())?;
-    let blockhash = client
-        .get_latest_blockhash()
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    let msg = v0::Message::try_compile(&payer.pubkey(), ixs, &[], blockhash)
-        .map_err(|e| format!("{e:#}"))?;
-    let tx = VersionedTransaction::try_new(VersionedMessage::V0(msg), signers)
-        .map_err(|e| format!("{e:#}"))?;
-    client
-        .send_and_confirm_transaction(&tx)
-        .await
-        .map(|s| s.to_string())
-        .map_err(|e| format!("{e:#}"))
-}
-
-async fn wait_until_slot(client: &dyn SolanaClient, target: u64) -> Result<u64> {
-    loop {
-        let s = client.get_slot().await?;
-        if s >= target {
-            return Ok(s);
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -766,8 +454,11 @@ async fn main() -> Result<()> {
             &payer.pubkey(),
             args.epoch_slots,
             args.k_floor,
+            0, // entry_fee: the funding soak measures provenance, not fees
+            0, // reward_bps
         )],
         &[&payer, &pool_authority],
+        &[],
     )
     .await
     .map_err(|e| anyhow!("init_pool failed: {e}"))?;
@@ -1345,6 +1036,7 @@ async fn main() -> Result<()> {
             &commitment.0,
         )],
         &[&commit_keypair],
+        &[],
     )
     .await
     .map_err(|e| anyhow!("commit from the funded commit wallet failed: {e}"))?;
@@ -1809,32 +1501,6 @@ fn short(keys: &[Pubkey]) -> Vec<String> {
         .collect()
 }
 
-fn clone_keypair(kp: &Keypair) -> Keypair {
-    Keypair::try_from(kp.to_bytes().as_slice()).expect("a keypair round-trips through its bytes")
-}
-
-fn load_keypair(path: &Path) -> Result<Keypair> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading keypair {}", path.display()))?;
-    let bytes: Vec<u8> = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {} as a JSON byte array", path.display()))?;
-    Keypair::try_from(bytes.as_slice()).map_err(|e| anyhow!("invalid keypair: {e}"))
-}
-
-/// Read a saved value-note record and report whether it is spendable.
-fn note_is_spendable(path: &Path) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading note {}", path.display()))?;
-    let v: serde_json::Value = serde_json::from_str(&raw).context("parsing note json")?;
-    Ok(v.get("private_key_hex")
-        .and_then(|k| k.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false))
-}
-
 /// An emit may be in the inbox (not yet ingested) or in accepted/ (already
 /// batched); read it from wherever it is.
 fn inbox_or_accepted(intake_dir: &Path, index: usize) -> Result<serde_json::Value> {
@@ -1900,17 +1566,6 @@ fn doctor_public_amount(emit: &serde_json::Value, amount: u64) -> Result<serde_j
     Ok(emit)
 }
 
-fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    let s = s.trim();
-    if !s.len().is_multiple_of(2) {
-        bail!("odd-length hex");
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow!("bad hex: {e}")))
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // docs/PROOF.md
 // ---------------------------------------------------------------------------
@@ -1934,62 +1589,29 @@ fn append_proof_md(
     use std::fmt::Write;
     const MARKER: &str = "<!-- funding-round-soak:begin -->";
 
-    let docs = root.join("docs");
-    std::fs::create_dir_all(&docs)?;
-    let proof_path = docs.join("PROOF.md");
+    let (mut s, now) = begin_proof_section(root, MARKER)?;
+    s.push_str(
+        r##"## Funding-round soak
 
-    let mut base = std::fs::read_to_string(&proof_path).unwrap_or_default();
-    if let Some(pos) = base.find(MARKER) {
-        base.truncate(pos);
-    }
-    let base = base.trim_end().to_string();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let mut s = String::new();
-    writeln!(s, "{base}")?;
-    writeln!(s)?;
-    writeln!(s, "{MARKER}")?;
-    writeln!(s, "## Funding-round soak")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "This section documents an automated end-to-end run of `mirror-soak-funding` against a"
-    )?;
+This section documents an automated end-to-end run of `mirror-soak-funding` against a
+"##,
+    );
     writeln!(
         s,
         "LIVE local Surfpool validator (a local mainnet mirror at `{}`), treated as mainnet and",
         args.rpc_url
     )?;
-    writeln!(
-        s,
-        "run honestly. It exercises the FUNDING-PROVENANCE path through the shipped components:"
-    )?;
-    writeln!(
-        s,
-        "`mirror-cli shield | scan | fund-commit` on the participant side, and"
-    )?;
-    writeln!(
-        s,
-        "`mirror_coordinator::FundingService` + `DirectoryIntake` on the coordinator side, which"
-    )?;
-    writeln!(
-        s,
-        "polls the real chain slot, ingests the emitted requests, batches them into slot rounds,"
-    )?;
-    writeln!(
-        s,
-        "and releases each round through the gasless relay. The signatures below are"
-    )?;
-    writeln!(
-        s,
-        "local-validator signatures, reproducible by re-running the soak against a fresh Surfpool,"
-    )?;
-    writeln!(s, "not lookups on a public explorer.")?;
-    writeln!(s)?;
+    s.push_str(
+        r##"run honestly. It exercises the FUNDING-PROVENANCE path through the shipped components:
+`mirror-cli shield | scan | fund-commit` on the participant side, and
+`mirror_coordinator::FundingService` + `DirectoryIntake` on the coordinator side, which
+polls the real chain slot, ingests the emitted requests, batches them into slot rounds,
+and releases each round through the gasless relay. The signatures below are
+local-validator signatures, reproducible by re-running the soak against a fresh Surfpool,
+not lookups on a public explorer.
+
+"##,
+    );
     writeln!(s, "- generated: unix {now}")?;
     writeln!(s, "- program id (fresh deploy): `{program_id}`")?;
     writeln!(
@@ -2009,101 +1631,37 @@ fn append_proof_md(
     )?;
     writeln!(s)?;
 
-    writeln!(s, "### What was exercised")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "1. **Setup** - a denominated funding `ValuePool` plus the behavioral `Pool` a funded"
-    )?;
-    writeln!(s, "   commit wallet participates in.")?;
-    writeln!(
-        s,
-        "2. **Shield** - every participant shields exactly the denomination from their OWN main"
-    )?;
-    writeln!(
-        s,
-        "   wallet, then `scan`s the on-chain `enc` blobs to recover a spendable note."
-    )?;
-    writeln!(
-        s,
-        "3. **Request** - `fund-commit` mints a FRESH commit-wallet keypair and emits its"
-    )?;
-    writeln!(
-        s,
-        "   relay-only-signed unshield into the coordinator's inbox directory."
-    )?;
-    writeln!(
-        s,
-        "4. **Thin round** - a round below `min_round_size` rolls forward, and nothing reaches"
-    )?;
-    writeln!(s, "   the chain while it is thin.")?;
-    writeln!(
-        s,
-        "5. **Release** - the merged round releases at its boundary; each fresh commit wallet is"
-    )?;
-    writeln!(
-        s,
-        "   credited exactly the denomination and the vault is debited by exactly the sum."
-    )?;
-    writeln!(
-        s,
-        "6. **Provenance** - every funding transaction carries exactly one signature (the"
-    )?;
-    writeln!(
-        s,
-        "   relay's), mentions no participant main wallet, and each fresh commit wallet's ONLY"
-    )?;
-    writeln!(
-        s,
-        "   inbound transfer across its entire on-chain history is from the pool vault."
-    )?;
-    writeln!(
-        s,
-        "7. **Participation** - a funded commit wallet then commits to the behavioral pool,"
-    )?;
-    writeln!(s, "   paying its own fee out of the pool-funded balance.")?;
-    writeln!(
-        s,
-        "8. **Adversarial** - a wrong-amount request is refused client-side by the CLI and"
-    )?;
-    writeln!(
-        s,
-        "   coordinator-side at the intake, and a live mid-round submit failure re-queues the"
-    )?;
-    writeln!(s, "   remainder instead of dropping it.")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "What this does NOT claim: the shield leg is still the participant's own transaction from"
-    )?;
-    writeln!(
-        s,
-        "their own wallet, and both boundary crossings expose an amount and a slot. The funding"
-    )?;
-    writeln!(
-        s,
-        "edge is not erased, it is turned into a matching problem; the residual is measured in"
-    )?;
-    writeln!(s, "`docs/EFFECTIVE_K.md`, not assumed away.")?;
-    writeln!(s)?;
+    s.push_str(
+        r##"### What was exercised
 
-    writeln!(s, "### On-chain assertions")?;
-    writeln!(s)?;
-    let passed = report.checks.iter().filter(|(_, p, _)| *p).count();
-    writeln!(s, "{passed}/{} assertions passed.", report.checks.len())?;
-    writeln!(s)?;
-    writeln!(s, "| result | assertion | detail |")?;
-    writeln!(s, "| --- | --- | --- |")?;
-    for (label, pass, detail) in &report.checks {
-        writeln!(
-            s,
-            "| {} | {} | {} |",
-            if *pass { "PASS" } else { "FAIL" },
-            label,
-            detail.replace('|', "\\|")
-        )?;
-    }
-    writeln!(s)?;
+1. **Setup** - a denominated funding `ValuePool` plus the behavioral `Pool` a funded
+   commit wallet participates in.
+2. **Shield** - every participant shields exactly the denomination from their OWN main
+   wallet, then `scan`s the on-chain `enc` blobs to recover a spendable note.
+3. **Request** - `fund-commit` mints a FRESH commit-wallet keypair and emits its
+   relay-only-signed unshield into the coordinator's inbox directory.
+4. **Thin round** - a round below `min_round_size` rolls forward, and nothing reaches
+   the chain while it is thin.
+5. **Release** - the merged round releases at its boundary; each fresh commit wallet is
+   credited exactly the denomination and the vault is debited by exactly the sum.
+6. **Provenance** - every funding transaction carries exactly one signature (the
+   relay's), mentions no participant main wallet, and each fresh commit wallet's ONLY
+   inbound transfer across its entire on-chain history is from the pool vault.
+7. **Participation** - a funded commit wallet then commits to the behavioral pool,
+   paying its own fee out of the pool-funded balance.
+8. **Adversarial** - a wrong-amount request is refused client-side by the CLI and
+   coordinator-side at the intake, and a live mid-round submit failure re-queues the
+   remainder instead of dropping it.
+
+What this does NOT claim: the shield leg is still the participant's own transaction from
+their own wallet, and both boundary crossings expose an amount and a slot. The funding
+edge is not erased, it is turned into a matching problem; the residual is measured in
+`docs/EFFECTIVE_K.md`, not assumed away.
+
+"##,
+    );
+
+    checks_table(&mut s, report, "###");
 
     if !report.notes.is_empty() {
         writeln!(s, "### Honest notes from this run")?;
@@ -2114,19 +1672,15 @@ fn append_proof_md(
         writeln!(s)?;
     }
 
-    writeln!(s, "### Captured transaction signatures")?;
-    writeln!(s)?;
-    writeln!(s, "| step | signature |")?;
-    writeln!(s, "| --- | --- |")?;
-    for (label, sig) in &report.sigs {
-        writeln!(s, "| {label} | `{sig}` |")?;
-    }
-    writeln!(s)?;
+    sigs_table(&mut s, report, "###");
 
-    writeln!(s, "### Compute units (the released funding withdrawals)")?;
-    writeln!(s)?;
-    writeln!(s, "| signature | compute units |")?;
-    writeln!(s, "| --- | --- |")?;
+    s.push_str(
+        r##"### Compute units (the released funding withdrawals)
+
+| signature | compute units |
+| --- | --- |
+"##,
+    );
     for (sig, units) in cu {
         writeln!(
             s,
@@ -2145,53 +1699,41 @@ fn append_proof_md(
         "With a local Surfpool running at `{}` (treated as mainnet). That endpoint is whatever",
         args.rpc_url
     )?;
-    writeln!(
-        s,
-        "`--rpc-url` was given for this run; `surfpool start --no-tui` listens on port 8899 by"
-    )?;
-    writeln!(
-        s,
-        "default, and any other port here simply means the run was pointed at one."
-    )?;
-    writeln!(s)?;
-    writeln!(s, "```sh")?;
-    writeln!(s, "# 1. build the on-chain program + host workspace")?;
-    writeln!(
-        s,
-        "cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml"
-    )?;
-    writeln!(s, "cargo build --workspace")?;
-    writeln!(s)?;
-    writeln!(s, "# 2. deploy the program under a FRESH program id")?;
-    writeln!(s, "solana-keygen new -o .soak/keys/funding-program.json")?;
-    writeln!(s, "solana program deploy \\")?;
+    s.push_str(
+        r##"`--rpc-url` was given for this run; `surfpool start --no-tui` listens on port 8899 by
+default, and any other port here simply means the run was pointed at one.
+
+```sh
+# 1. build the on-chain program + host workspace
+cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml
+cargo build --workspace
+
+# 2. deploy the program under a FRESH program id
+solana-keygen new -o .soak/keys/funding-program.json
+solana program deploy \
+"##,
+    );
     writeln!(s, "  --url {} \\", args.rpc_url)?;
-    writeln!(s, "  --program-id .soak/keys/funding-program.json \\")?;
-    writeln!(s, "  programs/mirror-pool/target/deploy/mirror_pool.so")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "# 3. build the transaction-circuit artifacts (bash circuits/build_transaction.sh)"
-    )?;
-    writeln!(s)?;
-    writeln!(s, "# 4. run the funding-round soak")?;
-    writeln!(
-        s,
-        "cargo run -p mirror-soak --bin mirror-soak-funding -- \\"
-    )?;
+    s.push_str(
+        r##"  --program-id .soak/keys/funding-program.json \
+  programs/mirror-pool/target/deploy/mirror_pool.so
+
+# 3. build the transaction-circuit artifacts (bash circuits/build_transaction.sh)
+
+# 4. run the funding-round soak
+cargo run -p mirror-soak --bin mirror-soak-funding -- \
+"##,
+    );
     writeln!(s, "  --rpc-url {} \\", args.rpc_url)?;
     writeln!(s, "  --program-id {program_id}")?;
-    writeln!(s, "```")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "Every run creates a fresh pool, fresh main wallets, and fresh commit wallets, so the run"
-    )?;
-    writeln!(
-        s,
-        "is self-contained and repeatable; the signatures above are from this run."
-    )?;
+    s.push_str(
+        r##"```
 
-    std::fs::write(&proof_path, s)?;
+Every run creates a fresh pool, fresh main wallets, and fresh commit wallets, so the run
+is self-contained and repeatable; the signatures above are from this run.
+"##,
+    );
+
+    std::fs::write(root.join("docs/PROOF.md"), s)?;
     Ok(())
 }

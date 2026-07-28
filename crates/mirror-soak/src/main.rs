@@ -30,11 +30,10 @@
 //! for the ZK deposit-commit + prove, and the gasless coordinator library
 //! (`mirror_coordinator::RpcSettleSubmitter`) for the atomic crowd settlement.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
@@ -50,23 +49,25 @@ use mirror_coordinator::{
     TxProfile,
 };
 use mirror_core::{
-    commit as core_commit, nullifier as core_nullifier, wire, ActionClass, Epoch, EpochSchedule,
+    commit as core_commit, nullifier as core_nullifier, ActionClass, Epoch, EpochSchedule,
     Nullifier, Secret, SizeBucket,
+};
+use mirror_soak::{
+    airdrop, checks_table, cli_bin, clone_keypair, commit_ix, first_line, fund, hex_decode,
+    init_pool_ix, install_vk, is_custom, new_keypair, parse_kv, pool_pda, repo_root, run_cli, send,
+    sigs_table, wait_until_slot, which, write_report_json, Report, CLOCK_SYSVAR_ID,
+    DEFAULT_RPC_URL, SYSTEM_PROGRAM_ID,
 };
 
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
-use solana_message::{v0, AddressLookupTableAccount, VersionedMessage};
+use solana_message::AddressLookupTableAccount;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
-use solana_transaction::versioned::VersionedTransaction;
 
 // ---------------------------------------------------------------------------
 // CLI args
 // ---------------------------------------------------------------------------
-
-/// The default local RPC: the Surfpool mainnet mirror.
-const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8899";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -101,161 +102,8 @@ struct Args {
 }
 
 // ---------------------------------------------------------------------------
-// Report accumulation
+// Deployment (the only environment step this soak does not share)
 // ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct Report {
-    checks: Vec<(String, bool, String)>,
-    sigs: Vec<(String, String)>,
-}
-
-impl Report {
-    fn check(&mut self, label: &str, pass: bool, detail: impl Into<String>) {
-        self.checks.push((label.to_string(), pass, detail.into()));
-        let mark = if pass { "PASS" } else { "FAIL" };
-        println!("  [{mark}] {label} - {}", self.checks.last().unwrap().2);
-    }
-    fn sig(&mut self, label: &str, sig: impl Into<String>) {
-        let sig = sig.into();
-        println!("  tx  {label}: {sig}");
-        self.sigs.push((label.to_string(), sig));
-    }
-    fn all_passed(&self) -> bool {
-        self.checks.iter().all(|(_, p, _)| *p)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Environment / external-binary helpers
-// ---------------------------------------------------------------------------
-
-/// The workspace root: `<root>/target/<profile>/mirror-soak` -> `<root>`.
-fn repo_root() -> Result<PathBuf> {
-    if let Ok(r) = std::env::var("MIRROR_REPO_ROOT") {
-        return Ok(PathBuf::from(r));
-    }
-    let exe = std::env::current_exe().context("current_exe")?;
-    // target/<profile>/mirror-soak -> repo root is three parents up.
-    let root = exe
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .ok_or_else(|| anyhow!("cannot derive repo root from {}", exe.display()))?;
-    Ok(root.to_path_buf())
-}
-
-/// The `mirror-cli` binary that ships alongside this soak binary.
-fn cli_bin() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("MIRROR_CLI_BIN") {
-        return Ok(PathBuf::from(p));
-    }
-    let exe = std::env::current_exe().context("current_exe")?;
-    let sibling = exe
-        .parent()
-        .ok_or_else(|| anyhow!("no parent for {}", exe.display()))?
-        .join("mirror-cli");
-    if sibling.exists() {
-        return Ok(sibling);
-    }
-    bail!(
-        "mirror-cli binary not found at {} (build it with `cargo build -p mirror-cli`, or set MIRROR_CLI_BIN)",
-        sibling.display()
-    )
-}
-
-fn which(bin: &str) -> Result<String> {
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {bin}"))
-        .output()
-        .with_context(|| format!("locating {bin}"))?;
-    if !out.status.success() {
-        bail!("`{bin}` not found on PATH");
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// Airdrop `sol` SOL to `pubkey` via the local validator faucet.
-fn airdrop(rpc_url: &str, pubkey: &Pubkey, sol: u64) -> Result<()> {
-    let out = Command::new("solana")
-        .args([
-            "airdrop",
-            &sol.to_string(),
-            &pubkey.to_string(),
-            "--url",
-            rpc_url,
-        ])
-        .output()
-        .context("spawning `solana airdrop`")?;
-    if !out.status.success() {
-        bail!(
-            "solana airdrop {sol} {pubkey} failed:\n{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(())
-}
-
-/// System-transfer `lamports` from the pre-funded master payer to `to`.
-///
-/// The devnet funding path: a public cluster rate-limits faucet airdrops, so the
-/// run airdrops ONE master payer and fans out to every relay/participant via
-/// ordinary system transfers instead of one airdrop per key.
-fn transfer_from_master(rpc_url: &str, master: &str, to: &Pubkey, lamports: u64) -> Result<()> {
-    let sol = format!(
-        "{}.{:09}",
-        lamports / 1_000_000_000,
-        lamports % 1_000_000_000
-    );
-    let out = Command::new("solana")
-        .args([
-            "transfer",
-            &to.to_string(),
-            &sol,
-            "--keypair",
-            master,
-            "--fee-payer",
-            master,
-            "--url",
-            rpc_url,
-            "--allow-unfunded-recipient",
-            "--commitment",
-            "confirmed",
-        ])
-        .output()
-        .context("spawning `solana transfer`")?;
-    if !out.status.success() {
-        bail!(
-            "solana transfer {sol} -> {to} failed:\n{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(())
-}
-
-/// Fund `pubkey`. On a public cluster (when `MIRROR_FUNDING_KEYPAIR` names the
-/// pre-funded master payer) this is a system transfer of `devnet_lamports` from
-/// that master; otherwise it is a local faucet airdrop of `local_sol` whole SOL
-/// (the Surfpool path, unchanged).
-fn fund(rpc_url: &str, pubkey: &Pubkey, local_sol: u64, devnet_lamports: u64) -> Result<()> {
-    if let Ok(master) = std::env::var("MIRROR_FUNDING_KEYPAIR") {
-        transfer_from_master(rpc_url, &master, pubkey, devnet_lamports)
-    } else {
-        airdrop(rpc_url, pubkey, local_sol)
-    }
-}
-
-/// Generate a fresh keypair and persist it (gitignored) so a run is auditable.
-fn new_keypair(dir: &Path, name: &str) -> Result<Keypair> {
-    let kp = Keypair::new();
-    let path = dir.join(format!("{name}.json"));
-    std::fs::write(&path, serde_json::to_string(&kp.to_bytes().to_vec())?)
-        .with_context(|| format!("writing keypair {}", path.display()))?;
-    Ok(kp)
-}
 
 /// Ensure the program is deployed; deploy it from the built artifacts if not.
 async fn ensure_deployed(
@@ -302,73 +150,6 @@ async fn ensure_deployed(
         );
     }
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Instruction builders (wire layout from mirror_core::wire) + PDA
-// ---------------------------------------------------------------------------
-
-const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::from_str_const("11111111111111111111111111111111");
-const CLOCK_SYSVAR_ID: Pubkey =
-    Pubkey::from_str_const("SysvarC1ock11111111111111111111111111111111");
-
-/// Derive the Pool PDA: seeds `[b"pool", authority]`.
-fn pool_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"pool", authority.as_ref()], program_id).0
-}
-
-/// Build the `InitPool` instruction (see instructions::init_pool).
-#[allow(clippy::too_many_arguments)]
-fn init_pool_ix(
-    program_id: &Pubkey,
-    pool: &Pubkey,
-    authority: &Pubkey,
-    payer: &Pubkey,
-    epoch_slots: u64,
-    k_floor: u32,
-    entry_fee: u64,
-    reward_bps: u16,
-) -> Instruction {
-    let mut data = Vec::with_capacity(wire::INIT_POOL_LEN);
-    data.push(wire::tag::INIT_POOL);
-    data.extend_from_slice(&epoch_slots.to_le_bytes());
-    data.extend_from_slice(&k_floor.to_le_bytes());
-    data.extend_from_slice(&entry_fee.to_le_bytes());
-    data.extend_from_slice(&reward_bps.to_le_bytes());
-    Instruction {
-        program_id: *program_id,
-        accounts: vec![
-            AccountMeta::new(*pool, false),
-            AccountMeta::new_readonly(*authority, true),
-            AccountMeta::new(*payer, true),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-        ],
-        data,
-    }
-}
-
-/// Build the crowd-path `Commit` instruction (see instructions::commit).
-fn commit_ix(
-    program_id: &Pubkey,
-    pool: &Pubkey,
-    epoch_account: &Pubkey,
-    participant: &Pubkey,
-    commitment: &[u8; 32],
-) -> Instruction {
-    let mut data = Vec::with_capacity(wire::COMMIT_LEN);
-    data.push(wire::tag::COMMIT);
-    data.extend_from_slice(commitment);
-    Instruction {
-        program_id: *program_id,
-        accounts: vec![
-            AccountMeta::new(*pool, false),
-            AccountMeta::new(*epoch_account, false),
-            AccountMeta::new(*participant, true),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-            AccountMeta::new_readonly(CLOCK_SYSVAR_ID, false),
-        ],
-        data,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -440,49 +221,6 @@ impl EpochView {
 // Submission helpers
 // ---------------------------------------------------------------------------
 
-/// Build, sign, and send a v0 transaction. `signers[0]` is the fee payer.
-/// Returns `Ok(signature)` on success or `Err(error string)` on any failure.
-async fn send(
-    client: &dyn SolanaClient,
-    ixs: &[Instruction],
-    signers: &[&Keypair],
-    alts: &[AddressLookupTableAccount],
-) -> std::result::Result<String, String> {
-    // Render the FULL anyhow chain (`{:#}`) so a rejected tx surfaces its
-    // `custom program error: 0x..` code, not just the top-level context.
-    let payer = signers.first().ok_or_else(|| "no signers".to_string())?;
-    let blockhash = client
-        .get_latest_blockhash()
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    let msg = v0::Message::try_compile(&payer.pubkey(), ixs, alts, blockhash)
-        .map_err(|e| format!("{e:#}"))?;
-    let tx = VersionedTransaction::try_new(VersionedMessage::V0(msg), signers)
-        .map_err(|e| format!("{e:#}"))?;
-    client
-        .send_and_confirm_transaction(&tx)
-        .await
-        .map(|s| s.to_string())
-        .map_err(|e| format!("{e:#}"))
-}
-
-/// Whether an error string reports a specific mirror-pool custom program error.
-fn is_custom(err: &str, code: u32) -> bool {
-    err.contains(&format!("custom program error: 0x{code:x}"))
-        || err.contains(&format!("Custom({code})"))
-}
-
-/// Poll `get_slot` until it reaches `target`.
-async fn wait_until_slot(client: &dyn SolanaClient, target: u64) -> Result<u64> {
-    loop {
-        let s = client.get_slot().await?;
-        if s >= target {
-            return Ok(s);
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-}
-
 /// Return the id of a window with at least `need` slots of headroom, waiting for
 /// the next window boundary if the current window is too far along. This is how
 /// the soak guarantees a whole commit burst lands in one shared epoch.
@@ -495,17 +233,6 @@ async fn fresh_window(client: &dyn SolanaClient, epoch_slots: u64, need: u64) ->
     let next = (s / epoch_slots + 1) * epoch_slots;
     let s2 = wait_until_slot(client, next).await?;
     Ok(s2 / epoch_slots)
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    let s = s.trim();
-    if !s.len().is_multiple_of(2) {
-        bail!("odd-length hex");
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow!("bad hex: {e}")))
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -899,7 +626,7 @@ async fn main() -> Result<()> {
     // -- 4. ZK OPT-IN PATH --------------------------------------------------
     println!("== 4. ZK opt-in path (deposit-commit -> prove -> SettleZk) ==");
     let cli = cli_bin()?;
-    let snarkjs = which("snarkjs").unwrap_or_else(|_| "snarkjs".to_string());
+    let snarkjs = which("snarkjs").unwrap_or_else(|| "snarkjs".to_string());
 
     let depositor = new_keypair(&keys_dir, "zk-depositor")?;
     fund(&args.rpc_url, &depositor.pubkey(), 5, 100_000_000)?;
@@ -1182,100 +909,6 @@ fn coordinator_rolls_forward_under_floor(epoch_slots: u64, k_floor: u32) -> Resu
     Ok(rolled && c.submitter().submitted.is_empty())
 }
 
-/// Publish a circuit's verifying key into its write-once, digest-pinned registry
-/// PDA, through the SHIPPED `mirror-cli init-vk`.
-///
-/// Every verifying instruction now reads its key from a registry account instead
-/// of from the program's own code, so a fresh deployment needs one of these per
-/// circuit it will use. Nothing here is a choice: the program hashes the bytes
-/// and accepts only the key its bytecode pins, so this is publication, not
-/// configuration. See docs/VK_REGISTRY.md.
-fn install_vk(
-    cli: &Path,
-    cwd: &Path,
-    rpc_url: &str,
-    program_id: &Pubkey,
-    payer_path: &Path,
-    circuit: &str,
-) -> Result<String> {
-    let out = run_cli(
-        cli,
-        cwd,
-        &[
-            "init-vk",
-            "--rpc-url",
-            rpc_url,
-            "--program-id",
-            &program_id.to_string(),
-            "--circuit",
-            circuit,
-            "--payer",
-            &payer_path.to_string_lossy(),
-        ],
-    )?;
-    Ok(parse_kv(&out, "signature:").unwrap_or_default().to_string())
-}
-
-/// Shell out to the shipped `mirror-cli`, returning stdout (fails on nonzero).
-fn run_cli(cli: &Path, cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(cli)
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .with_context(|| format!("spawning {}", cli.display()))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    if !out.status.success() {
-        bail!(
-            "mirror-cli {:?} failed:\n{stdout}\n{}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(stdout)
-}
-
-/// Parse the value after a `key` prefix from CLI output (e.g. "note saved:").
-fn parse_kv(text: &str, key: &str) -> Option<String> {
-    text.lines()
-        .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
-}
-
-/// First line of a (possibly multi-line) error, for compact reporting.
-fn first_line(s: &str) -> String {
-    s.replace('\n', " ").chars().take(240).collect()
-}
-
-/// Deep-copy a keypair (Keypair is not Clone; go via its 64 bytes).
-fn clone_keypair(kp: &Keypair) -> Keypair {
-    Keypair::try_from(kp.to_bytes().as_slice()).expect("valid keypair bytes")
-}
-
-/// Emit a machine-readable JSON report (metadata + every assertion + every
-/// captured signature) for the public-devnet path, where the caller assembles
-/// docs/PROOF.md out of band (adding Finalized confirmation + CU per signature).
-fn write_report_json(path: &str, meta: serde_json::Value, report: &Report) -> Result<()> {
-    let checks: Vec<serde_json::Value> = report
-        .checks
-        .iter()
-        .map(|(label, pass, detail)| {
-            serde_json::json!({ "label": label, "pass": pass, "detail": detail })
-        })
-        .collect();
-    let sigs: Vec<serde_json::Value> = report
-        .sigs
-        .iter()
-        .map(|(label, sig)| serde_json::json!({ "label": label, "sig": sig }))
-        .collect();
-    let mut v = meta;
-    v["checks"] = serde_json::Value::Array(checks);
-    v["sigs"] = serde_json::Value::Array(sigs);
-    v["passed"] = serde_json::json!(report.checks.iter().filter(|(_, p, _)| *p).count());
-    v["total"] = serde_json::json!(report.checks.len());
-    std::fs::write(path, serde_json::to_string_pretty(&v)?)
-        .with_context(|| format!("writing report json {path}"))?;
-    Ok(())
-}
-
 /// Write docs/PROOF.md documenting the live run.
 fn write_proof_md(
     root: &Path,
@@ -1293,27 +926,24 @@ fn write_proof_md(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    writeln!(s, "# mirror-pool - live Surfpool soak proof")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "This documents an automated end-to-end run of `mirror-soak` against a LIVE local"
-    )?;
+    s.push_str(
+        r##"# mirror-pool - live Surfpool soak proof
+
+This documents an automated end-to-end run of `mirror-soak` against a LIVE local
+"##,
+    );
     writeln!(
         s,
         "Surfpool validator (a local mainnet mirror at `{}`), treated as mainnet. It is NOT",
         args.rpc_url
     )?;
-    writeln!(
-        s,
-        "a public deploy: the transaction signatures below are local-validator signatures, so"
-    )?;
-    writeln!(
-        s,
-        "they are reproducible by re-running the soak against a fresh Surfpool, not lookups on a"
-    )?;
-    writeln!(s, "public explorer.")?;
-    writeln!(s)?;
+    s.push_str(
+        r##"a public deploy: the transaction signatures below are local-validator signatures, so
+they are reproducible by re-running the soak against a fresh Surfpool, not lookups on a
+public explorer.
+
+"##,
+    );
     writeln!(s, "- generated: unix {now}")?;
     writeln!(s, "- program id: `{program_id}`")?;
     writeln!(s, "- pool PDA: `{pool}` (authority / relay `{relay}`)")?;
@@ -1334,107 +964,36 @@ fn write_proof_md(
     )?;
     writeln!(s)?;
 
-    writeln!(s, "## What was exercised")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "1. **Setup** - airdrop relay + payer, ensure the program is deployed, `InitPool`"
-    )?;
-    writeln!(
-        s,
-        "   a fresh pool with a nonzero entry fee + reward split, and create the pool ALT."
-    )?;
-    writeln!(
-        s,
-        "2. **Crowd path (PlainTransfer)** - 4 participants commit the SAME action into one"
-    )?;
-    writeln!(
-        s,
-        "   shared epoch; after the window closes the gasless coordinator"
-    )?;
-    writeln!(
-        s,
-        "   (`RpcSettleSubmitter`) settles ONE atomic transaction: ComputeBudget +"
-    )?;
-    writeln!(s, "   `SettleEpoch` + 4 identical System transfers.")?;
-    writeln!(
-        s,
-        "3. **ZK opt-in path** - `mirror-cli deposit-commit` escrows to a FRESH recipient;"
-    )?;
-    writeln!(
-        s,
-        "   after the window closes `mirror-cli prove` generates an in-process-verified Groth16"
-    )?;
-    writeln!(
-        s,
-        "   membership proof and the relay submits `SettleZk`, moving the escrow to the"
-    )?;
-    writeln!(s, "   fresh recipient.")?;
-    writeln!(
-        s,
-        "   This soak makes ONE ZK deposit, so its ZK window has a nominal set of 1 and the"
-    )?;
-    writeln!(
-        s,
-        "   `prove` floor is waived with `--accept-thin-set`. It proves the proof, the"
-    )?;
-    writeln!(
-        s,
-        "   binding, and the settlement, and proves NOTHING about anonymity: a set of one"
-    )?;
-    writeln!(
-        s,
-        "   is not an anonymity set. `SettleZk` has no on-chain floor, by design and for"
-    )?;
-    writeln!(
-        s,
-        "   the reason given in `docs/THREAT_MODEL.md` section 4."
-    )?;
-    writeln!(
-        s,
-        "4. **Adversarial** - under-floor epoch does not settle (on-chain `BelowKFloor` +"
-    )?;
-    writeln!(
-        s,
-        "   off-chain coordinator roll-forward); duplicate crowd nullifier rejected"
-    )?;
-    writeln!(
-        s,
-        "   (`NullifierSpent`); re-settle rejected (`EpochAlreadySettled`); ZK settle to a"
-    )?;
-    writeln!(
-        s,
-        "   mismatched recipient rejected (`ActionHashMismatch`); ZK replay rejected"
-    )?;
-    writeln!(s, "   (`NullifierSpent`).")?;
-    writeln!(s)?;
+    s.push_str(
+        r##"## What was exercised
 
-    writeln!(s, "## On-chain assertions")?;
-    writeln!(s)?;
-    let passed = report.checks.iter().filter(|(_, p, _)| *p).count();
-    writeln!(s, "{passed}/{} assertions passed.", report.checks.len())?;
-    writeln!(s)?;
-    writeln!(s, "| result | assertion | detail |")?;
-    writeln!(s, "| --- | --- | --- |")?;
-    for (label, pass, detail) in &report.checks {
-        writeln!(
-            s,
-            "| {} | {} | {} |",
-            if *pass { "PASS" } else { "FAIL" },
-            label,
-            detail.replace('|', "\\|")
-        )?;
-    }
-    writeln!(s)?;
+1. **Setup** - airdrop relay + payer, ensure the program is deployed, `InitPool`
+   a fresh pool with a nonzero entry fee + reward split, and create the pool ALT.
+2. **Crowd path (PlainTransfer)** - 4 participants commit the SAME action into one
+   shared epoch; after the window closes the gasless coordinator
+   (`RpcSettleSubmitter`) settles ONE atomic transaction: ComputeBudget +
+   `SettleEpoch` + 4 identical System transfers.
+3. **ZK opt-in path** - `mirror-cli deposit-commit` escrows to a FRESH recipient;
+   after the window closes `mirror-cli prove` generates an in-process-verified Groth16
+   membership proof and the relay submits `SettleZk`, moving the escrow to the
+   fresh recipient.
+   This soak makes ONE ZK deposit, so its ZK window has a nominal set of 1 and the
+   `prove` floor is waived with `--accept-thin-set`. It proves the proof, the
+   binding, and the settlement, and proves NOTHING about anonymity: a set of one
+   is not an anonymity set. `SettleZk` has no on-chain floor, by design and for
+   the reason given in `docs/THREAT_MODEL.md` section 4.
+4. **Adversarial** - under-floor epoch does not settle (on-chain `BelowKFloor` +
+   off-chain coordinator roll-forward); duplicate crowd nullifier rejected
+   (`NullifierSpent`); re-settle rejected (`EpochAlreadySettled`); ZK settle to a
+   mismatched recipient rejected (`ActionHashMismatch`); ZK replay rejected
+   (`NullifierSpent`).
 
-    writeln!(s, "## Captured transaction signatures")?;
-    writeln!(s)?;
-    writeln!(s, "| step | signature |")?;
-    writeln!(s, "| --- | --- |")?;
-    for (label, sig) in &report.sigs {
-        writeln!(s, "| {label} | `{sig}` |")?;
-    }
-    writeln!(s)?;
+"##,
+    );
+
+    checks_table(&mut s, report, "##");
+
+    sigs_table(&mut s, report, "##");
 
     writeln!(s, "## Reproduce")?;
     writeln!(s)?;
@@ -1443,45 +1002,31 @@ fn write_proof_md(
         "With a local Surfpool running at `{}` (treated as mainnet):",
         args.rpc_url
     )?;
-    writeln!(s)?;
-    writeln!(s, "```sh")?;
-    writeln!(s, "# 1. build the on-chain program and the host workspace")?;
-    writeln!(
-        s,
-        "cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml"
-    )?;
-    writeln!(s, "cargo build --workspace")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "# 2. deploy the program (the soak also does this if it is missing)"
-    )?;
-    writeln!(s, "solana program deploy \\")?;
+    s.push_str(
+        r##"
+```sh
+# 1. build the on-chain program and the host workspace
+cargo build-sbf --manifest-path programs/mirror-pool/Cargo.toml
+cargo build --workspace
+
+# 2. deploy the program (the soak also does this if it is missing)
+solana program deploy \
+"##,
+    );
     writeln!(s, "  --url {} \\", args.rpc_url)?;
-    writeln!(
-        s,
-        "  --program-id programs/mirror-pool/target/deploy/mirror_pool-keypair.json \\"
-    )?;
-    writeln!(s, "  programs/mirror-pool/target/deploy/mirror_pool.so")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "# 3. (ZK path) ensure the circuit artifacts are present (proving is in-process\n#    pure Rust; circom/snarkjs are only needed to BUILD these artifacts)"
-    )?;
-    writeln!(
-        s,
-        "#    circuits/membership_final.zkey, circuits/membership_js/membership.wasm,"
-    )?;
-    writeln!(
-        s,
-        "#    circuits/artifacts/verification_key.json  (build with `bash circuits/build.sh`)"
-    )?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "# 4. run the soak (defaults target the running Surfpool + the built program id)"
-    )?;
-    writeln!(s, "cargo run -p mirror-soak -- \\")?;
+    s.push_str(
+        r##"  --program-id programs/mirror-pool/target/deploy/mirror_pool-keypair.json \
+  programs/mirror-pool/target/deploy/mirror_pool.so
+
+# 3. (ZK path) ensure the circuit artifacts are present (proving is in-process
+#    pure Rust; circom/snarkjs are only needed to BUILD these artifacts)
+#    circuits/membership_final.zkey, circuits/membership_js/membership.wasm,
+#    circuits/artifacts/verification_key.json  (build with `bash circuits/build.sh`)
+
+# 4. run the soak (defaults target the running Surfpool + the built program id)
+cargo run -p mirror-soak -- \
+"##,
+    );
     writeln!(s, "  --rpc-url {} \\", args.rpc_url)?;
     writeln!(s, "  --program-id {program_id} \\")?;
     writeln!(
@@ -1489,16 +1034,13 @@ fn write_proof_md(
         "  --epoch-slots {} --k-floor {}",
         args.epoch_slots, args.k_floor
     )?;
-    writeln!(s, "```")?;
-    writeln!(s)?;
-    writeln!(
-        s,
-        "Every run creates a fresh pool (a fresh relay authority), so the run is"
-    )?;
-    writeln!(
-        s,
-        "self-contained and repeatable; the signatures above are from this run."
-    )?;
+    s.push_str(
+        r##"```
+
+Every run creates a fresh pool (a fresh relay authority), so the run is
+self-contained and repeatable; the signatures above are from this run.
+"##,
+    );
 
     let docs = root.join("docs");
     std::fs::create_dir_all(&docs)?;

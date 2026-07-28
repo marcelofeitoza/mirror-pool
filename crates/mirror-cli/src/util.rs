@@ -1,6 +1,8 @@
 //! Small encoding helpers shared across the CLI.
 
-use anyhow::{bail, Result};
+use std::path::Path;
+
+use anyhow::{bail, Context, Result};
 use mirror_core::Hash32;
 use num_bigint::BigUint;
 
@@ -34,6 +36,27 @@ fn hex_nibble(b: u8) -> u8 {
         b'A'..=b'F' => b - b'A' + 10,
         _ => unreachable!("caller validated hex digits"),
     }
+}
+
+/// Read a leaf set: one 64-char hex commitment per non-empty, non-comment line,
+/// in the file's order - which IS the ordering the root is built over, so this
+/// parser is what binds a proof to a set. Every command that takes `--leaves`
+/// reads it through here.
+pub fn read_leaves(path: &Path) -> Result<Vec<Hash32>> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading leaves file {}", path.display()))?;
+    let mut leaves = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        leaves.push(
+            from_hex32(line)
+                .with_context(|| format!("leaf on line {} of {}", i + 1, path.display()))?,
+        );
+    }
+    Ok(leaves)
 }
 
 /// Decimal string of a 32-byte big-endian field element (for snarkjs input.json).

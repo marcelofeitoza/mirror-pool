@@ -308,27 +308,21 @@ fn random_dummy_has_nonzero_distinct_nullifier() {
     assert_eq!(a.note.blinding[0], 0);
 }
 
-/// End-to-end Transact proof generation through snarkjs against the REAL
-/// transaction zkey/wasm, for the TRANSFER witness. Gated behind
-/// MIRROR_PROVE_LIVE=1 and #[ignore] so CI without node/snarkjs/zkey still passes.
-///
-/// Run with:
-///   MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored transact_pipeline
-#[test]
-#[ignore = "requires node + snarkjs + built transaction zkey/wasm; set MIRROR_PROVE_LIVE=1"]
-fn transact_pipeline_generates_and_verifies_real_proof() {
-    if std::env::var("MIRROR_PROVE_LIVE").ok().as_deref() != Some("1") {
-        eprintln!("MIRROR_PROVE_LIVE != 1; skipping live transact pipeline test");
-        return;
-    }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+/// The repo root: this crate lives at `crates/mirror-cli`.
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap()
-        .to_path_buf();
+        .to_path_buf()
+}
 
-    // Reproduce the committed TRANSFER witness (2 real inputs, publicAmount 0).
+/// The committed TRANSFER witness the live provers reproduce: 2 real inputs
+/// (30 @ leaf 0, 20 @ leaf 1) owned by Alice, 2 outputs (35 to Bob, 15 back to
+/// Alice), `publicAmount == 0`, zero fee. Both live tests prove THIS witness, so
+/// it has exactly one definition.
+fn committed_transfer_witness() -> TransactWitness {
     let alice = ValueKeypair::from_private_key(dec("100000000000000000000000000000000001"));
     let bob = ValueKeypair::from_private_key(dec("200000000000000000000000000000000002"));
     let in0 = Note::new(30, alice.public_key(), fe(31));
@@ -336,7 +330,7 @@ fn transact_pipeline_generates_and_verifies_real_proof() {
     let mtree = tree::SparseMerkle::from_leaves(tree::DEPTH, &[in0.commitment(), in1.commitment()]);
     let p0 = mtree.path(0);
     let p1 = mtree.path(1);
-    let witness = TransactWitness {
+    TransactWitness {
         inputs: [
             ValueInput {
                 note: in0,
@@ -364,7 +358,26 @@ fn transact_pipeline_generates_and_verifies_real_proof() {
             enc0: payload(3),
             enc1: payload(4),
         },
-    };
+    }
+}
+
+/// End-to-end Transact proof generation through snarkjs against the REAL
+/// transaction zkey/wasm, for the TRANSFER witness. Gated behind
+/// MIRROR_PROVE_LIVE=1 and #[ignore] so CI without node/snarkjs/zkey still passes.
+///
+/// Run with:
+///   MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored transact_pipeline
+#[test]
+#[ignore = "requires node + snarkjs + built transaction zkey/wasm; set MIRROR_PROVE_LIVE=1"]
+fn transact_pipeline_generates_and_verifies_real_proof() {
+    if std::env::var("MIRROR_PROVE_LIVE").ok().as_deref() != Some("1") {
+        eprintln!("MIRROR_PROVE_LIVE != 1; skipping live transact pipeline test");
+        return;
+    }
+    let root = repo_root();
+
+    // The committed TRANSFER witness (2 real inputs, publicAmount 0).
+    let witness = committed_transfer_witness();
 
     let opts = TransactProveOpts {
         snarkjs: "snarkjs".to_string(),
@@ -430,50 +443,10 @@ fn rust_transact_pipeline_verifies_and_on_chain_verifier_accepts() {
         eprintln!("MIRROR_PROVE_LIVE != 1; skipping live Rust transact test");
         return;
     }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let root = repo_root();
 
-    // Reproduce the committed TRANSFER witness (2 real inputs, publicAmount 0).
-    let alice = ValueKeypair::from_private_key(dec("100000000000000000000000000000000001"));
-    let bob = ValueKeypair::from_private_key(dec("200000000000000000000000000000000002"));
-    let in0 = Note::new(30, alice.public_key(), fe(31));
-    let in1 = Note::new(20, alice.public_key(), fe(32));
-    let mtree = tree::SparseMerkle::from_leaves(tree::DEPTH, &[in0.commitment(), in1.commitment()]);
-    let p0 = mtree.path(0);
-    let p1 = mtree.path(1);
-    let witness = TransactWitness {
-        inputs: [
-            ValueInput {
-                note: in0,
-                keypair: alice,
-                leaf_index: 0,
-                path_elements: p0.elements,
-            },
-            ValueInput {
-                note: in1,
-                keypair: alice,
-                leaf_index: 1,
-                path_elements: p1.elements,
-            },
-        ],
-        outputs: [
-            Note::new(35, bob.public_key(), fe(41)),
-            Note::new(15, alice.public_key(), fe(42)),
-        ],
-        signed_amount: SignedAmount::Transfer,
-        root: p0.root,
-        ext: ExtData {
-            recipient: recipient(),
-            relayer: relayer(),
-            fee: 0,
-            enc0: payload(3),
-            enc1: payload(4),
-        },
-    };
+    // The committed TRANSFER witness (2 real inputs, publicAmount 0).
+    let witness = committed_transfer_witness();
 
     // Prove entirely in Rust (default path; use_snarkjs = false).
     let opts = TransactProveOpts {

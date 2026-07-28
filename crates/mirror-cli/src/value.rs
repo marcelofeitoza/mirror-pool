@@ -33,7 +33,7 @@ use solana_pubkey::Pubkey;
 use crate::chain::{self, Chain, ValuePoolState};
 use crate::groth16::{self, SnarkjsProof};
 use crate::tree;
-use crate::util::{be32_to_decimal, to_hex};
+use crate::util::{be32_to_decimal, read_leaves, to_hex};
 use crate::value_note::{ValueAddress, ValueNoteRecord, ValueWallet, VALUE_NOTE_VERSION};
 
 /// One JoinSplit input: a value note plus everything needed to place it in the
@@ -1175,24 +1175,6 @@ fn read_hex_lines(path: &Path) -> Result<Vec<Vec<u8>>> {
         );
     }
     Ok(out)
-}
-
-/// Read a leaf set (one 64-char hex commitment per non-empty line, in order).
-fn read_leaves(path: &Path) -> Result<Vec<Hash32>> {
-    let raw =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut leaves = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        leaves.push(
-            crate::util::from_hex32(line)
-                .with_context(|| format!("leaf on line {} of {}", i + 1, path.display()))?,
-        );
-    }
-    Ok(leaves)
 }
 
 /// Decode an even-length hex string into bytes.

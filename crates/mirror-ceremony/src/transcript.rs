@@ -355,14 +355,6 @@ impl Transcript {
         ))
     }
 
-    /// The delta points at the head of the chain.
-    pub fn head_deltas(&self) -> Result<(G1Affine, G2Affine)> {
-        match self.contributions.last() {
-            Some(last) => last.deltas(),
-            None => self.header_deltas(),
-        }
-    }
-
     /// Pretty JSON.
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string_pretty(self)

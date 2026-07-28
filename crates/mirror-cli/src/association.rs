@@ -28,16 +28,15 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use mirror_core::{commit_with_action_hash, nullifier, transfer_action_hash, wire, Epoch, Hash32};
+use mirror_core::{wire, Hash32};
 use serde::Serialize;
 use solana_pubkey::Pubkey;
-use std::str::FromStr;
 
-use crate::chain::{self, Chain};
+use crate::chain;
 use crate::groth16;
-use crate::note::{ActionRecord, Note};
+use crate::note::Note;
 use crate::tree::{self, MerklePath};
-use crate::util::{be32_to_decimal, from_hex32, to_hex};
+use crate::util::{be32_to_decimal, read_leaves, to_hex};
 
 /// `prove-associated` arguments. A superset of [`crate::prove::ProveOpts`]: the
 /// association circuit's artifacts replace the membership ones, and the curator's
@@ -111,65 +110,27 @@ pub struct SettleZkAssociatedEmit {
 
 pub fn run(opts: ProveAssociatedOpts) -> Result<SettleZkAssociatedEmit> {
     let note = Note::load(&opts.note_path)?;
-
-    // A ZK proof only exists for the transfer (opt-in) path.
-    let (recipient_str, amount) = match &note.action {
-        ActionRecord::Transfer { recipient, amount } => (recipient.clone(), *amount),
-        ActionRecord::Crowd { .. } => bail!(
-            "note {} is a crowd-path note; `prove-associated` is only for ZK opt-in \
-             (deposit-commit) notes",
-            opts.note_path.display()
-        ),
-    };
-
-    let program_id = Pubkey::from_str(&note.program_id)
-        .map_err(|e| anyhow!("note program_id is not a valid pubkey: {e}"))?;
-    let pool = Pubkey::from_str(&note.pool)
-        .map_err(|e| anyhow!("note pool is not a valid pubkey: {e}"))?;
-    let recipient = Pubkey::from_str(&recipient_str)
-        .map_err(|e| anyhow!("note recipient is not a valid pubkey: {e}"))?;
-
-    let secret = mirror_core::Secret::from_bytes(from_hex32(&note.secret_hex)?);
-    let epoch = Epoch(note.epoch);
-
-    // (1) Recompute the bound values and confirm the leaf matches the note.
-    let action_hash = transfer_action_hash(&recipient.to_bytes(), amount);
-    let nullifier_hash = nullifier(&secret, epoch).0;
-    let leaf = commit_with_action_hash(&secret, &action_hash, epoch).0;
-    let note_commitment = from_hex32(&note.commitment_hex)?;
-    if leaf != note_commitment {
-        bail!(
-            "recomputed leaf {} does not match the note commitment {}: the note is inconsistent",
-            to_hex(&leaf),
-            note.commitment_hex
-        );
-    }
-
-    // (2) Rebuild the POOL inclusion path and confirm the pool accepts its root.
-    let path = crate::prove::build_path(&note, &leaf, opts.leaves.as_deref())?;
-    if path.elements.len() != tree::DEPTH {
-        bail!(
-            "rebuilt pool path has {} levels, expected {}",
-            path.elements.len(),
-            tree::DEPTH
-        );
-    }
-    if tree::verify_path(&leaf, &path.elements, &path.indices) != path.root {
-        bail!("client-side pool path does not verify to its root (rebuild bug)");
-    }
-
-    let chain = Chain::new(opts.rpc_url.clone());
-    let pool_state = chain
-        .pool_state(&pool)
-        .context("reading the pool account to check the proof root is known")?;
-    if !pool_state.is_known_root(&path.root) {
-        bail!(
-            "proof root {} is not a known recent root on-chain (it may have aged out of the \
-             {}-root history; settle sooner, or pass --leaves to prove against the current root)",
-            to_hex(&path.root),
-            pool_state.root_ring.len()
-        );
-    }
+    // (1)+(2) Bind and validate the note, rebuild the POOL path, check the root.
+    let crate::prove::ZkWitness {
+        program_id,
+        pool,
+        recipient,
+        amount,
+        secret,
+        action_hash,
+        nullifier_hash,
+        leaf,
+        path,
+        chain,
+        pool_state,
+        ..
+    } = crate::prove::resolve_zk_note(
+        &note,
+        &opts.note_path,
+        opts.leaves.as_deref(),
+        &opts.rpc_url,
+        "prove-associated",
+    )?;
 
     // (3) Rebuild the ASSOCIATION inclusion path from the curator's leaf list.
     let assoc_path = build_association_path(&opts.association_leaves, &leaf)?;
@@ -337,25 +298,6 @@ pub fn build_association_path(leaves_path: &Path, leaf: &Hash32) -> Result<Assoc
         path,
         set_size: leaf_set.len(),
     })
-}
-
-/// Read a leaf set: one 64-char hex commitment per non-empty, non-comment line,
-/// in the file's order (which IS the curated ordering the root is built over).
-pub fn read_leaves(path: &Path) -> Result<Vec<Hash32>> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading leaves file {}", path.display()))?;
-    let mut leaves = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        leaves.push(
-            from_hex32(line)
-                .with_context(|| format!("leaf on line {} of {}", i + 1, path.display()))?,
-        );
-    }
-    Ok(leaves)
 }
 
 /// The circom `input.json` object for the association circuit (decimal field
