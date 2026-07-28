@@ -516,6 +516,50 @@ fn empty_root_matches_circuit_zero_ladder() {
     );
 }
 
+/// The cross-check vector shared with the ARKWORKS-NATIVE circuit in
+/// `crates/mirror-circuits`. Its test
+/// `gadget_produces_the_syscall_cross_check_vector` recomputes this leaf and
+/// climbs this depth-20 path IN CIRCUIT (the constraint system is satisfied only
+/// if the in-circuit Poseidon gadget produces exactly these bytes) and asserts
+/// the same two constants.
+///
+/// Neither side trusts the other: both recompute and compare against the shared
+/// vector. Read `docs/ARKWORKS.md` section 3 for what the agreement does and does
+/// not prove - the syscall is built on `light-poseidon`, whose parameter table
+/// the gadget also uses, so this pins the parameter / layout / byte-order wiring
+/// rather than two independent Poseidon implementations.
+const ARKWORKS_GADGET_LEAF_HEX: &str =
+    "17f05ec0329a0f4379a258bdb21ea7bcf77d18f8b29e938de4107000cbe29e47";
+const ARKWORKS_GADGET_ROOT_HEX: &str =
+    "17eb8b099a02413857616f6707ae037e92f08aa788d501f49da9a78a67b6a7c2";
+
+/// GADGET <-> SYSCALL: append the arkworks circuit's commitment leaf through the
+/// real `COMMIT` instruction and require the accumulator root - twenty nested
+/// `sol_poseidon` syscall calls inside the SBF VM - to equal the root the
+/// in-circuit Merkle climb produced.
+///
+/// `empty_root_matches_circuit_zero_ladder` only covers the all-zeros tree, where
+/// the leaf value never enters. Here the leaf is a real
+/// `Poseidon(secret, actionHash, epoch)` commitment, so every level mixes a
+/// non-trivial value with a zero-ladder sibling.
+#[test]
+fn on_chain_accumulator_matches_the_arkworks_gadget_vector() {
+    let mut env = Env::new();
+    let (_authority, payer, pool_key) = init_pool(&mut env, 1_000, 2, 0);
+    env.warp(3);
+    let epoch_acct = env.epoch_pda(&pool_key, 0);
+
+    let leaf = hex32(ARKWORKS_GADGET_LEAF_HEX);
+    let ix = env.commit_ix(&pool_key, &epoch_acct, &payer, &leaf);
+    env.process(&ix, &[Check::success()]);
+
+    assert_eq!(
+        pool::current_root(&env.get(&pool_key).data).unwrap(),
+        hex32(ARKWORKS_GADGET_ROOT_HEX),
+        "the syscall accumulator must reproduce the arkworks gadget's depth-20 root"
+    );
+}
+
 /// Parse a 64-character big-endian hex string into 32 bytes.
 fn hex32(s: &str) -> [u8; 32] {
     let bytes = s.as_bytes();

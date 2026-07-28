@@ -1,0 +1,54 @@
+# mirror-circuits: an arkworks-native constraint-synthesis path for the
+# membership circuit, alongside (not instead of) the circom one.
+#
+# WHY. The proving path is already pure Rust (ark-circom + ark-groth16 run the
+# witness calculator in-process, no Node at runtime), but the CIRCUIT is still
+# written in circom, so circom + snarkjs + node + npm remain in artifact
+# generation and in the trusted setup. This crate removes that toolchain from the
+# picture for one circuit: the constraint system, the Poseidon gadget, the setup
+# and the proof are all Rust, and the resulting proof is checked with the same
+# groth16-solana verifier the on-chain program runs.
+#
+# The circom path is untouched and remains the deployed one. See ARKWORKS.md.
+[package]
+name = "mirror-circuits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Arkworks-native constraint synthesis for the mirror-pool membership circuit: an in-circuit circomlib-parameter Poseidon gadget, a depth-20 Merkle inclusion statement, and a Groth16 setup that needs no circom or snarkjs."
+
+[dependencies]
+# arkworks 0.5 throughout, the SAME major every other crate here links
+# (mirror-core's light-poseidon 0.4 -> ark-bn254/ark-ff 0.5, mirror-cli's
+# ark-circom 0.5, mirror-ceremony's ark-groth16 0.5), so `Fr` is ONE type
+# repo-wide and a key produced here can be handed to the existing exporters.
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+ark-std = "0.5"
+ark-relations = "0.5"
+ark-r1cs-std = "0.5"
+ark-groth16 = "0.5"
+ark-snark = "0.5"
+# The Poseidon ROUND CONSTANTS and MDS matrix. This is a parameter table, not a
+# second hash implementation: `light_poseidon::parameters::bn254_x5` is the same
+# table the on-chain `sol_poseidon` syscall is built on, so the gadget below is
+# wired to exactly the constants the chain uses. The crate's own native hasher is
+# kept as the reference the gadget is tested against.
+light-poseidon = "0.4"
+thiserror.workspace = true
+# Reuse the exporters the ceremony crate already owns (`vk_export` for the
+# groth16-solana verifying-key layout, `points` for the big-endian uncompressed
+# G1/G2 encodings) instead of writing a third copy of the same byte format.
+mirror-ceremony.workspace = true
+# The canonical verifying-key registry encoding (`wire::encode_vk`), so a key
+# from this path can be digested exactly the way the committed ones are.
+mirror-core.workspace = true
+
+[dev-dependencies]
+# The SAME on-chain Groth16 verifier the program embeds. The end-to-end test
+# generates a key and a proof from this crate's arkworks circuit and runs that
+# verifier over them, so "verifies on chain" is an executed check, not a claim.
+groth16-solana = "0.2.0"
+rand.workspace = true
+sha2.workspace = true

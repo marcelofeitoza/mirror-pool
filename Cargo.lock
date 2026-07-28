@@ -451,6 +451,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-r1cs-std"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "941551ef1df4c7a401de7068758db6503598e6f01850bdb2cfdb614a1f9dbea1"
+dependencies = [
+ "ark-ec 0.5.0",
+ "ark-ff 0.5.0",
+ "ark-relations",
+ "ark-std 0.5.0",
+ "educe",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "tracing",
+]
+
+[[package]]
 name = "ark-relations"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3044,6 +3061,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirror-circuits"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254 0.5.0",
+ "ark-ff 0.5.0",
+ "ark-groth16",
+ "ark-r1cs-std",
+ "ark-relations",
+ "ark-snark",
+ "ark-std 0.5.0",
+ "groth16-solana",
+ "light-poseidon",
+ "mirror-ceremony",
+ "mirror-core",
+ "rand 0.8.7",
+ "sha2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "mirror-cli"
 version = "0.1.0"
 dependencies = [
@@ -4195,7 +4232,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

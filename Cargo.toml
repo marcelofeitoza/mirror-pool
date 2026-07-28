@@ -10,6 +10,7 @@ resolver = "2"
 members = [
     "crates/mirror-core",
     "crates/mirror-ceremony",
+    "crates/mirror-circuits",
     "crates/mirror-coordinator",
     "crates/mirror-cli",
     "crates/mirror-harness",
@@ -29,6 +30,7 @@ authors = ["mirror-pool contributors"]
 mirror-core = { path = "crates/mirror-core" }
 mirror-behaviors = { path = "crates/mirror-behaviors" }
 mirror-ceremony = { path = "crates/mirror-ceremony" }
+mirror-circuits = { path = "crates/mirror-circuits" }
 anyhow = "1"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }

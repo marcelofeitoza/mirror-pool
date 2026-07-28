@@ -205,6 +205,7 @@ mirror-pool/
     mirror-behaviors     # Behavior trait + pooled-action adapters[implemented]
     mirror-soak          # live Surfpool end-to-end soak suite    [implemented]
     mirror-ceremony      # multi-party Groth16 phase-2 ceremony   [implemented]
+    mirror-circuits      # arkworks-native membership circuit     [implemented]
   circuits/              # Poseidon membership circuit + Groth16 setup [implemented]
   programs/
     mirror-pool          # on-chain Pinocchio program (SBF)       [implemented]
@@ -216,6 +217,7 @@ mirror-pool/
     INCENTIVES.md        # entry-fee split, dwell reward, ZK-path incentive design
     PROOF.md             # live Surfpool soak results + tx signatures
     CEREMONY.md          # multi-party trusted-setup ceremony: contribute + verify
+    ARKWORKS.md          # the arkworks-native circuit path + measured comparison
   Cargo.toml             # host workspace manifest
   Makefile               # fmt / clippy / test / build-sbf / harness / soak
   LICENSE                # MIT
@@ -360,6 +362,14 @@ reasoning, and the set the ZK path actually gives, are in
   refuses to count self-runs and what it still cannot rule out without the
   pre-committed beacon value, and exactly what 1-of-N honest does and does not give
   you.
+- [`docs/ARKWORKS.md`](docs/ARKWORKS.md) - the arkworks-native constraint-synthesis
+  path for the membership circuit: an in-circuit Poseidon gadget, a Groth16 setup
+  and a proof with no `circom` / `snarkjs` / `node` / `npm` anywhere, verified with
+  the same `groth16-solana` verifier the program links. Includes the measured
+  constraint comparison against the committed circom `.r1cs` (5,363 arkworks rows
+  vs 5,427 circom multiplication rows, with the 64-row delta fully explained), the
+  gadget-versus-`sol_poseidon` cross-check, and a plain statement of what is still
+  circom-only.
 - [`docs/PROOF.md`](docs/PROOF.md) - the live Surfpool soak: both paths + the
   adversarial cases, with transaction signatures and on-chain assertions.
 - [`paper/mirror-pool.pdf`](paper/mirror-pool.pdf) - the design paper: the
