@@ -21,6 +21,15 @@
 # that will NOT match the committed on-chain vk. Run `git checkout -- circuits/artifacts`
 # before the on-chain tests, or the embedded-vk proofs will fail to verify.
 #
+# THIS IS NOW A DESTRUCTIVE STEP FOR THE MEMBERSHIP KEY. The committed
+# artifacts/verification_key.json and artifacts/vk.rs are the output of a REAL
+# phase-2 ceremony (docs/CEREMONY.md section 10), and the deployed program pins that
+# key's SHA-256. Running this script replaces them with a DEV key, at which point
+# nothing verifies against the deployed program until you `git checkout --
+# circuits/artifacts`. To regenerate the committed artifacts under the ceremony key,
+# use `mirror-cli ceremony export-vk` (key) and `mirror-cli ceremony prove-check
+# --out-dir <dir>` (fixture) instead of this script.
+#
 # Requirements: circom 2.x, node, and the npm deps (circomlib, snarkjs) installed
 # via `npm install` in this directory.
 #

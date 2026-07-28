@@ -39,9 +39,10 @@ rand.workspace = true
 # artifacts snarkjs uses (the compiled `.wasm` witness calculator, run in-process by
 # the pure-Rust `wasmer` VM, and the `.zkey` proving key via `read_zkey`), builds the
 # witness from typed Rust inputs, and `ark-groth16` produces a proof over
-# `ark-bn254`. The proving key is read from the SAME committed `.zkey` the on-chain
-# verifying key (src/vk.rs) was derived from, so the proof verifies against the
-# unchanged committed vk. Pinned to arkworks 0.5 to match mirror-core's
+# `ark-bn254`. The proving key comes either from a `.zkey` or from a phase-2
+# ceremony `.mpk`; the deployed membership verifying key (src/vk.rs) was exported
+# from the ceremony key, so that is the one that produces landable membership
+# proofs. Pinned to arkworks 0.5 to match mirror-core's
 # light-poseidon 0.4 -> ark-bn254/ark-ff 0.5, so the `Fr`/`Fq` types agree repo-wide.
 ark-circom = "0.5"
 ark-groth16 = "0.5"

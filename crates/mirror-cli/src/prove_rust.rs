@@ -8,9 +8,14 @@
 //!    the `.r1cs` - with [`ark_circom`]. The `.wasm` is run IN-PROCESS by the
 //!    pure-Rust `wasmer` WebAssembly runtime to compute the witness; nothing shells
 //!    out to `node`.
-//! 2. Read the Groth16 proving key from the committed `.zkey` with
-//!    [`ark_circom::read_zkey`] (the SAME key the on-chain verifying key in
-//!    `programs/mirror-pool/src/vk.rs` was exported from).
+//! 2. Read the Groth16 proving key: from a `.zkey` with
+//!    [`ark_circom::read_zkey`], or, via [`prove_with_key`], from a phase-2
+//!    CEREMONY key. The deployed MEMBERSHIP verifying key in
+//!    `programs/mirror-pool/src/vk.rs` was exported from a ceremony key, not from
+//!    `circuits/membership_final.zkey`, so only the ceremony path produces
+//!    membership proofs the deployed program accepts. The JoinSplit and
+//!    association verifying keys are still the ones their `.zkey`s were exported
+//!    from.
 //! 3. Prove with [`ark_groth16`] over `ark-bn254`, using [`CircomReduction`] - the
 //!    snarkjs-compatible R1CS-to-QAP witness map - so the proof verifies under a
 //!    snarkjs-exported verifying key.

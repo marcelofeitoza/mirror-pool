@@ -511,11 +511,16 @@ struct ProveArgs {
     #[arg(long, default_value = "circuits/membership.r1cs")]
     r1cs: PathBuf,
     /// Groth16 proving key (gitignored; produced by `bash circuits/build.sh`).
+    /// This is the DEV key: the deployed membership verifying key came from the
+    /// phase-2 ceremony (docs/CEREMONY.md), so a proof made under this default is
+    /// well-formed but WILL be rejected on chain. Use `--proving-key` to land one.
     #[arg(long, default_value = "circuits/membership_final.zkey")]
     zkey: PathBuf,
     /// Prove under a CEREMONY-produced key (`key_NNNN.mpk`) instead of `--zkey`.
-    /// The program must embed the matching verifying key
-    /// (`mirror-cli ceremony export-vk --out-rust`) for the proof to land.
+    /// This is what the DEPLOYED membership verifying key was exported from, so
+    /// this is the path that produces a proof the program accepts. The program
+    /// must pin the matching key's digest (`ceremony export-vk --out-rust` plus
+    /// the constant in `programs/mirror-pool/src/vk_digest.rs`) for it to land.
     #[arg(long, conflicts_with = "use_snarkjs")]
     proving_key: Option<PathBuf>,
     /// Groth16 verification key (committed under circuits/artifacts/). Only used by

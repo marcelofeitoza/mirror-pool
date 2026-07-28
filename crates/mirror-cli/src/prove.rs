@@ -17,9 +17,17 @@
 //! 4. Generate the Groth16 proof IN-PROCESS in pure Rust (the default) via
 //!    [`crate::prove_rust`]: `ark-circom` runs the compiled `membership.wasm`
 //!    witness calculator under the `wasmer` VM, reads the proving key from
-//!    `membership_final.zkey`, and `ark-groth16` produces + verifies the proof - no
-//!    Node/snarkjs process is spawned. A `--use-snarkjs` fallback still shells out
-//!    to `snarkjs groth16 fullprove` + `verify` for parity checks.
+//!    `--zkey` (or, with `--proving-key`, from a ceremony `.mpk`), and
+//!    `ark-groth16` produces + verifies the proof - no Node/snarkjs process is
+//!    spawned. A `--use-snarkjs` fallback still shells out to
+//!    `snarkjs groth16 fullprove` + `verify` for parity checks.
+//!
+//!    NOTE: the DEPLOYED membership verifying key is a phase-2 ceremony output
+//!    (`docs/CEREMONY.md` section 10), and `circuits/membership_final.zkey` is the
+//!    old dev key, so a proof made under the `--zkey` default will NOT be accepted
+//!    on chain. Pass `--proving-key <ceremony>/key_NNNN.mpk` to produce a proof
+//!    that lands. The `--zkey` path stays for circuit work against a locally
+//!    exported key.
 //! 5. Serialize the proof + public inputs into the exact `SettleZk` instruction
 //!    data (proof_a pre-negated) and emit it for the relay/coordinator to submit.
 //!
@@ -898,6 +906,15 @@ mod tests {
     /// zkey/wasm. Gated behind MIRROR_PROVE_LIVE=1 and #[ignore] so CI without
     /// node/snarkjs/zkey still passes; the Surfpool soak exercises it live.
     ///
+    /// SCOPE: this exercises the snarkjs SHELL-OUT plumbing (fullprove, verify,
+    /// public-signal cross-check, SettleZk assembly), not the deployed root of
+    /// trust. It proves under the `circuits/build.sh` dev zkey and verifies
+    /// against THAT zkey's own verifying key, exported into the work directory,
+    /// because the committed `circuits/artifacts/verification_key.json` is now the
+    /// phase-2 CEREMONY key and the dev zkey cannot produce proofs under it. The
+    /// tests that pin the deployed key are the `rust_prove` pair below, which
+    /// prove under the ceremony proving key.
+    ///
     /// Run with:
     ///   MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored prove_pipeline
     #[test]
@@ -911,7 +928,6 @@ mod tests {
         let root = repo_root();
         let wasm = root.join("circuits/membership_js/membership.wasm");
         let zkey = root.join("circuits/membership_final.zkey");
-        let vk = root.join("circuits/artifacts/verification_key.json");
 
         let Fixture {
             secret,
@@ -924,6 +940,28 @@ mod tests {
 
         let work = std::env::temp_dir().join("mirror-cli-prove-live-test");
         std::fs::create_dir_all(&work).unwrap();
+
+        // The dev zkey's OWN verifying key (see SCOPE above).
+        let vk = work.join("dev_zkey_verification_key.json");
+        let (program, prefix) = snarkjs_command("snarkjs").unwrap();
+        let export = Command::new(&program)
+            .args(&prefix)
+            .args([
+                "zkey",
+                "export",
+                "verificationkey",
+                &zkey.to_string_lossy(),
+                &vk.to_string_lossy(),
+            ])
+            .output()
+            .expect("spawning snarkjs to export the dev zkey's verifying key");
+        assert!(
+            export.status.success() && vk.exists(),
+            "snarkjs zkey export verificationkey failed: {}{}",
+            String::from_utf8_lossy(&export.stdout),
+            String::from_utf8_lossy(&export.stderr)
+        );
+
         let input = work.join("input.json");
         write_input_json(
             &input,
@@ -967,6 +1005,46 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../circuits/artifacts/vk.rs"
         ));
+    }
+
+    /// The final transcript hash of the phase-2 ceremony the COMMITTED membership
+    /// verifying key was exported from. Published in `docs/CEREMONY.md` and
+    /// re-derivable from `docs/ceremony-run/membership-deployed-transcript.json`.
+    const DEPLOYED_MEMBERSHIP_TRANSCRIPT_HASH: &str =
+        "884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05";
+
+    /// The proving key that matches the COMMITTED membership verifying key.
+    ///
+    /// The deployed membership key is a phase-2 CEREMONY output, not a
+    /// `circuits/build.sh` dev setup, so `circuits/membership_final.zkey` no longer
+    /// corresponds to `circuits/artifacts/vk.rs` and cannot produce a proof the
+    /// program accepts. The matching proving key is the ceremony's head key. Like
+    /// the zkey it is a multi-megabyte gitignored local artifact, so these live
+    /// tests need the ceremony directory on disk; the transcript-hash assertion
+    /// below makes sure it is the RIGHT ceremony and not some other run.
+    fn deployed_membership_proving_key(repo: &Path) -> ark_groth16::ProvingKey<ark_bn254::Bn254> {
+        let dir = repo.join("ceremony/membership");
+        assert!(
+            dir.join("transcript.json").exists(),
+            "MIRROR_PROVE_LIVE=1 was set, so this test must actually run, but the membership \
+             ceremony directory {} is missing. It holds the proving key matching the committed \
+             verifying key and is gitignored (multi-megabyte key files); obtain it from the \
+             ceremony operator, or unset MIRROR_PROVE_LIVE to skip.",
+            dir.display()
+        );
+        let session =
+            mirror_ceremony::session::Session::open(&dir).expect("opening the membership ceremony");
+        let report = session
+            .verify()
+            .expect("the membership ceremony transcript must verify");
+        assert_eq!(
+            report.final_transcript_hash, DEPLOYED_MEMBERSHIP_TRANSCRIPT_HASH,
+            "this is not the ceremony the committed verifying key was exported from"
+        );
+        session
+            .load_head_key()
+            .expect("loading the ceremony head proving key")
+            .pk
     }
 
     /// DECISIVE end-to-end check for the in-process (Node-free) prover: generate a
@@ -1017,12 +1095,11 @@ mod tests {
             &path,
         );
         let expected = membership_public_inputs(&path.root, &nullifier_hash, &action_hash, epoch);
-        let proof_bytes = crate::prove_rust::prove(
-            &crate::prove_rust::Artifacts {
-                wasm: &repo.join("circuits/membership_js/membership.wasm"),
-                r1cs: &repo.join("circuits/membership.r1cs"),
-                zkey: &repo.join("circuits/membership_final.zkey"),
-            },
+        let pk = deployed_membership_proving_key(&repo);
+        let proof_bytes = crate::prove_rust::prove_with_key(
+            &repo.join("circuits/membership_js/membership.wasm"),
+            &repo.join("circuits/membership.r1cs"),
+            &pk,
             &input,
             &expected,
         )
@@ -1127,12 +1204,11 @@ mod tests {
             &path,
         );
         let expected = membership_public_inputs(&path.root, &nullifier_hash, &action_hash, epoch);
-        let proof_bytes = crate::prove_rust::prove(
-            &crate::prove_rust::Artifacts {
-                wasm: &repo.join("circuits/membership_js/membership.wasm"),
-                r1cs: &repo.join("circuits/membership.r1cs"),
-                zkey: &repo.join("circuits/membership_final.zkey"),
-            },
+        let pk = deployed_membership_proving_key(&repo);
+        let proof_bytes = crate::prove_rust::prove_with_key(
+            &repo.join("circuits/membership_js/membership.wasm"),
+            &repo.join("circuits/membership.r1cs"),
+            &pk,
             &input,
             &expected,
         )

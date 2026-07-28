@@ -133,8 +133,16 @@ the EXACT on-chain `groth16-solana` verifier over the result against the
 ceremony-exported verifying key. Full guide in `docs/CEREMONY.md`; the demonstration
 run's transcripts are committed under `docs/ceremony-run/`.
 
-**What is not yet done:** no production ceremony has been *run*. The committed and
-deployed verifying keys still come from the insecure dev setup.
+**What has been done since:** a ceremony was run for the MEMBERSHIP circuit and its
+key exported, vendored, pinned and deployed (`docs/CEREMONY.md` section 10,
+`docs/PROOF.md`). It had **1 independent contributor** and its beacon - a public
+Solana mainnet-beta blockhash - was not pre-announced, so it is a real ceremony with
+a single point of trust, not a distributed one.
+
+**What is not yet done:** a ceremony with *external, mutually independent*
+contributors and a pre-announced beacon rule, and any ceremony at all for the
+JoinSplit and association circuits, whose committed and deployed keys still come
+from the insecure dev setup.
 
 ### The coordinator (`crates/mirror-coordinator`)
 
@@ -288,18 +296,26 @@ and its trusted setup.
 
 ### Running the ceremony for production and redeploying with its key
 
-The ceremony itself is **built** (see "The trusted-setup ceremony" above and
-`docs/CEREMONY.md`). What remains is operational: recruit contributors who are
-independent of the project and of each other, run the chain for both circuits with a
-publicly pre-committed beacon, publish the transcripts, the ceremony hashes AND the
-beacon source (a verifier needs it to check that no counted step is the beacon under
-another name), then export the verifying keys and redeploy the program with them.
+The ceremony itself is **built** and has been **run once, for the membership
+circuit** (see "The trusted-setup ceremony" above and `docs/CEREMONY.md` section
+10). That run exercised the whole operational path end to end - open over a public
+55-contribution powers-of-tau, contribute, close with a public Solana mainnet-beta
+blockhash beacon, publish the transcript and the ceremony hash and the beacon
+source, export, vendor, re-pin the digest, redeploy in place - and the deployed
+membership key is its output.
 
-Until that is done the committed and deployed verifying keys are still the dev-setup
-keys, whose toxic waste is public by construction. The circuits and the on-chain
-verifiers do not change; what changes is the pinned SHA-256 in
-`programs/mirror-pool/src/vk_digest.rs` plus one `InitVk` publication per circuit
-against the redeployed program. The key itself no longer lives on a verify path:
+What remains is the part that makes a ceremony *trustworthy* rather than merely
+real: contributors who are independent of the project and of each other (this run
+had one), a beacon rule announced in public *before* contributions open (this run's
+slot was chosen afterwards), and the same treatment for the JoinSplit and
+association circuits, whose committed and deployed keys are still the dev-setup
+keys, whose toxic waste is public by construction.
+
+Mechanically, a redeploy is now a solved, exercised procedure: the circuits and the
+on-chain verifiers do not change; what changes is the vendored key, the pinned
+SHA-256 in `programs/mirror-pool/src/vk_digest.rs`, the regenerated proof fixture,
+and one `InitVk` publication per circuit against the redeployed program. The key
+itself no longer lives on a verify path:
 it sits in a write-once, program-owned registry account whose contents the
 program re-checks against that digest on every verify (`docs/VK_REGISTRY.md`).
 Rotation therefore still needs the upgrade, deliberately, because a pin a third

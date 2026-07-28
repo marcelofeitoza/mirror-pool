@@ -367,9 +367,12 @@ of that statement, that the constraint system alone does *not* catch it.
   published circom fixtures through the arkworks JoinSplit and requires identical
   public signals. That is not a proof that the two constraint systems accept
   exactly the same witness set.
-- **The circom path is untouched.** Every pre-existing artifact under
-  `circuits/` is byte-identical, the vendored program-side keys still match
-  `circuits/artifacts/`, and the pinned digests are unchanged.
+- **The circom path is untouched by this crate.** No artifact under `circuits/`
+  changes because of the arkworks work, the vendored program-side keys still match
+  `circuits/artifacts/`, and no pinned digest moves for this reason. (The
+  membership key and its digest DID change later, when the phase-2 ceremony key
+  was deployed - `docs/CEREMONY.md` section 10. That is unrelated to this crate,
+  and the JoinSplit and association artifacts were byte-identical across it.)
 - **There is deliberately no `mirror-cli prove --backend arkworks`.** A proof from
   this path cannot land on chain (first bullet), so a CLI switch that looked like
   a proving option would hand a reviewer a proof that silently fails to settle.

@@ -15,21 +15,22 @@ Everything below is live on **public Solana devnet** and resolves in a browser
 
 - **Program (deployed + executable):** [`EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`](https://explorer.solana.com/address/EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq?cluster=devnet)
 
-> **The deployed program predates the verifying-key registry AND the escrow
-> fix.** Two changes have landed in source since that deploy. Every verifying
-> instruction now reads its key from a write-once, digest-pinned account instead
-> of from a compile-time constant ([`docs/VK_REGISTRY.md`](docs/VK_REGISTRY.md));
-> and the ZK escrow-soundness hole is closed by crowd/ZK leaf-domain separation
-> plus a fixed ZK denomination ([`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
-> section 4). The devnet bytecode above contains NEITHER, so it no longer matches
-> this source tree, and the links in this section are records of the earlier
-> program. Read plainly: **the escrow fix is source-only.** The deployed devnet
-> program is still vulnerable to the crowd-leaf attack, has no `zk_denomination`
-> field, and would reject this tree's 31-byte `InitPool` body; it has not been
-> redeployed because a fresh deploy needs roughly 0.83 SOL and the devnet faucet
-> is refusing. Nothing on that deployment holds value. The evidence for both
-> changes is the mollusk suite against the compiled SBF program, which is built
-> from exactly this source.
+> **The program above now runs this source tree; the soak links below do not.**
+> It was [upgraded in
+> place](https://explorer.solana.com/tx/58gKGUdvKowyv4phxNUxKxiPbbnWNps9SKhxVkLWt7V8Q7DQLhrTuH2UWhUPtDzmeSPTEBExzXYeGVeYDuGFWHm?cluster=devnet)
+> to the current build, whose dumped on-chain bytes are byte-for-byte the locally
+> built `mirror_pool.so`. That build adds three things the earlier bytecode did
+> not have: the write-once digest-pinned verifying-key registry
+> ([`docs/VK_REGISTRY.md`](docs/VK_REGISTRY.md)), the ZK escrow-soundness fix
+> (crowd/ZK leaf-domain separation plus a fixed ZK denomination,
+> [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) section 4), and the phase-2
+> **ceremony** membership verifying key
+> ([`docs/CEREMONY.md`](docs/CEREMONY.md) section 10). The soak links in this
+> section were captured against the EARLIER bytecode at this same address, and
+> **the soaks have not been re-run against devnet since the upgrade**, so they are
+> records of that earlier program, not of what is deployed now. Nothing on that
+> deployment holds value. The evidence for the three changes is the mollusk suite
+> against the compiled SBF program, which is built from exactly this source.
 - **Behavioral crowd settle** (N identical actions, one atomic tx, one timestamp): [tx](https://explorer.solana.com/tx/4tcgNnhbZe7YKM26F6SnXW1WctASqVEqQ9W4v4NQ85fDfkYe3eq7YqCr4n7bEogm7U5By17Lkc5Tqa7jmZx693NB?cluster=devnet)
 - **Confidential JoinSplit** (shield / private transfer with `publicAmount == 0` / unshield): see the signatures table in [`docs/PROOF.md`](docs/PROOF.md)
 - **Two live soaks, all assertions on-chain:** behavioral **17/17** + confidential **25/25** ([`docs/PROOF.md`](docs/PROOF.md))
@@ -144,19 +145,22 @@ honest against the tree.
 | Confidential notes + client ops | `crates/mirror-core` + `mirror-cli` + `mirror-coordinator` | **Implemented** - ECIES encrypted notes + `scan` discovery; `value-keygen`/`shield`/`transfer`/`unshield` (pure-Rust ark-groth16 prove + emit, no Node); gasless `submit_transact` (transfer/unshield relay-only signed = the unlinkability). |
 | Confidential soak | `crates/mirror-soak` | **Implemented** - live shield -> hidden-amount transfer -> unshield + fixed-denom + adversarial, 25/25 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
 | Funding-round soak | `crates/mirror-soak` | **Implemented** - live `fund-commit` -> coordinator ingestion -> thin-round roll-forward -> batched gasless release -> commit from the funded wallet, plus the adversarial cases, 25/25 on-chain assertions on local Surfpool ([`docs/PROOF.md`](docs/PROOF.md)). |
-| Trusted-setup ceremony | `crates/mirror-ceremony` + `mirror-cli ceremony` | **Implemented** - distributable multi-party Groth16 phase-2 ceremony for both circuits: public phase-1 import + provenance reader, delta re-randomization, Schnorr proof of knowledge bound to the contributor id, the position in the chain and the step's kind and provenance, SHA-256 transcript chain, an enforced beacon-is-final rule, reproducible verification (rejects tampered deltas, forged/replayed proofs, reordered and truncated chains, post-beacon steps and relabelled beacons - each tested), and an independent-contributor count that refuses to count self-runs. `ceremony prove-check` proves the membership circuit under a ceremony key and the on-chain `groth16-solana` verifier accepts it; `ceremony verify-transcript` checks a published transcript with no key files. The demonstration run's transcripts are committed under `docs/ceremony-run/`. **No production ceremony has been run: the deployed keys are still dev-setup keys.** See [`docs/CEREMONY.md`](docs/CEREMONY.md). |
+| Trusted-setup ceremony | `crates/mirror-ceremony` + `mirror-cli ceremony` | **Implemented** - distributable multi-party Groth16 phase-2 ceremony for both circuits: public phase-1 import + provenance reader, delta re-randomization, Schnorr proof of knowledge bound to the contributor id, the position in the chain and the step's kind and provenance, SHA-256 transcript chain, an enforced beacon-is-final rule, reproducible verification (rejects tampered deltas, forged/replayed proofs, reordered and truncated chains, post-beacon steps and relabelled beacons - each tested), and an independent-contributor count that refuses to count self-runs. `ceremony prove-check` proves the membership circuit under a ceremony key and the on-chain `groth16-solana` verifier accepts it; `ceremony verify-transcript` checks a published transcript with no key files. The demonstration run's transcripts are committed under `docs/ceremony-run/`. **Run for the MEMBERSHIP circuit: the deployed membership key is a ceremony output with 1 independent contributor, closed by a public Solana mainnet-beta blockhash beacon (transcript: [`docs/ceremony-run/membership-deployed-transcript.json`](docs/ceremony-run/membership-deployed-transcript.json)). The JoinSplit and association keys are still dev-setup keys.** See [`docs/CEREMONY.md`](docs/CEREMONY.md). |
 
 "Implemented" means the component's core logic is complete and tested. It does
 not mean "deployed": the ceremony row above is the one place where that
-distinction bites, and it is labelled. The 300 host workspace tests
+distinction bites, and it is labelled. The 301 host workspace tests
 (12 more are environment-gated and skipped by default), 121 on-chain program tests,
 `build-sbf`, and the two live Surfpool soaks (behavioral 17/17 + confidential
 25/25 on-chain assertions) are all green. See the roadmap for future work
 (swap/stake-from-pool via CPI, confidential deposits, wiring and soaking the
 funding leg, and the ZK-path anonymity-mining incentive). The multi-party phase-2
-trusted-setup ceremony is built and tested; what remains there is *running* one
-with external contributors and redeploying with its key, because the currently
-committed and deployed verifying keys are still dev-setup keys. Where those keys
+trusted-setup ceremony is built, tested, and has now been RUN for the membership
+circuit: the committed and deployed membership verifying key is that ceremony's
+output (1 independent contributor, closed by a public Solana mainnet-beta
+blockhash beacon). What remains there is running one with *external* contributors,
+and running one at all for the JoinSplit and association circuits, whose keys are
+still dev-setup keys. Where those keys
 live changed too: each one is now published into a write-once, program-owned
 account whose contents the program pins to a compile-time SHA-256, so the key in
 force is publicly readable and still cannot be swapped
@@ -324,16 +328,23 @@ reasoning, and the set the ZK path actually gives, are in
   anonymity to anyone who clusters the operator; they are excluded from
   `real_k`. A pool with real `k=1` provides no anonymity regardless of nominal
   size.
-- **The DEPLOYED trusted setups are dev/test, not the output of a real
-  ceremony.** Both committed verifying keys (membership and the confidential
-  JoinSplit) came from a single-contributor dev setup whose phase-2 entropy is a
-  hard-coded public string, so their toxic waste is public. The keys and fixtures
-  verify and the on-chain program embeds them, but they must not secure real
-  value. A real multi-party phase-2 ceremony **is implemented and runnable**
-  ([`docs/CEREMONY.md`](docs/CEREMONY.md)); running one with external contributors
-  and redeploying with its key is what closes this, and that has not been done.
-  A `k`-contributor ceremony is 1-of-N honest: safe if *at least one* contributor
-  destroyed their scalar, not if `k` did.
+- **One of the three deployed trusted setups is a real ceremony; the other two
+  are still dev/test.** The MEMBERSHIP key committed and deployed here is the
+  output of a real Groth16 phase-2 ceremony over a public 55-contribution
+  powers-of-tau, closed by a Solana mainnet-beta blockhash beacon
+  (`docs/ceremony-run/membership-deployed-transcript.json`, final transcript hash
+  `884c8860...`). It had **1 independent contributor**, so the 1-of-N honest
+  assumption collapses to "that single party destroyed their scalar" - stronger
+  than a published hard-coded seed, but still a single point of trust, and the
+  beacon slot was chosen after the fact rather than announced in advance. The
+  confidential-value **JoinSplit** key and the **association** key came from a
+  single-contributor dev setup whose phase-2 entropy is a hard-coded public
+  string, so their toxic waste is public and they must not secure real value.
+  Running the same ceremony for those two circuits, and running the membership
+  one again with external contributors and a pre-announced beacon, is what closes
+  this ([`docs/CEREMONY.md`](docs/CEREMONY.md)). A `k`-contributor ceremony is
+  1-of-N honest: safe if *at least one* contributor destroyed their scalar, not
+  if `k` did.
 - **It is not a Sybil oracle.** Real k-anonymity assumes participants are
   economically distinct. The per-identity entry-fee cost raises the price of
   flooding a round, but Sybil resistance is not a solved property.

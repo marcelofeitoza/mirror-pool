@@ -127,20 +127,32 @@ pub mod instructions;
 pub mod pda;
 pub mod state;
 
-/// Vendored Groth16 verifying key (`src/vk.rs`, copied from
-/// `circuits/artifacts/vk.rs`). Consumed only by the SETTLE_ZK handler.
+/// Vendored Groth16 verifying key for the membership circuit (`src/vk.rs`,
+/// copied verbatim from `circuits/artifacts/vk.rs`). It is the source of truth
+/// for [`vk_digest::MEMBERSHIP_VK_SHA256`]; the key the SETTLE_ZK handler
+/// actually verifies with is read from the registry account and accepted only if
+/// it hashes to that digest.
+///
+/// PROVENANCE: this key is the output of a real phase-2 ceremony (1 independent
+/// contributor, closed by a public Solana mainnet-beta blockhash beacon). See
+/// `docs/CEREMONY.md` and `docs/ceremony-run/membership-deployed-transcript.json`.
 pub mod vk;
 
 /// Vendored Groth16 verifying key for the 2-in/2-out JoinSplit transaction
 /// circuit (`src/transaction_vk.rs`, copied verbatim from
-/// `circuits/artifacts/transaction_vk.rs`). Consumed only by the TRANSACT
-/// handler.
+/// `circuits/artifacts/transaction_vk.rs`), pinned by
+/// [`vk_digest::TRANSACTION_VK_SHA256`] and used by the TRANSACT handler.
+///
+/// PROVENANCE: still a `circuits/build.sh` DEV setup, NOT a ceremony key.
 pub mod transaction_vk;
 
 /// Vendored Groth16 verifying key for the opt-in association circuit
 /// (`src/association_vk.rs`, copied verbatim from
-/// `circuits/artifacts/association_vk.rs`). Consumed only by the
-/// SETTLE_ZK_ASSOCIATED handler.
+/// `circuits/artifacts/association_vk.rs`), pinned by
+/// [`vk_digest::ASSOCIATION_VK_SHA256`] and used by the SETTLE_ZK_ASSOCIATED
+/// handler.
+///
+/// PROVENANCE: still a `circuits/build.sh` DEV setup, NOT a ceremony key.
 ///
 /// This is a DIFFERENT key from [`vk`]: the association statement is a different
 /// circuit with 5 public inputs, so a plain membership proof can never satisfy

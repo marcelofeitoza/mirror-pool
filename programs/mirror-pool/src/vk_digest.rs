@@ -8,7 +8,10 @@
 //! `src/vk.rs`, `src/transaction_vk.rs`, `src/association_vk.rs`. Those files are
 //! copied verbatim from `circuits/artifacts/`, which the circuit build and the
 //! trusted setup produce; the digest is therefore a 32-byte commitment to the
-//! exact ceremony output, carried in the program's bytecode.
+//! exact setup output, carried in the program's bytecode. The membership key is
+//! the output of a real phase-2 ceremony (see below); the transaction and
+//! association keys are still DEV-setup keys from
+//! `circuits/build_transaction.sh` and `circuits/build_association.sh`.
 //!
 //! # What it is for
 //!
@@ -37,9 +40,14 @@
 //! is hand-computed.
 
 /// `src/vk.rs` - membership circuit, 4 public inputs, 769-byte encoding.
+///
+/// This one pins a CEREMONY key: the phase-2 output recorded in
+/// `docs/ceremony-run/membership-deployed-transcript.json` (final transcript
+/// hash `884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05`).
+/// The other two below still pin DEV-setup keys.
 pub const MEMBERSHIP_VK_SHA256: [u8; 32] = [
-    0x10, 0x87, 0x33, 0xd1, 0x67, 0x1c, 0xd3, 0xea, 0x8a, 0xae, 0x37, 0x5f, 0x1f, 0x6d, 0x23, 0x28,
-    0x77, 0xb3, 0x38, 0x26, 0xfe, 0xf9, 0x37, 0x0c, 0x19, 0x6f, 0x72, 0x45, 0x7c, 0xf1, 0xa6, 0xda,
+    0xbe, 0x5f, 0x77, 0x6d, 0x2a, 0x4b, 0xa8, 0x36, 0x55, 0xc5, 0x0a, 0x9e, 0xcf, 0x47, 0x19, 0x2c,
+    0xd3, 0xaa, 0x74, 0x07, 0x5c, 0xd9, 0xe3, 0xd8, 0xa6, 0x2b, 0xd9, 0x9e, 0x04, 0x3e, 0x4c, 0x76,
 ];
 
 /// `src/transaction_vk.rs` - JoinSplit circuit, 7 public inputs, 961-byte encoding.

@@ -204,10 +204,12 @@ mechanism for making a specific, narrow, verifiable claim. What claim is useful,
 and to whom, is not something the code decides.
 
 **The trusted setup caveat applies here too.** The association circuit's committed
-verifying key comes from the same DEV/TEST single-party setup as the other two
-circuits (see `docs/CEREMONY.md`). It must not secure real value until a
-multi-party phase-2 ceremony has been run over this circuit. The ceremony tooling
-supports it; the ceremony has not been run for it.
+verifying key comes from the DEV/TEST single-party setup in
+`circuits/build_association.sh`, whose phase-2 entropy is a hard-coded public
+string (see `docs/CEREMONY.md`). It must not secure real value until a multi-party
+phase-2 ceremony has been run over this circuit. The ceremony tooling supports it
+and it HAS been run for the membership circuit (`docs/CEREMONY.md` section 10), but
+not for this one; the JoinSplit circuit is in the same position.
 
 ---
 

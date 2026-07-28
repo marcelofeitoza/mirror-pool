@@ -8,14 +8,24 @@ exactly what a `k`-contributor ceremony does and does not buy you.
 Everything described here is implemented in `crates/mirror-ceremony` and driven from
 `mirror-cli ceremony ...`. There is no JavaScript in the ceremony path.
 
-> **Status of the deployed keys.** The verifying keys currently committed under
-> `circuits/artifacts/` and embedded in the deployed devnet program came from the
-> **insecure dev setup** in `circuits/build.sh` / `circuits/build_transaction.sh`,
-> whose phase-2 entropy is a hard-coded public string. Their toxic waste is public
-> by construction. That remains true until a real ceremony output is exported and
-> the program is redeployed with it. This document describes the machinery that
-> makes such a ceremony possible and checkable; it does not claim one has been run
-> for production.
+> **Status of the deployed keys.**
+>
+> - **MEMBERSHIP: ceremony key, 1 independent contributor.** The membership
+>   verifying key committed under `circuits/artifacts/vk.rs`, vendored into
+>   `programs/mirror-pool/src/vk.rs`, pinned by `vk_digest.rs` and deployed to
+>   devnet is the output of a real phase-2 ceremony over a public 55-contribution
+>   powers-of-tau, closed by a Solana mainnet-beta blockhash beacon. The transcript
+>   is published at [`ceremony-run/membership-deployed-transcript.json`](ceremony-run/membership-deployed-transcript.json).
+>   Section 10 records it in full, including what it does *not* buy.
+> - **TRANSACTION (JoinSplit) and ASSOCIATION: still dev-setup keys.** Those two
+>   came from `circuits/build_transaction.sh` / `circuits/build_association.sh`,
+>   whose phase-2 entropy is a hard-coded public string. Their toxic waste is
+>   public by construction, and that remains true until a ceremony is run for each
+>   circuit and the program redeployed with its output.
+>
+> Nothing here claims the membership ceremony was a *large* ceremony. It had one
+> independent contributor and no externally pre-announced beacon; both limits are
+> stated in section 10 and section 9.
 
 ---
 
@@ -356,9 +366,17 @@ mirror-cli ceremony export-vk \
 works with it. `--out-rust` is the `groth16-solana` byte layout the on-chain program
 embeds, in the same shape `circuits/convert_to_rust.js` emits.
 
-Deploying a ceremony key means replacing the program's embedded verifying key and
-redeploying. Until that happens the deployed program still verifies against whatever
-key it was built with - which today is the dev key.
+Deploying a ceremony key means replacing the program's vendored verifying key,
+updating the compile-time digest in `programs/mirror-pool/src/vk_digest.rs` (the
+program refuses any key that does not hash to it) and redeploying. Until that
+happens the deployed program still verifies against whatever key it was built
+with. This has been done for the membership circuit (section 10); the transaction
+and association circuits still carry dev keys.
+
+Note the extra step the digest pin adds: the vendored `src/vk.rs` is only the
+provenance of the digest, so exporting a key without moving
+`MEMBERSHIP_VK_SHA256` leaves the program unable to verify anything. The test
+`vk_digest::digests_match_the_vendored_keys` fails if the two ever drift.
 
 To prove under the ceremony key without going back through snarkjs:
 
@@ -502,6 +520,11 @@ hash, publish the beacon source, and let people check.
 
 ## 6.1 The recorded demo run, and how to check it
 
+> Not to be confused with `membership-deployed-transcript.json` in the same
+> directory, which is the ceremony that produced the key actually in force
+> (section 10). This subsection is about the *demonstration* run, whose
+> contributors are fictional and whose beacon is a fixed string.
+
 `docs/ceremony-run/` contains the transcripts of the demonstration run recorded in
 `docs/PROOF.md`: `membership-transcript.json` (7 KB) and
 `transaction-transcript.json` (6 KB). They are the actual files the commands
@@ -585,9 +608,11 @@ needs is exported in the standard formats.
 
 ## 9. Limitations, stated plainly
 
-- The keys currently committed and deployed are from the insecure dev setup. Nothing
-  in this document changes that until a ceremony output is exported and the program
-  is redeployed.
+- The TRANSACTION (JoinSplit) and ASSOCIATION keys currently committed and deployed
+  are from the insecure dev setup. Nothing in this document changes that until a
+  ceremony output is exported for each and the program is redeployed. The
+  MEMBERSHIP key is a ceremony output (section 10), but with **one** independent
+  contributor and no externally pre-announced beacon.
 - Only the endpoints of the chain are algebraically verified against each other.
   Intermediate keys are committed by digest; a party holding an intermediate file can
   check it, a verifier holding only the endpoints relies on the per-step proofs of
@@ -612,3 +637,112 @@ needs is exported in the standard formats.
   textbook uniform sampling and is recorded here rather than glossed over.
 - Phase 1 is imported, not audited. `inspect-ptau` tells you what the file claims
   about itself; comparing that against the published record is your job.
+
+---
+
+## 10. The membership ceremony that produced the deployed key
+
+This section records the ceremony whose output is the membership verifying key in
+`circuits/artifacts/vk.rs`, `programs/mirror-pool/src/vk.rs`, the digest in
+`programs/mirror-pool/src/vk_digest.rs`, and the deployed devnet program.
+
+### 10.1 What it was
+
+```text
+circuit                  membership
+r1cs sha256              8ed379951ad0b7371b4ac53fc373b64c36ac26552802ff165dad7af4977bd0a2
+phase 1                  public perpetual powers-of-tau, bn254, 2^16 slice of a 2^28 ceremony
+phase 1 sha256           1c401abb57c9ce531370f3015c3e75c0892e0f32b8b1e94ace0f6682d9695922
+phase 1 contributions    55  (weijie, kobi, poma, ... , closed by its own beacon)
+initial key digest       8c6b6c48195a4e116322cace04ec7619a9b158137bb98df37d9f78e651b15697
+steps                    2   (1 secret-entropy contribution, 1 beacon)
+INDEPENDENT CONTRIBUTORS 1
+final key digest         f9d8f7f6423af7795efb379bd9686aaab2a7e5c7614e460247afb080e542c485
+final transcript hash    884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05
+```
+
+The beacon that closed it is a public Solana mainnet-beta block:
+
+```text
+slot        435825712
+blockhash   9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu
+source      "solana-mainnet-beta slot 435825712 blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu"
+iterations  2^20 SHA-256 iterations
+```
+
+The resulting on-chain artifacts:
+
+```text
+canonical vk length      769 bytes
+sha256(canonical vk)     be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76
+                         (= MEMBERSHIP_VK_SHA256 in programs/mirror-pool/src/vk_digest.rs)
+```
+
+### 10.2 How to check it yourself
+
+The transcript is published as
+[`ceremony-run/membership-deployed-transcript.json`](ceremony-run/membership-deployed-transcript.json)
+(sha256 `7fcc51a3f2f846f080e134da127261a4215316d9336e5a1625c7ea9cebd381ab`). It is
+the file the ceremony produced, unedited. Check it with no key files at all, and
+with the beacon value supplied so the beacon step is checked rather than trusted:
+
+```sh
+mirror-cli ceremony verify-transcript \
+  --file docs/ceremony-run/membership-deployed-transcript.json \
+  --beacon-source-text "solana-mainnet-beta slot 435825712 blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu" \
+  --beacon-iterations-exp 20
+```
+
+`make ceremony-verify-run` runs exactly that, next to the demo transcripts.
+
+To confirm the deployed key really is this ceremony's output, recompute the pin
+from the committed key and compare it against the program constant:
+
+```sh
+mirror-cli init-vk --circuit membership --dry-run \
+  --program-id EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq \
+  --payer <any keypair> --rpc-url https://api.devnet.solana.com
+# sha256(vk): be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76
+```
+
+and check the deployed bytecode carries that constant:
+
+```sh
+solana program dump EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq /tmp/onchain.so --url devnet
+cmp /tmp/onchain.so programs/mirror-pool/target/deploy/mirror_pool.so
+```
+
+The decisive functional check, which needs the key file and therefore only the
+operator can run it as published, is `ceremony prove-check`: it proves the
+membership circuit under the ceremony proving key and hands the proof to the real
+`groth16-solana` verifier with the ceremony-exported verifying key. It passes.
+The same property is asserted by the repo's own live tests
+(`rust_prove_membership_verifies_and_on_chain_verifier_accepts` and
+`rust_prove_fresh_inputs_verifies_under_the_committed_vk`, run with
+`MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored rust_prove`), the
+second of which proves over inputs the committed fixture never saw.
+
+### 10.3 What it does NOT buy
+
+- **One independent contributor.** 1-of-N honest with N=1 is not a distributed
+  trust assumption: it reduces to "the single contributor sampled real randomness
+  and destroyed the scalar". Anyone who does not accept that has no reason to
+  accept the key. This is strictly better than the dev setup, whose entropy is a
+  hard-coded public string anyone can re-derive, and strictly worse than a
+  ceremony with external participants.
+- **The beacon was not pre-committed.** The value is public and was unpredictable
+  before its slot existed, and supplying it to `verify` confirms the last step
+  really is that beacon and not a relabelled secret contribution. But the *slot*
+  was picked after the contribution rather than announced in advance, so a
+  verifier cannot rule out that the operator waited and chose a favourable block.
+  Run without `--beacon-source-*`, `verify` says so explicitly:
+  `beacon pre-commitment: NOT supplied`. A future run should publish the beacon
+  rule (for example "the mainnet-beta blockhash at the first slot after
+  <timestamp>") before contributions open.
+- **The key files are not published.** As with the demo run, the `.mpk` files are
+  multi-megabyte artifacts and are gitignored, so a third party cannot re-run the
+  key-level checks (initial-key binding, final-key binding, untouched-part
+  equality, query scaling) for this run. Transcript-level checks are fully
+  reproducible; key-level ones are not.
+- **It says nothing about the other two circuits.** The JoinSplit and association
+  keys are still dev-setup keys.

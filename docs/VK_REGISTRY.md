@@ -337,6 +337,15 @@ transaction  9c310a0068a7036b1bbfbaed59d58c65740154d6aff4529b738ecff8c7601212
 association  77031fc732e4be82fbd2c77cb2076bf92b4fdb1ce9a74bf8cfa085464e3d23bd
 ```
 
+> **This run predates the membership ceremony.** The membership digest above is
+> the one for the old dev-setup key. The membership verifying key has since been
+> replaced by the phase-2 ceremony output (`docs/CEREMONY.md`), so the constant in
+> `vk_digest.rs` is now
+> `be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76`. The
+> transaction and association digests are unchanged. The transcript above is left
+> exactly as captured; nothing else about the mechanism changed, and the
+> write-once behaviour it demonstrates is the same.
+
 Re-running `init-vk` for `membership` against the live registry failed on-chain
 with `custom program error: 0x1c` (28, `VkRegistryAlreadyInitialized`), after
 6,662 CU: the write-once property holds on a validator and not only in mollusk.
@@ -385,16 +394,47 @@ cargo run -p mirror-soak --release
 
 ## 9. Status of the published devnet deployment
 
-The devnet program recorded in [`PROOF.md`](PROOF.md)
-(`EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`) was deployed **before** this
-change and does not contain the registry. Its bytecode reads each verifying key
-from a compile-time constant, and it has no `INIT_VK` instruction. It therefore
-no longer matches this source tree, and the runs recorded in `PROOF.md` are
-records of that earlier program. They are left exactly as captured; they are
-labeled there, and they are not evidence about the code described here.
+The devnet program `EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq` has since been
+**upgraded in place** to the current bytecode, so it now contains the registry,
+the `INIT_VK` instruction, and the post-ceremony membership digest:
 
-The evidence for the design in this document is the mollusk suite against the
-compiled SBF program, which is reproducible with `cargo build-sbf` followed by
-`cargo test` in `programs/mirror-pool/`. The soak drivers were updated to publish
-the keys and pass the accounts, but they have not been re-run against a public
-cluster since the change.
+```text
+upgrade signature  58gKGUdvKowyv4phxNUxKxiPbbnWNps9SKhxVkLWt7V8Q7DQLhrTuH2UWhUPtDzmeSPTEBExzXYeGVeYDuGFWHm
+slot               479600717
+on-chain bytes     127680, byte-for-byte equal to programs/mirror-pool/target/deploy/mirror_pool.so
+sha256(.so)        6b026cf95e7f76d8a45c248004f98e2f647e7fc806203e1785bdeddcbea4f466
+```
+
+Reproduce the bytecode check with:
+
+```sh
+solana program dump EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq /tmp/onchain.so --url devnet
+cmp /tmp/onchain.so programs/mirror-pool/target/deploy/mirror_pool.so
+```
+
+**No registry account exists on devnet yet.** The three registry PDAs for this
+program id are
+
+```text
+membership   6fkK14YXovKkJQ7z2Df7sBeCGPEnRK2XGBrRkMJJbRYg
+transaction  BD1cm4jqbDHxgWX7ZfLmFaWWc1wSJFr5h68YesrkuCfW
+association  3EyfUQZFSEz1VcTkCK3EsUV5uE8XqyCBmCQHETqjhWVn
+```
+
+and all three came back `AccountNotFound` both before and after the upgrade.
+That matters because the registry is write-once: had a membership registry
+already been initialized with the OLD dev key, no instruction could update it and
+the upgraded program would reject it forever, since the stored bytes no longer
+hash to the pinned digest. Because none exists, the FIRST `mirror-cli init-vk
+--circuit membership` run against this program installs the ceremony key, and it
+is the only key that program will accept.
+
+The behavioral and confidential runs recorded in `PROOF.md` were produced by the
+earlier, pre-registry bytecode at this same address; they are left exactly as
+captured and are labeled there. They are records of that earlier program, not
+evidence about the code described here. The evidence for the design in this
+document is the mollusk suite against the compiled SBF program, reproducible with
+`cargo build-sbf` followed by `cargo test` in `programs/mirror-pool/`, plus the
+Surfpool run in section 8. The soak drivers publish the keys and pass the
+accounts, but the full soak has not been re-run against a public cluster since
+the upgrade.

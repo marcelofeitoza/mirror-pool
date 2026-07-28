@@ -585,11 +585,14 @@ Verification is 4 public inputs in the fixed order and runs in under about 200K
 compute units, comfortably inside a transaction's CU budget alongside the
 settlement work. The circuit (`circuits/membership.circom`, depth 20, 11522 R1CS
 constraints) enforces leaf recomputation, Merkle inclusion, and the nullifier
-relation. The verifying key that is committed and deployed comes from a reproducible
-development/test setup (the phase-2 entropy is a hard-coded public string), not from
-a secure ceremony. A real multi-party phase-2 ceremony is implemented and runnable
-(Section 8.5, `docs/CEREMONY.md`); it has not been run for production, so this
-caveat stands until a ceremony output is exported and the program is redeployed.
+relation. The membership verifying key that is committed and deployed is the output
+of a real multi-party phase-2 ceremony (Section 8.5, `docs/CEREMONY.md` section 10)
+over a public 55-contribution powers-of-tau, closed by a Solana mainnet-beta
+blockhash beacon - but with **one** independent contributor, so the 1-of-N honest
+assumption reduces to that single party having destroyed their scalar, and the
+beacon slot was chosen after the fact rather than pre-announced. The JoinSplit and
+association keys still come from the reproducible development/test setup, whose
+phase-2 entropy is a hard-coded public string.
 
 ---
 
@@ -678,12 +681,16 @@ for that, in pure Rust, for both circuits. Full guide: `docs/CEREMONY.md`.
 ceremony-produced key and runs the exact on-chain `groth16-solana` verifier over the
 result against the ceremony-exported verifying key.
 
-**Status.** The machinery is built and tested; no production ceremony has been run,
-so the committed and deployed verifying keys are still dev-setup keys. The
-transcripts of the local demonstration run are committed under `docs/ceremony-run/`
-and are checked by the test suite; the keys they refer to are not published, so the
-four key-level checks are not third-party reproducible for that run
-(`docs/PROOF.md`).
+**Status.** The machinery is built and tested, and has been RUN for the membership
+circuit: the committed and deployed membership key is that ceremony's output, with
+**1 independent contributor**, closed by the public Solana mainnet-beta blockhash at
+slot 435825712, final transcript hash
+`884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05`
+(`docs/CEREMONY.md` section 10). The JoinSplit and association keys are still
+dev-setup keys. The transcripts of that run and of the earlier local demonstration
+run are committed under `docs/ceremony-run/` and are checked by the test suite; the
+keys they refer to are not published, so the four key-level checks are not
+third-party reproducible for either run (`docs/PROOF.md`).
 
 ---
 
@@ -948,7 +955,7 @@ choice.
 | shared types + wire format + Poseidon + tests | `crates/mirror-core` | **Implemented** - `commit`/`nullifier`/`transfer_action_hash`, `ActionClass`/`SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon`, `wire`; circomlib-Poseidon; fixture cross-check against the circuit |
 | on-chain program (both settle paths) | `programs/mirror-pool` | **Implemented** - `InitPool`/`Commit`/`SettleEpoch`/`CommitDeposit`/`SettleZk`/`ClaimReward`; frontier accumulator + 32-root ring; Epoch/Nullifier/Dwell PDAs; on-chain k-floor, double-settle prevention, per-nullifier anti-replay; on-chain Groth16 (alt_bn128) |
 | membership circuit + setup + verifying key | `circuits/` | **Implemented** - depth-20 Poseidon membership circuit, dev/test Groth16 setup, committed proof fixture + vendored `vk.rs` |
-| multi-party phase-2 trusted-setup ceremony | `crates/mirror-ceremony` | **Implemented** - public phase-1 import + provenance reader, delta re-randomization, Schnorr PoK bound to contributor, position, kind and provenance, SHA-256 transcript chain, enforced beacon-is-final rule, reproducible verification (PoK + pairing same-ratio + batched query-scaling + optional beacon pre-commitment check), self-run-refusing independent-contributor count, transcript-only verification, snarkjs/`groth16-solana` verifying-key export; driven by `mirror-cli ceremony ...`. NOT yet run for production: the deployed keys are still dev-setup keys |
+| multi-party phase-2 trusted-setup ceremony | `crates/mirror-ceremony` | **Implemented** - public phase-1 import + provenance reader, delta re-randomization, Schnorr PoK bound to contributor, position, kind and provenance, SHA-256 transcript chain, enforced beacon-is-final rule, reproducible verification (PoK + pairing same-ratio + batched query-scaling + optional beacon pre-commitment check), self-run-refusing independent-contributor count, transcript-only verification, snarkjs/`groth16-solana` verifying-key export; driven by `mirror-cli ceremony ...`. RUN for the MEMBERSHIP circuit (1 independent contributor, closed by a public Solana mainnet-beta blockhash beacon; transcript in `docs/ceremony-run/membership-deployed-transcript.json`), so the deployed membership key is a ceremony output. The JoinSplit and association keys are still dev-setup keys |
 | gasless batch coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window scheduler, real-k floor gate, rotating fee-payer, normalized `TxProfile`, atomic crowd-tx composition (N+1 signer, ALT, `plan_settlements`), mockable RPC boundary |
 | pooled-action behaviors | `crates/mirror-behaviors` | **Implemented** - `Behavior` trait + `PlainTransfer` (soak baseline), Jupiter swap, jitoSOL stake adapters; bucketed amounts |
 | participant CLI | `crates/mirror-cli` | **Implemented** - `init-pool`/`commit`/`deposit-commit`/`prove`/`fund-commit`/`status`/`ceremony`; prove rebuilds the path, proves in-process in pure Rust (`ark-circom`/`ark-groth16`, no Node; `--use-snarkjs` is a legacy fallback, `--proving-key` proves under a ceremony key), emits `SettleZk` |

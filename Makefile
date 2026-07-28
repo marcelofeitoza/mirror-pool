@@ -41,10 +41,18 @@ build-sbf:
 ceremony-test:
 	MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored ceremony_key --nocapture
 
-# Re-verify the published transcripts of the recorded demonstration run
-# (docs/ceremony-run/) the way a third party would: no key files, beacon
-# pre-commitment supplied. Needs a built mirror-cli.
+# Re-verify the published transcripts the way a third party would: no key files,
+# beacon value supplied so the beacon step is checked rather than trusted. Needs a
+# built mirror-cli.
+#
+# The FIRST one is the ceremony that produced the DEPLOYED membership verifying key
+# (docs/CEREMONY.md section 10). The other two are the recorded demonstration run
+# with fictional contributors (section 6.1); they prove the machinery, not a key.
 ceremony-verify-run:
+	cargo run -p mirror-cli -- ceremony verify-transcript \
+	  --file docs/ceremony-run/membership-deployed-transcript.json \
+	  --beacon-source-text "solana-mainnet-beta slot 435825712 blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu" \
+	  --beacon-iterations-exp 20
 	cargo run -p mirror-cli -- ceremony verify-transcript \
 	  --file docs/ceremony-run/membership-transcript.json \
 	  --beacon-source-text "mirror-pool demo beacon 2026-07-27" \

@@ -133,9 +133,26 @@ entropy string so the build is reproducible, which by definition makes the toxic
 waste public. It is NOT a secure ceremony and MUST NOT be used to secure real
 value.
 
-**The verifying keys committed in `artifacts/` and embedded in the deployed
-program came from that dev setup. That remains true until a real ceremony output
-is exported and the program is redeployed with it.**
+**The MEMBERSHIP key is no longer one of them.** `artifacts/verification_key.json`
+and `artifacts/vk.rs` now hold the output of a real phase-2 ceremony (1 independent
+contributor, closed by a public Solana mainnet-beta blockhash beacon), and the
+deployed program pins its digest. `build.sh` will overwrite those two files with a
+fresh DEV key if you re-run it - see the note below.
+
+**The TRANSACTION (JoinSplit) and ASSOCIATION keys committed in `artifacts/` and
+pinned by the deployed program still came from the dev setup. That remains true for
+those two until a ceremony output is exported for each and the program is
+redeployed with it.**
+
+> **Re-running `build.sh` clobbers the ceremony key.** Step 3 runs its own
+> `snarkjs zkey contribute` with the hard-coded dev entropy and writes
+> `artifacts/verification_key.json`, and step 5 rewrites `artifacts/vk.rs` and
+> `artifacts/proof_fixture.rs` from it. Doing that replaces the deployed membership
+> key with a dev key and the pinned digest stops matching, so nothing verifies.
+> `git checkout -- artifacts/` restores it. To regenerate the committed artifacts
+> under the ceremony key instead, use
+> `mirror-cli ceremony export-vk --out-json artifacts/verification_key.json --out-rust artifacts/vk.rs`
+> and `mirror-cli ceremony prove-check --out-dir <dir>` for the fixture.
 
 A real multi-party **phase-2 ceremony is implemented** in
 `crates/mirror-ceremony`, driven from `mirror-cli ceremony ...`, and documented in
@@ -174,7 +191,8 @@ A `k`-contributor ceremony is safe if **at least one** contributor destroyed the
 scalar (1-of-N honest), not if `k` of them did. See the guide for what that does
 and does not buy you.
 
-`pot16_final.ptau`, the phase-1 file the committed dev artifacts were built from,
+`pot16_final.ptau`, the phase-1 file every committed artifact was built from - the
+dev setups and the membership ceremony alike -
 records **55 contributions from named contributors at ceremony power 2^28** - the
 signature of a public perpetual-powers-of-tau file rather than a self-generated one.
 Its SHA-256 is
@@ -264,13 +282,19 @@ circom membership.circom --r1cs -l node_modules -o /tmp/check
 shasum -a 256 /tmp/check/membership.r1cs membership.r1cs   # identical
 ```
 
-The `.r1cs` is byte-identical before and after the extraction, so the committed
-`membership_final.zkey` and `vk.rs` remain valid for it. The witness-calculator
-`.wasm` DOES differ (it is regenerated from different source text), so that was
-checked too, by proving with the newly compiled `.wasm` against the COMMITTED
-zkey and verifying against the COMMITTED verifying key - which succeeds, with
-public signals identical to the committed fixture. The membership, ceremony, and
-transaction live tests all pass against the recompiled artifacts.
+The `.r1cs` is byte-identical before and after the extraction, so every proving key
+derived from it - the dev `membership_final.zkey` at the time, and the ceremony key
+since - remains valid for it. The witness-calculator `.wasm` DOES differ (it is
+regenerated from different source text), so that was checked too, by proving with
+the newly compiled `.wasm` and verifying against the COMMITTED verifying key -
+which succeeds, with public signals identical to the committed fixture. The
+membership, ceremony, and transaction live tests all pass against the recompiled
+artifacts.
+
+Note that the membership `.zkey` and the committed membership `vk.rs` no longer
+form a pair: `vk.rs` is the ceremony key, and the proving key that matches it is
+the ceremony's `.mpk`, not `membership_final.zkey`. The live tests that assert the
+committed key accepts a fresh proof prove under the ceremony key for that reason.
 
 ## On-chain verifier integration (groth16-solana v0.2.0)
 

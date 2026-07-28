@@ -4,54 +4,54 @@ This file has two independent, honestly-labeled proofs of the same program:
 a **public Solana devnet deployment** (top, browser-verifiable on the Solana
 Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
 
-> **HISTORICAL: the deployed program no longer matches this source tree.** Every
-> verifying instruction (`SettleZk`, `SettleZkAssociated`, `Transact`) now reads
-> its Groth16 verifying key from a write-once, digest-pinned account instead of
-> from a compile-time constant, and the program gained an `InitVk` instruction to
-> publish those keys ([`VK_REGISTRY.md`](VK_REGISTRY.md)). The devnet program id
-> below was deployed BEFORE that change: its bytecode has no `InitVk` and no
-> registry, its settle instructions take one fewer account, and the claim above
-> that the on-chain bytes hash-match a local build of this repo is no longer
-> true. Every run recorded in this file - behavioral 17/17, confidential 25/25,
-> funding 25/25 - was run against that earlier program and is left exactly as
-> captured. It is still valid evidence for what it was evidence of (the pool's
-> behavioral and confidential mechanics on a live public cluster); it is NOT
-> evidence about the verifying-key registry. The program was NOT redeployed for
-> this change, and the soak drivers, though updated to publish the keys and pass
-> the accounts, have not been re-run against a public cluster since. The
-> behavioral soak WAS re-run end to end against a local Surfpool on a fresh
-> deployment of the current bytecode and passed 18/18 (the extra assertion being
-> the verifying-key publication); those local-validator signatures are recorded
-> in [`VK_REGISTRY.md`](VK_REGISTRY.md) section 8 and deliberately NOT merged
-> into the tables below, which belong to the earlier program.
+> **The deployed program matches this source tree again, but the tables below do
+> NOT belong to that bytecode.** The devnet program id below has since been
+> **upgraded in place** to the current build (signature
+> `58gKGUdvKowyv4phxNUxKxiPbbnWNps9SKhxVkLWt7V8Q7DQLhrTuH2UWhUPtDzmeSPTEBExzXYeGVeYDuGFWHm`,
+> slot `479600717`; the dumped on-chain bytes are byte-for-byte the locally built
+> `mirror_pool.so`, sha256
+> `6b026cf95e7f76d8a45c248004f98e2f647e7fc806203e1785bdeddcbea4f466`). That build
+> carries three things the earlier one did not: the write-once digest-pinned
+> verifying-key registry with its `InitVk` instruction
+> ([`VK_REGISTRY.md`](VK_REGISTRY.md)), the ZK-escrow domain-separation fix, and
+> the phase-2 **ceremony** membership key.
+>
+> Every run recorded in this file - behavioral 17/17, confidential 25/25, funding
+> 25/25 - was captured against the EARLIER bytecode at this same address and is
+> left exactly as captured. It is still valid evidence for what it was evidence of
+> (the pool's behavioral and confidential mechanics on a live public cluster); it
+> is NOT evidence about the registry, the escrow fix, or the ceremony key, and the
+> instruction shapes differ (the settle instructions now take one more account,
+> and `InitPool` takes a 31-byte body where the old one took 23). **The soaks have
+> not been re-run against devnet since the upgrade.** The behavioral soak WAS
+> re-run end to end against a local Surfpool on a fresh deployment of the
+> registry bytecode and passed 18/18 (the extra assertion being the verifying-key
+> publication); those local-validator signatures are recorded in
+> [`VK_REGISTRY.md`](VK_REGISTRY.md) section 8 and deliberately NOT merged into
+> the tables below.
 
-> **The ZK escrow fix is likewise SOURCE-ONLY.** A second change has landed since
-> the deploy: the crowd `Commit` leaf is now domain-separated from the ZK deposit
-> leaf by the program (`crowd_leaf = Poseidon(CROWD_LEAF_DOMAIN, commitment)`),
-> and a pool fixes one `zk_denomination` at init that `CommitDeposit`, `SettleZk`
-> and `SettleZkAssociated` all require. Together they close a fund-theft hole in
-> which a fee-only crowd commit could spend a depositor's escrow
-> ([`THREAT_MODEL.md`](THREAT_MODEL.md) section 4). The devnet bytecode below has
-> NEITHER: it still appends crowd commitments verbatim, has no `zk_denomination`
-> field, and takes a 23-byte `InitPool` body where this tree sends 31. So the
-> deployed program remains exploitable by the original attack, and none of the
-> runs below can be reproduced against it with the current drivers. Nothing on
-> that deployment holds value, and it has not been redeployed for the same
-> funding reason stated next. The fix's evidence is the mollusk suite against the
-> compiled SBF program built from this source, including the inverted attack test
-> `settle_zk_rejects_a_fee_only_crowd_leaf_spending_a_depositors_escrow`.
+> **The ZK escrow fix, for the record.** The crowd `Commit` leaf is
+> domain-separated from the ZK deposit leaf by the program
+> (`crowd_leaf = Poseidon(CROWD_LEAF_DOMAIN, commitment)`), and a pool fixes one
+> `zk_denomination` at init that `CommitDeposit`, `SettleZk` and
+> `SettleZkAssociated` all require. Together they close a fund-theft hole in which
+> a fee-only crowd commit could spend a depositor's escrow
+> ([`THREAT_MODEL.md`](THREAT_MODEL.md) section 4). The bytecode that produced the
+> tables below had NEITHER; the bytecode deployed at that address today has both.
+> The fix's evidence remains the mollusk suite against the compiled SBF program,
+> including the inverted attack test
+> `settle_zk_rejects_a_fee_only_crowd_leaf_spending_a_depositors_escrow`, not a
+> public-cluster run.
 
-> **Reproducing any of this on a public cluster is blocked right now, on
-> funding.** All three soak drivers publish their verifying key through
-> `init-vk` before they settle, so every one of them needs the CURRENT bytecode
-> deployed. That build is 119,072 bytes and costs about 0.83 SOL of rent to
-> deploy or to stage in an upgrade buffer, and the devnet faucet is refusing
-> this address (a 2 SOL request and a 1 SOL request were both rejected while
-> this note was written), against a funder holding 0.4498 SOL. So the
-> public-cluster tables below stay exactly as captured, and new public-cluster
-> work is limited to the paths the already-deployed bytecode has. One such
-> measurement, a multi-hour sustained crowd-path run with its topology delta
-> stated, is recorded in [`DEVNET.md`](DEVNET.md).
+> **Re-running the soaks on a public cluster is now possible, and has not been
+> done.** The earlier blocker was funding: the upgrade needed roughly 0.83 SOL of
+> rent against a funder holding 0.4498 SOL, and the devnet faucet was refusing the
+> address. The funder has since been topped up and the upgrade landed, so all
+> three soak drivers - each of which publishes its verifying key through `init-vk`
+> before it settles - could now run against devnet. They have not been re-run, so
+> the public-cluster tables below stay exactly as captured. One public-cluster
+> measurement made against the older bytecode, a multi-hour sustained crowd-path
+> run with its topology delta stated, is recorded in [`DEVNET.md`](DEVNET.md).
 
 > **These are records of runs, not descriptions of the current tree.** Both runs
 > predate the move to in-process pure-Rust Groth16 proving, so several assertion
@@ -95,11 +95,12 @@ mainnet SOL.
   below was then re-confirmed at the `finalized` commitment before listing.
 
 The program id above is a fresh, bounty-dedicated keypair (kept gitignored
-under `.soak/keys/`). It was deployed and then upgraded in place to the
-committed, vk-consistent build; the SHA-256 of the on-chain program bytes
-equals the SHA-256 of the locally built `mirror_pool.so`, so the deployed
-program is exactly the source in this repo. Both suites below run against
-that same on-chain program.
+under `.soak/keys/`). It was deployed and then upgraded in place; the SHA-256 of
+the on-chain program bytes equals the SHA-256 of the locally built
+`mirror_pool.so`, so the deployed program is exactly the source in this repo.
+Both suites below ran against that same address, but against the **earlier**
+bytecode - see the notes at the top of this file and the redeploy record in
+"Trusted-setup ceremony - the DEPLOYED membership key" below.
 
 ## Behavioral soak - crowd + ZK settlement (devnet)
 
@@ -479,8 +480,18 @@ Recorded 2026-07-27 on the membership circuit, plus an independent second run on
 transaction circuit. This is a **demonstration that the ceremony machinery works end
 to end**, NOT a production ceremony: every contribution came from one machine, so the
 tool reports one independent contributor; the beacon source is a fixed demo string
-rather than a value nobody could predict; and the resulting key has not been
-deployed. The committed verifying keys are still the dev-setup keys.
+rather than a value nobody could predict; and this run's key was never deployed.
+
+> **Superseded for the membership circuit.** A separate, later ceremony - closed by a
+> real public Solana mainnet-beta blockhash rather than a demo string - produced the
+> membership key that is now committed and deployed. It is recorded in
+> "Trusted-setup ceremony - the DEPLOYED membership key" further down, and in
+> `docs/CEREMONY.md` section 10. Everything in *this* section is the earlier
+> demonstration run, kept as captured. Where the text below says "the committed
+> verifying key" it means the dev key that was committed at the time of capture;
+> `circuits/artifacts/verification_key.json` today holds the ceremony key, so the
+> `snarkjs groth16 verify` transcript below would no longer reproduce verbatim
+> against that path. The transaction and association keys ARE still dev-setup keys.
 
 **The transcripts of this run are committed**, at
 `docs/ceremony-run/membership-transcript.json` (7 KB) and
@@ -727,14 +738,129 @@ skips, which is what CI does.
 Your digests from step 0 onward will differ from the table above (different entropy);
 the phase-1 digest, the r1cs digest and the initial-key digest will not.
 
-> **The funding-round evidence below is local-validator only, and cannot be
-> reproduced on a public cluster today.** `mirror-soak-funding` publishes the
-> JoinSplit verifying key through `init-vk` before it releases anything, and the
-> deployed devnet program predates the registry and has no such instruction, so
-> the soak needs a fresh deployment of current bytecode. That deployment is
-> blocked on faucet funding (see the note at the top of this file). Nothing
-> below is corrected by this: the numbers are exactly as captured against a
-> local Surfpool, which is where they were always claimed to come from.
+---
+
+# Trusted-setup ceremony - the DEPLOYED membership key
+
+The run above is a demonstration. This one produced the membership verifying key
+that is **actually committed and deployed**: `circuits/artifacts/vk.rs`,
+`programs/mirror-pool/src/vk.rs`, the `MEMBERSHIP_VK_SHA256` pin in
+`programs/mirror-pool/src/vk_digest.rs`, and the devnet program
+`EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`.
+
+It is a **1-independent-contributor** ceremony. It is not a large ceremony and this
+document does not present it as one; `docs/CEREMONY.md` section 10.3 states exactly
+what it does and does not buy. The transaction (JoinSplit) and association keys are
+**still dev-setup keys**.
+
+## What it was
+
+| item | value |
+| --- | --- |
+| circuit | `membership`, r1cs sha256 `8ed379951ad0b7371b4ac53fc373b64c36ac26552802ff165dad7af4977bd0a2` |
+| phase 1 | public perpetual powers-of-tau, sha256 `1c401abb57c9ce531370f3015c3e75c0892e0f32b8b1e94ace0f6682d9695922`, 55 contributions, `2^16` slice of a `2^28` ceremony |
+| initial phase-2 key | sha256 `8c6b6c48195a4e116322cace04ec7619a9b158137bb98df37d9f78e651b15697` (deterministic from `snarkjs groth16 setup`) |
+| steps | 2: one secret-entropy contribution (`marcelo@mirror-pool`, OS randomness + user entropy), then the closing beacon |
+| independent contributors | **1** (the beacon is correctly not counted) |
+| beacon | Solana mainnet-beta slot `435825712`, blockhash `9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu`, `2^20` SHA-256 iterations |
+| beacon source string | `solana-mainnet-beta slot 435825712 blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu` |
+| final key digest | `f9d8f7f6423af7795efb379bd9686aaab2a7e5c7614e460247afb080e542c485` |
+| final transcript hash | `884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05` |
+| published transcript | `docs/ceremony-run/membership-deployed-transcript.json`, sha256 `7fcc51a3f2f846f080e134da127261a4215316d9336e5a1625c7ea9cebd381ab` |
+| canonical vk | 769 bytes, sha256 `be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76` |
+
+`ceremony verify` reports `CEREMONY VERIFIED`, closed by beacon, and - when the
+beacon value above is supplied - `beacon pre-commitment: checked against the value
+you supplied`. Run WITHOUT that value it says `NOT supplied`, which is the honest
+default, because the slot was chosen after the contribution rather than announced
+in advance.
+
+`ceremony prove-check` passes: it proves the membership circuit under the ceremony
+proving key and the real `groth16-solana` verifier accepts the proof against the
+ceremony-exported verifying key.
+
+## Redeploy to devnet
+
+The program was upgraded **in place**, so the program id and every explorer link in
+this document survive:
+
+```text
+program id         EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq
+upgrade signature  58gKGUdvKowyv4phxNUxKxiPbbnWNps9SKhxVkLWt7V8Q7DQLhrTuH2UWhUPtDzmeSPTEBExzXYeGVeYDuGFWHm
+slot               479600717
+upgrade authority  B2xLRxRKYTqusezsqhNZBPneJHsSCZn5L5ik8DqJQDGR
+```
+
+- Upgrade transaction: https://explorer.solana.com/tx/58gKGUdvKowyv4phxNUxKxiPbbnWNps9SKhxVkLWt7V8Q7DQLhrTuH2UWhUPtDzmeSPTEBExzXYeGVeYDuGFWHm?cluster=devnet
+- Program: https://explorer.solana.com/address/EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq?cluster=devnet
+
+The on-chain bytecode was dumped back and compared against the local build:
+
+```text
+on-chain dump      127680 bytes
+local .so          127680 bytes
+identical          yes (byte-for-byte, including the trailing zero padding)
+sha256             6b026cf95e7f76d8a45c248004f98e2f647e7fc806203e1785bdeddcbea4f466
+sha256 (padding stripped)  a5a19b4634e754a88d672604240ce87bc3a391abd07cace65d7c980ea0427566
+```
+
+```sh
+solana program dump EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq /tmp/onchain.so --url devnet
+cmp /tmp/onchain.so programs/mirror-pool/target/deploy/mirror_pool.so && echo IDENTICAL
+```
+
+## Verifying-key registry state on devnet
+
+The registry is write-once per circuit. Had a membership registry account already
+been initialized with the OLD dev key, no instruction could update it and the
+upgraded program would reject it forever. It has not been:
+
+```text
+membership   6fkK14YXovKkJQ7z2Df7sBeCGPEnRK2XGBrRkMJJbRYg   AccountNotFound
+transaction  BD1cm4jqbDHxgWX7ZfLmFaWWc1wSJFr5h68YesrkuCfW   AccountNotFound
+association  3EyfUQZFSEz1VcTkCK3EsUV5uE8XqyCBmCQHETqjhWVn   AccountNotFound
+```
+
+checked both before and after the upgrade. So the FIRST `mirror-cli init-vk
+--circuit membership` against this program installs the ceremony key, and the
+pinned digest means that is the only key it can install.
+
+## What a third party can check, and what they cannot
+
+Reproducible from this repository and a devnet RPC:
+
+```sh
+# 1. the transcript, with no key files, beacon value supplied
+make ceremony-verify-run
+
+# 2. the committed key hashes to the constant the program pins
+mirror-cli init-vk --circuit membership --dry-run \
+  --program-id EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq \
+  --payer <any keypair> --rpc-url https://api.devnet.solana.com
+# -> sha256(vk): be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76
+
+# 3. the deployed bytecode is the bytecode in this tree
+solana program dump EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq /tmp/onchain.so --url devnet
+cmp /tmp/onchain.so programs/mirror-pool/target/deploy/mirror_pool.so
+
+# 4. the vendored key equals the ceremony-exported artifact (header aside)
+diff <(tail -n +9 programs/mirror-pool/src/vk.rs) circuits/artifacts/vk.rs
+```
+
+Not reproducible by a third party: the key-level ceremony checks (initial-key
+binding, final-key binding, untouched-part equality, query scaling) and
+`prove-check`, all of which need the 4.7 MB `.mpk` proving keys. Those are
+gitignored build artifacts and are not published, exactly as for the demonstration
+run. This document does not claim otherwise.
+
+---
+
+> **The funding-round evidence below is local-validator only.** The numbers were
+> captured against a local Surfpool, which is where they were always claimed to
+> come from. `mirror-soak-funding` publishes the JoinSplit verifying key through
+> `init-vk` before it releases anything; the devnet program has since been
+> upgraded to bytecode that has that instruction, but the funding soak has not
+> been re-run against devnet, so nothing below is a public-cluster record.
 
 <!-- funding-round-soak:begin -->
 ## Funding-round soak

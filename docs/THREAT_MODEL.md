@@ -551,8 +551,14 @@ extends beyond the behavioral "not for funds" theme.
   `docs/CEREMONY.md`): delta re-randomization with a Schnorr proof of knowledge
   bound to each contributor, a SHA-256 transcript chain, pairing same-ratio
   verification anyone can reproduce, and a conservative independent-contributor
-  count that refuses to count self-runs. Running it and redeploying is what closes
-  this caveat; until then the caveat stands exactly as written.
+  count that refuses to count self-runs. It **has been run, for the MEMBERSHIP
+  circuit only**, and that circuit's deployed key is now the ceremony's output
+  (`docs/CEREMONY.md` section 10; 1 independent contributor, closed by a public
+  Solana mainnet-beta blockhash beacon). Nothing about that run touches the
+  JoinSplit key, so this caveat stands exactly as written for the confidential
+  layer, and the membership path's own caveat is narrower but not absent: a
+  1-contributor ceremony is safe only if that single contributor destroyed their
+  scalar.
 
 ---
 
@@ -819,8 +825,10 @@ because a threat model that only enumerates its wins is untrustworthy.
     key moved. What remains, and is not a hole: the bound is aggregate (total
     settled <= total escrowed) rather than a per-leaf escrow ledger, which is
     unavoidable on a path whose whole point is that a settle is unlinkable to a
-    deposit. **This fix is source-only** - the public devnet program predates it
-    and is still exploitable by the original attack; see `docs/PROOF.md`.
+    deposit. The public devnet program has since been upgraded in place to
+    bytecode that carries this fix; the soak records in `docs/PROOF.md` were
+    captured against the earlier, vulnerable bytecode at that same address and
+    have not been re-run since.
 12. **Confidential-value boundary and TVL (optional layer only).** When the
     confidential-value layer is enabled, amounts are hidden *inside* the pool, but
     the public boundary is not: a shield exposes the deposited amount and depositor,
@@ -828,7 +836,8 @@ because a threat model that only enumerates its wins is untrustworthy.
     public on-chain balance. Fixed-denomination mode makes those crossings uniform
     but not private. Its DEPLOYED trusted setup is dev/test (a soundness caveat,
     Section 4; the ceremony that fixes it exists and is documented in
-    `docs/CEREMONY.md`, but its output is not what is deployed),
+    `docs/CEREMONY.md`, and has been run for the MEMBERSHIP circuit only - the
+    JoinSplit key deployed here is still the dev key),
     and, as with the ZK path, a user who sweeps an unshield output into a wallet
     clusterable to their deposit wallet re-links themselves. This residual exists
     only for deployments that opt into the layer.

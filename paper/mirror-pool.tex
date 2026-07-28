@@ -742,15 +742,31 @@ report says the check did not run rather than implying it did.
 \paragraph{End-to-end.} \code{ceremony prove-check} runs a ceremony, generates a real
 membership proof under the ceremony-produced proving key, and verifies it with the
 \emph{exact} on-chain \code{groth16-solana} verifier against the ceremony-exported
-verifying key. In the exported key only \code{vk\_delta\_2} differs from the dev key,
-as phase-2 theory predicts, and a ceremony-key proof is correspondingly rejected by
-the old dev verifying key. \code{snarkjs groth16 verify} accepts the same proof under
+verifying key. In the exported key only \code{vk\_delta\_2} differs from the initial
+key, as phase-2 theory predicts, and a ceremony-key proof is correspondingly rejected
+by the initial key's verifying key. \code{snarkjs groth16 verify} accepts the same proof under
 the exported \code{verification\_key.json}.
 
-\paragraph{What has not been done.} No production ceremony has been \emph{run}. The
-committed and deployed verifying keys still come from the insecure dev setup, and
-that remains true until a ceremony is run with external contributors and the program
-is redeployed with its key (Section~\ref{sec:limits}).
+\paragraph{What has been done, and what has not.} The ceremony has been \emph{run}
+for the \textbf{membership} circuit, and the committed and deployed membership
+verifying key is its output. It was opened over the same public 55-contribution
+powers-of-tau, contributed to once with OS randomness plus user entropy, and closed
+with the Solana mainnet-beta blockhash at slot \code{435825712}
+(\code{9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu}), giving final transcript hash
+\code{884c8860\ldots 7a9cdd05}; the transcript is published in the repository at
+\code{docs/ceremony-run/mem\-ber\-ship-deployed-transcript.json} and re-verifies from
+that file alone with the beacon value supplied. The devnet program was upgraded in
+place to bytecode pinning that key's SHA-256.
+
+Two things it does not buy, stated plainly. It had \textbf{one} independent
+contributor, so the 1-of-N honest assumption reduces to that single party having
+destroyed their scalar; and the beacon slot was chosen \emph{after} the contribution
+rather than announced in advance, so while the value is public and was unpredictable
+before its slot existed, a verifier cannot rule out that a favourable block was
+selected. Run without the beacon value, \code{ceremony verify} reports
+\code{beacon pre-commitment: NOT supplied} rather than implying the check ran. The
+\textbf{JoinSplit} and \textbf{association} keys still come from the insecure dev
+setup (Section~\ref{sec:limits}).
 
 \section{Evaluation: public devnet deployment}
 \label{sec:eval}
@@ -763,6 +779,20 @@ program deploys and every flow executes on a live public cluster exactly as it
 would on mainnet, without spending mainnet SOL. The SHA-256 of the on-chain
 program bytes equals the SHA-256 of the locally built \code{mirror\_pool.so}, so
 the deployed program is exactly the source in this repository.
+
+\paragraph{Which bytecode the tables belong to.} The program at that address has
+since been \emph{upgraded in place} (signature \code{58gKGUdv\ldots FWHm}, slot
+\code{479600717}) to the current build, and the dumped on-chain bytes are again
+byte-for-byte the local \code{mirror\_pool.so}. The current build differs from the
+one the tables below were captured against in three ways: verifying keys now live in
+write-once, digest-pinned accounts instead of compile-time constants; the ZK escrow
+is domain-separated from the crowd leaf and bound to a fixed denomination; and the
+membership verifying key is the ceremony key of Section~\ref{sec:ceremony}. The
+soaks have \emph{not} been re-run against devnet since that upgrade, so every
+signature and CU figure below is a record of the earlier bytecode at the same
+address, and none of it is evidence about the registry, the escrow fix, or the
+ceremony key. The evidence for those three is the on-chain program test suite built
+from this source.
 
 \begin{itemize}[leftmargin=1.4em,itemsep=0.1em]
   \item \textbf{Program id:} \code{EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq}\\
@@ -858,15 +888,21 @@ A privacy tool that is vague about its non-goals is a trap. We list what still
 leaks and what we do not claim.
 
 \begin{itemize}[leftmargin=1.4em,itemsep=0.15em]
-  \item \textbf{The DEPLOYED trusted setup is dev/test.} Both committed verifying
-        keys (membership and the JoinSplit) came from a single-contributor,
-        reproducible dev setup whose phase-2 entropy is a hard-coded public string,
-        so their toxic waste is public. The keys verify and the program embeds them,
-        but the system MUST NOT secure real value until a real ceremony output is
-        exported and the program is redeployed with it. A multi-party phase-2
-        ceremony is implemented and runnable (Section~\ref{sec:ceremony}); running
-        one with external contributors is operational work that has not been done.
-        This is a soundness caveat, disclosed here rather than buried.
+  \item \textbf{One of three deployed trusted setups is a real ceremony; the other
+        two are dev/test.} The \textbf{membership} key deployed here is the output
+        of a real phase-2 ceremony over a public 55-contribution powers-of-tau,
+        closed by a Solana mainnet-beta blockhash beacon
+        (Section~\ref{sec:ceremony}). It had \textbf{one} independent contributor
+        and its beacon slot was not pre-announced, so it is a real ceremony with a
+        single point of trust rather than a distributed one: safe only if that one
+        party destroyed their scalar. The \textbf{JoinSplit} and
+        \textbf{association} keys came from a single-contributor, reproducible dev
+        setup whose phase-2 entropy is a hard-coded public string, so their toxic
+        waste is public. Those two verify and the program pins them, but the system
+        MUST NOT secure real value until a ceremony output is exported for each and
+        the program redeployed with it, and the membership key should be re-run with
+        external contributors and a pre-announced beacon rule. This is a soundness
+        caveat, disclosed here rather than buried.
   \item \textbf{Devnet, not mainnet.} The deployment proves execution on a live
         public cluster; it is not a mainnet-beta production deployment, and the
         system is not audited. Do not rely on it to protect real activity.
@@ -975,7 +1011,8 @@ the ``who + how much'' point.
 
 \paragraph{An honest tradeoff: transparent setups.} mirror-pool uses Groth16,
 which needs a per-circuit trusted setup (Section~\ref{sec:ceremony}; the deployed
-keys are still from the dev setup). Approaches built on
+membership key comes from a real, but single-contributor, ceremony, and the deployed
+JoinSplit and association keys are still from the dev setup). Approaches built on
 STARKs or other transparent, post-quantum setups (for example Bulletproofs-style
 range proofs or STARK-based systems) avoid a trusted setup entirely, at the cost
 of larger proofs or higher verifier work. That is a real tradeoff, not a strict

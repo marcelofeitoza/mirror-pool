@@ -1043,6 +1043,67 @@ fn the_committed_demo_transcripts_verify() {
     }
 }
 
+/// The transcript of the ceremony that produced the DEPLOYED membership verifying
+/// key must verify from the committed file alone, with the announced beacon value
+/// supplied, and must still hash to the value docs/CEREMONY.md section 10
+/// publishes. Unlike the demo transcripts above, this one is load-bearing: it is
+/// the published provenance of the key `programs/mirror-pool/src/vk_digest.rs`
+/// pins, so it must not be able to drift silently.
+#[test]
+fn the_committed_deployed_membership_transcript_verifies() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let path = repo.join("docs/ceremony-run/membership-deployed-transcript.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let transcript = Transcript::from_json(&text).expect("parsing the published transcript");
+
+    let opts = verify::VerifyOptions {
+        beacon_precommitment: Some(verify::BeaconPrecommitment {
+            source: b"solana-mainnet-beta slot 435825712 blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu",
+            iterations_exp: 20,
+        }),
+    };
+    let report =
+        verify::verify_transcript(&transcript, &opts).expect("the deployed transcript must verify");
+
+    assert_eq!(report.circuit, "membership");
+    assert_eq!(report.steps, 2, "1 entropy contribution + 1 closing beacon");
+    assert_eq!(report.beacon_steps, 1);
+    assert!(report.closed_by_beacon);
+    assert!(
+        report.beacon_precommitment_checked,
+        "the announced beacon value must reproduce the recorded beacon step"
+    );
+    assert_eq!(
+        report.circuit_r1cs_digest,
+        "8ed379951ad0b7371b4ac53fc373b64c36ac26552802ff165dad7af4977bd0a2"
+    );
+    assert_eq!(
+        report.final_key_digest,
+        "f9d8f7f6423af7795efb379bd9686aaab2a7e5c7614e460247afb080e542c485"
+    );
+    assert_eq!(
+        report.final_transcript_hash,
+        "884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05",
+        "the deployed membership transcript no longer hashes to the published value"
+    );
+    assert!(
+        report.phase1_looks_public,
+        "phase 1 must be the public multi-contribution powers-of-tau"
+    );
+    assert_eq!(report.phase1_contributions, 55);
+    // The honest count, and the reason docs/CEREMONY.md section 10.3 exists.
+    assert_eq!(
+        report.independence.independent_contributors, 1,
+        "one independent contributor: safety rests entirely on that party"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------

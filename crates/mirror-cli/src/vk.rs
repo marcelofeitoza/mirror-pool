@@ -119,7 +119,7 @@ mod tests {
         let expected: [(&str, &str); 3] = [
             (
                 "membership",
-                "108733d1671cd3ea8aae375f1f6d232877b33826fef9370c196f72457cf1a6da",
+                "be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76",
             ),
             (
                 "transaction",
