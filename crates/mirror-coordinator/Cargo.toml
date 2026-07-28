@@ -19,7 +19,13 @@ mirror-core.workspace = true
 # tx, so the coordinator depends on this crate directly.
 mirror-behaviors.workspace = true
 anyhow.workspace = true
+clap.workspace = true
 serde.workspace = true
+# The participant handoff: `mirror-cli fund-commit` writes its proved Transact as
+# JSON, and the funding intake parses it back into a request. Keeping the parser
+# in the coordinator (not the CLI) is what makes the wire format shipped and
+# unit-testable on the side that has to trust it.
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -40,6 +40,18 @@ solana-hash = "4"
 solana-message = "4"
 solana-transaction = "4"
 solana-commitment-config = "3"
+solana-signature = "3"
+
+# Transaction FORENSICS, used only by the funding soak. Proving "this fresh
+# wallet's only inbound transfer came from the pool vault" needs the full
+# signature history of an account plus each transaction's account keys and
+# pre/post balances, which is more than the deliberately-tiny `SolanaClient`
+# trait exposes. The coordinator's `RpcSolanaClient::inner()` hands over the
+# underlying client for exactly this, so the soak names the same pinned 4.x
+# client + status types rather than widening the mockable trait.
+solana-rpc-client = "4"
+solana-rpc-client-api = "4"
+solana-transaction-status-client-types = "4"
 
 [[bin]]
 name = "mirror-soak"
@@ -51,3 +63,12 @@ path = "src/main.rs"
 [[bin]]
 name = "mirror-soak-value"
 path = "src/bin/confidential.rs"
+
+# The FUNDING-ROUND soak: participants shield, `fund-commit` emits a relay-signed
+# unshield into a FRESH commit wallet, the coordinator's funding service ingests
+# it, batches it to a round boundary, and releases it gaslessly. Asserts the
+# funding-provenance property on-chain (the fresh wallet's only inbound edge is
+# the pool vault, and the funding tx carries exactly one signature: the relay's).
+[[bin]]
+name = "mirror-soak-funding"
+path = "src/bin/funding.rs"

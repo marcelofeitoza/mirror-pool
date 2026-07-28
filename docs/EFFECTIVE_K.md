@@ -483,15 +483,28 @@ Both are unit-tested (a thin round never reaches the chain; a released withdrawa
 carries exactly one signature, the relay's; an off-denomination request is refused
 before it is proved).
 
-**Nothing connects the two.** `fund-commit` prints its emitted request; no shipped
-component feeds that request into a `FundingRounds` instance, and the coordinator
-binary is an in-memory scheduler demo rather than a service. So no funding round
-has ever released a real withdrawal, and neither half is exercised by the live
-soaks in [`PROOF.md`](PROOF.md), which predate this path: the underlying `Transact`
-unshield is soak-proven on devnet, the funding-round orchestration on top of it is
-not. Wiring the ingestion path and then soaking a funding round is the obvious next
-step, and it is named as such rather than implied. Until that happens, every number
-in this document describes a design, not a deployment.
+- `mirror_coordinator::funding_service::FundingService` is the ingestion path that
+  connects the two on a live cluster: `DirectoryIntake` parses each `fund-commit`
+  emit (refusing anything that is not a relay-only-signed unshield for this
+  program), the service polls the REAL chain slot, batches, and releases. It also
+  stamps the pool-wide normalized `TxProfile`, so a participant cannot fingerprint
+  their own withdrawal with a distinctive compute budget.
+
+All three are unit-tested (a thin round never reaches the chain; a released
+withdrawal carries exactly one signature, the relay's; an off-denomination request
+is refused before it is proved) AND soak-proven end to end on a live local Surfpool:
+see the funding-round section of [`PROOF.md`](PROOF.md), 25/25 on-chain assertions.
+The soak asserts the property this section depends on directly against the chain:
+each fresh commit wallet's ONLY inbound transfer over its entire on-chain history is
+from the pool vault, no funding transaction mentions any participant main wallet,
+and each funding transaction carries exactly one signature, the relay's. It also
+shows a round below the floor rolling forward without reaching the chain at all, and
+the release order being arrival-independent.
+
+What the soak does NOT establish is the size of the residual: that is a modeled
+number from the harness, over a modeled population, and no live run can measure it.
+The soak proves the edge is absent from the graph; the table above is what an
+adversary is left with, and it is a model.
 
 ## Why this matters
 

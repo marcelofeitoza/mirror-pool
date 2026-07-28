@@ -316,6 +316,31 @@ returns to 1.00. The pool still cannot rewrite a participant's funding history
 before the deposit, cross-epoch common-funding clustering is still a named harness
 extension, and Section 8 keeps the residual on the record.
 
+**Verified on-chain, not only modeled.** The mechanism above is soak-proven end to
+end against a live local Surfpool (funding-round section of
+[`PROOF.md`](PROOF.md), 25/25 on-chain assertions), through the shipped components:
+`mirror-cli fund-commit` for the request and
+`mirror_coordinator::FundingService`/`DirectoryIntake` for the ingestion and
+release. The three assertions that carry this section are checked against the chain
+rather than argued: each fresh commit wallet's ONLY inbound transfer over its entire
+on-chain history is from the pool vault, no funding transaction mentions any
+participant main wallet, and each funding transaction carries exactly one signature,
+the relay's. The soak also shows a round below `min_round_size` rolling forward
+without reaching the chain at all, and the within-round order being
+arrival-independent. What the soak cannot establish is the SIZE of the residual: the
+percentages above are a modeled result over a modeled population.
+
+**Availability caveat found by that soak.** `FundingRounds` re-queues the remainder
+of a round when a submit fails, which is the right call for value safety (a dropped
+funding withdrawal is a participant whose value is stuck shielded). But the release
+loop stops at the first failure and carries the FAILING request forward with the
+rest, so a permanently-invalid request (for example one whose nullifier is already
+spent) fails again in every round it lands in, releasing only the withdrawals
+ordered before it. Good requests still drain, because the deterministic order moves
+the bad one around, but round throughput is degraded until an operator removes it.
+There is no quarantine policy for that today. It is an availability issue, not a
+privacy one, and it is recorded here rather than left for a user to discover.
+
 ### 3.6 Copy-trading / intent shadowing -> nothing parseable per wallet
 
 **Attack.** A2 parses swap intent (mint pair, amount) from pre-block validator
