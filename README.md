@@ -148,8 +148,8 @@ honest against the tree.
 
 "Implemented" means the component's core logic is complete and tested. It does
 not mean "deployed": the ceremony row above is the one place where that
-distinction bites, and it is labelled. The 274 host workspace tests
-(11 more are environment-gated and skipped by default), 121 on-chain program tests,
+distinction bites, and it is labelled. The 300 host workspace tests
+(12 more are environment-gated and skipped by default), 121 on-chain program tests,
 `build-sbf`, and the two live Surfpool soaks (behavioral 17/17 + confidential
 25/25 on-chain assertions) are all green. See the roadmap for future work
 (swap/stake-from-pool via CPI, confidential deposits, wiring and soaking the
