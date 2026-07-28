@@ -1176,6 +1176,229 @@ fn settle_zk_unknown_root_fails() {
     env.process(&ix, &[Check::err(custom(MirrorPoolError::RootNotKnown))]);
 }
 
+// ---------------------------------------------------------------------------
+// What SETTLE_ZK does NOT check. The two tests below are deliberate
+// LIMITATION tests: they pin behaviour the program has today so the docs can
+// describe it exactly (see the `settle_zk` module header and
+// `docs/THREAT_MODEL.md` sections 4 and 8). They are expected to pass; if a
+// later version adds one of these gates, the test that breaks is the signal to
+// update the prose in the same commit.
+// ---------------------------------------------------------------------------
+
+/// The fixture's private secret (`circuits/gen_fixture.js`), which fits in a
+/// `u128`, so its canonical big-endian BN254 encoding is a zero-padded 16-byte
+/// tail. Knowing it lets a test rebuild the fixture's leaf.
+const ZK_SECRET: u128 = 111_122_223_333_444_455_556_666_777_788_889_999;
+
+/// The fixture leaf's index in the otherwise-empty depth-20 tree
+/// (`LEAF_INDEX` in `circuits/gen_fixture.js`).
+const ZK_LEAF_INDEX: u64 = 21;
+
+/// `Poseidon(a, b, c)` in the parameterization the `sol_poseidon` syscall and
+/// circomlib both use (Bn254X5, big-endian). Width 3, so this is the leaf
+/// hasher `commitment = Poseidon(secret, actionHash, epoch)`.
+fn poseidon3(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
+    use light_poseidon::PoseidonBytesHasher;
+    let mut hasher =
+        light_poseidon::Poseidon::<ark_bn254::Fr>::new_circom(3).expect("circom Poseidon width 3");
+    hasher
+        .hash_bytes_be(&[a, b, c])
+        .expect("canonical BN254 inputs")
+}
+
+/// Rebuild the fixture's Merkle leaf: `Poseidon(secret, actionHash, epoch)`,
+/// with `actionHash` taken from the fixture's own public inputs.
+fn zk_fixture_leaf() -> [u8; 32] {
+    let mut secret = [0u8; 32];
+    secret[16..].copy_from_slice(&ZK_SECRET.to_be_bytes());
+    let mut epoch = [0u8; 32];
+    epoch[24..].copy_from_slice(&ZK_EPOCH.to_be_bytes());
+    poseidon3(&secret, &fixture::PUBLIC_INPUTS[2], &epoch)
+}
+
+/// SETTLE_ZK reads neither `pool.k_floor` nor any Epoch account: there is no
+/// on-chain anonymity-set floor on the ZK path, and no per-epoch state is
+/// consulted at all.
+///
+/// The pool below declares `k_floor = 1000` and no Epoch PDA exists for the
+/// proof's epoch, yet the settle succeeds. This is deliberate, not an
+/// oversight: the ZK escrow can only ever leave the pool through SETTLE_ZK, so
+/// a settle-time floor would strand the escrow of any window that never reaches
+/// it (the crowd path can roll an under-floor epoch forward at no cost to
+/// anyone; the ZK path has no roll-forward and no refund). The floor for this
+/// path is enforced client-side at proof time instead, where declining is free
+/// and the participant, who alone can produce the proof, has the full window on
+/// screen. See `mirror_cli::prove::AnonymitySet`.
+#[test]
+fn settle_zk_ignores_k_floor_and_needs_no_epoch_account() {
+    let mut env = Env::new();
+    let authority = Pubkey::new_unique();
+    env.fund(authority, SOL);
+    let pool_start = 5 * SOL + ZK_AMOUNT;
+    // k_floor = 1000, far above anything this pool could ever have committed.
+    let pool = build_zk_pool(&mut env, &authority, 10, 1000, pool_start);
+    assert_eq!(
+        pool::k_floor(&env.get(&pool).data).unwrap(),
+        1000,
+        "the pool must declare a floor SETTLE_ZK could have consulted"
+    );
+    // No Epoch PDA exists for the proof's epoch (nothing ever committed here).
+    let epoch_acct = env.epoch_pda(&pool, ZK_EPOCH);
+    assert_eq!(
+        env.get(&epoch_acct).data.len(),
+        0,
+        "no Epoch account for the settled epoch"
+    );
+
+    let recipient = zk_recipient();
+    env.fund(recipient, 0);
+    env.warp(80);
+
+    let nf = fixture::PUBLIC_INPUTS[1];
+    let nf_pda = env.nf_pda(&pool, ZK_EPOCH, &nf);
+    let ix = env.settle_zk_ix(
+        &pool,
+        &authority,
+        &nf_pda,
+        &recipient,
+        ZK_EPOCH,
+        ZK_AMOUNT,
+        &fixture::PUBLIC_INPUTS,
+    );
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        env.get(&recipient).lamports,
+        ZK_AMOUNT,
+        "the escrow is released with no floor and no epoch account"
+    );
+}
+
+/// "Fresh recipient" is a CLIENT convention: the recipient here already holds
+/// lamports and the settle proceeds, because the only thing checked is that the
+/// recipient matches the proof's `actionHash`.
+///
+/// This is also why no freshness check can be bolted on later without a refund
+/// path. The recipient is fixed at deposit time by a hash, so a check for an
+/// empty account would let anyone who learned that address strand the escrow
+/// permanently by sending it one lamport - and emptiness was never the property
+/// that mattered anyway, since an address is unlinkable only until its owner
+/// sweeps it.
+#[test]
+fn settle_zk_accepts_a_recipient_that_is_not_fresh() {
+    let mut env = Env::new();
+    let authority = Pubkey::new_unique();
+    env.fund(authority, SOL);
+    let pool_start = 5 * SOL + ZK_AMOUNT;
+    let pool = build_zk_pool(&mut env, &authority, 10, 2, pool_start);
+
+    // A recipient with a prior balance: visibly used, not fresh.
+    let recipient = zk_recipient();
+    let prior = 3 * SOL;
+    env.fund(recipient, prior);
+    env.warp(80);
+
+    let nf = fixture::PUBLIC_INPUTS[1];
+    let nf_pda = env.nf_pda(&pool, ZK_EPOCH, &nf);
+    let ix = env.settle_zk_ix(
+        &pool,
+        &authority,
+        &nf_pda,
+        &recipient,
+        ZK_EPOCH,
+        ZK_AMOUNT,
+        &fixture::PUBLIC_INPUTS,
+    );
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        env.get(&recipient).lamports,
+        prior + ZK_AMOUNT,
+        "the escrow lands on top of the recipient's existing balance"
+    );
+}
+
+/// The ZK escrow is a POOL-WIDE POT with no per-leaf accounting, and the
+/// membership proof does not care which instruction appended the leaf.
+///
+/// Here the leaf is appended by 22 fee-only crowd `COMMIT`s (which escrow
+/// nothing), a different participant's `COMMIT_DEPOSIT` funds the escrow, and
+/// the fixture proof then releases that escrow to the leaf owner's recipient.
+/// Two consequences, both documented rather than papered over:
+///
+///  - Anonymity: the set a membership proof hides in is every leaf under the
+///    proven root, crowd and ZK alike - not the epoch's ZK deposits.
+///  - Soundness: no on-chain check ties the settled `amount` to what the leaf's
+///    owner escrowed, so a v1 pool must not hold value it cannot afford to lose.
+///    Closing this needs a fixed denomination plus domain-separated leaves (a
+///    layout and circuit change), which is why v1 discloses it instead of
+///    shipping a partial fix that would look like a full one.
+#[test]
+fn settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend() {
+    let mut env = Env::new();
+    let (authority, _payer, pool) = init_pool(&mut env, 10, 2, 0);
+
+    // Mallory only ever pays for crowd COMMITs: no escrow, entry fee 0.
+    let mallory = Pubkey::new_unique();
+    env.fund(mallory, SOL);
+    env.warp(3);
+    let commit_epoch = 0u64;
+    let epoch_acct = env.epoch_pda(&pool, commit_epoch);
+
+    // Reproduce the fixture's tree: empty leaves at 0..21, the fixture leaf at
+    // ZK_LEAF_INDEX. Note the append window (epoch 0) is NOT the epoch the leaf
+    // binds (epoch 7): the program never relates the two.
+    for _ in 0..ZK_LEAF_INDEX {
+        let ix = env.commit_ix(&pool, &epoch_acct, &mallory, &[0u8; 32]);
+        env.process(&ix, &[Check::success()]);
+    }
+    let leaf = zk_fixture_leaf();
+    let ix = env.commit_ix(&pool, &epoch_acct, &mallory, &leaf);
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        pool::current_root(&env.get(&pool).data).unwrap(),
+        fixture::PUBLIC_INPUTS[0],
+        "22 crowd commits must reproduce the fixture's root exactly"
+    );
+
+    // Bob is the only participant who escrows anything.
+    let bob = Pubkey::new_unique();
+    env.fund(bob, 10 * SOL);
+    let pool_before_deposit = env.get(&pool).lamports;
+    let ix = env.commit_deposit_ix(&pool, &epoch_acct, &bob, &[9u8; 32], ZK_AMOUNT);
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        env.get(&pool).lamports,
+        pool_before_deposit + ZK_AMOUNT,
+        "Bob's escrow is the only value in the pot"
+    );
+
+    // Mallory settles her crowd leaf against Bob's escrow.
+    let recipient = zk_recipient();
+    env.fund(recipient, 0);
+    env.warp(80);
+    let nf = fixture::PUBLIC_INPUTS[1];
+    let nf_pda = env.nf_pda(&pool, ZK_EPOCH, &nf);
+    let ix = env.settle_zk_ix(
+        &pool,
+        &authority,
+        &nf_pda,
+        &recipient,
+        ZK_EPOCH,
+        ZK_AMOUNT,
+        &fixture::PUBLIC_INPUTS,
+    );
+    env.process(&ix, &[Check::success()]);
+    assert_eq!(
+        env.get(&recipient).lamports,
+        ZK_AMOUNT,
+        "the fee-only crowd leaf spent the depositor's escrow"
+    );
+    assert_eq!(
+        env.get(&pool).lamports,
+        pool_before_deposit,
+        "the pot is drained back to its pre-deposit balance"
+    );
+}
+
 #[test]
 fn settle_duplicate_nullifier_fails() {
     let mut env = Env::new();

@@ -23,16 +23,25 @@ one anti-Sybil economy, and offer two distinct strengths of the same guarantee:
 
 2. **ZK opt-in path** (`CommitDeposit` / `SettleZk`). A participant escrows the
    action input at commit time. At settlement a relay verifies a Groth16
-   membership proof on-chain that an output corresponds to *some* committed
-   member without revealing which, checks the action binding and nullifier, and
-   executes the action to a *fresh* output address with no participant signature.
-   This provides cryptographic who-initiated unlinkability: the deposit is
-   visible, the output goes to a fresh address, and no participant signs at
-   settle.
+   membership proof on-chain that an output corresponds to *some* member of the
+   accumulator without revealing which, checks the action binding and nullifier,
+   and releases the escrow, with no participant signature, to the address that
+   member bound at deposit time (clients bind a freshly generated one; the
+   program checks the binding, not the freshness). This provides cryptographic
+   who-initiated unlinkability within the set the settlement leaves standing: the
+   deposit is visible, no participant signs at settle, and the link between them
+   is hidden by the proof. Because `SettleZk` publishes the epoch and the amount,
+   that set is the window's ZK deposits of the same amount, and the program
+   enforces no floor on it - `docs/THREAT_MODEL.md` section 4 states exactly what
+   `SettleZk` does and does not check, and why the floor for this path is
+   enforced by the client at proof time instead.
 
 Both paths append to the same Poseidon frontier Merkle accumulator, derive their
-epoch from the same slot clock, are gated by the same on-chain k-floor and
-per-nullifier anti-replay, and pay the same anti-Sybil entry fee. The entire
+epoch from the same slot clock, share one declared `k_floor` and per-nullifier
+anti-replay, and pay the same anti-Sybil entry fee. The floor is enforced
+on-chain only on the crowd path, where an under-floor epoch can roll forward for
+free; the ZK escrow has no roll-forward and no refund, so its floor lives in the
+client (Section 2.5). The entire
 design is grounded in the empirical attack literature: the single strongest
 documented attack on Tornado is FIFO temporal matching (linking a deposit to the
 earliest later withdrawal), which recovers up to 49% of links on small pools.
@@ -95,7 +104,7 @@ program's `wire` module (SBF parser) with compile-time size asserts on both side
 | `1` | `Commit` | participant (crowd) | append one 32-byte commitment leaf, lazily create the Epoch PDA, bump its commit count, collect the entry fee, optionally accrue dwell |
 | `2` | `SettleEpoch` | rotating relay | after the window closes, enforce authority + k-floor, create one Nullifier PDA per spend (anti-replay), mark the epoch settled |
 | `3` | `CommitDeposit` | participant (ZK opt-in) | escrow `amount` into the pool, append one commitment leaf whose `actionHash` binds `(recipient, amount)`, collect the entry fee |
-| `4` | `SettleZk` | rotating relay | verify a Groth16 membership proof on-chain, check the root/actionHash/nullifier, release the escrow to a fresh recipient |
+| `4` | `SettleZk` | rotating relay | verify a Groth16 membership proof on-chain, check the root/actionHash/nullifier, release the escrow to the bound recipient (no k-floor, no denomination, no freshness check: see 2.5) |
 | `5` | `ClaimReward` | participant (crowd) | pay a dwell-proportional, drain-safe share of the on-chain reward pool |
 | `6` | `InitValuePool` | operator | create the confidential ValuePool (its own value-note accumulator + 32-root ring) and its vault PDA, and fix `authority`, `fee`, and `denomination` forever |
 | `7` | `Transact` | rotating relay | verify one 2-in/2-out JoinSplit Groth16 proof on-chain, spend two input nullifiers, insert two output commitments, and move lamports per the signed `publicAmount` (shield / transfer / unshield) |
@@ -199,7 +208,8 @@ The four trailing 32-byte values are the Groth16 public inputs in the fixed orde
 `[root, nullifierHash, actionHash, epoch]`. Accounts: `0` pool (writable, holds
 the escrow), `1` authority (signer, writable; MUST equal `pool.authority`, pays
 nullifier rent), `2` nullifier PDA (writable; seeds `[b"nf", pool, epoch_id LE,
-nullifierHash]`), `3` recipient (writable; the fresh output), `4` system program,
+nullifierHash]`), `3` recipient (writable; the address bound by `actionHash`,
+which clients generate fresh), `4` system program,
 `5` clock sysvar. The checks run in order and each fails closed: (1) authority is
 a signer and equals `pool.authority`; (2) the `u64` epoch header equals the
 32-byte big-endian epoch public input; (3) the epoch window has closed; (4) `root`
@@ -213,6 +223,26 @@ One membership settles per call; the coordinator batches independent memberships
 across calls. Swap-from-pool and stake-from-pool are the identical pattern with a
 different step (8): execute a different action from the pool authority via CPI
 instead of a lamport transfer.
+
+That list is also complete in the other direction, and the gaps matter enough to
+name here rather than only in the threat model. `SettleZk` does **not** enforce a
+k-anonymity floor (it reads neither `pool.k_floor` nor any Epoch account and will
+settle a window holding one commitment), does **not** enforce a denomination or
+any link between the settled `amount` and what the leaf's owner escrowed (the
+escrow is a pool-wide pot, and a fee-only crowd `Commit` leaf satisfies the same
+membership circuit), and does **not** check that the recipient is fresh (it checks
+only that the recipient matches the proof's `actionHash`; "fresh address" is a
+client convention). Each is deliberate and each is pinned by a test in
+`programs/mirror-pool/tests/integration.rs`. The reason none of them can be a
+settle-time check is the same in all three cases: the ZK escrow's only exit is a
+`SettleZk` bound to one `(recipient, amount, epoch)`, with no refund and no
+roll-forward, so any extra settle-time condition turns a privacy shortfall into
+permanently stranded funds - a dusted recipient address would be enough. The
+floor is enforced instead by `mirror-cli prove`, which refuses to prove into a
+window below `k_floor` unless the participant waives it with `--accept-thin-set`;
+that works because only the secret holder can produce the proof at all, so no
+third party can force a thin settle on this path. See `docs/THREAT_MODEL.md`
+section 4.
 
 ### 2.6 `ClaimReward` (tag 5, body 0 bytes)
 
@@ -365,6 +395,9 @@ CommitDeposit
 prove (client-side, off-chain, gasless for the participant)
   rebuild the Merkle inclusion path (frontier snapshot, or full tree from leaves)
   confirm the path root is a known recent root on-chain
+  size the anonymity set: refuse to prove into a window below the pool's k_floor
+    unless the participant waives it (--accept-thin-set); the count used is
+    recorded in the emitted bundle
   snarkjs groth16 fullprove + verify against the built circuit
   emit the SettleZk instruction bytes for the relay to submit (never self-submit)
 
@@ -372,14 +405,19 @@ SettleZk (relay-submitted, after the window closes)
   verify: authority, epoch encodings agree, window closed, root is recent,
           recomputed actionHash == proof's actionHash, nullifier unspent,
           Groth16 proof verifies against [root, nullifierHash, actionHash, epoch]
-  execute: release the escrow to the FRESH recipient (direct lamport move)
+  execute: release the escrow to the bound recipient (direct lamport move)
   no participant signs at settle; the deposit is visible but WHICH committer
-  settled is cryptographically hidden inside the anonymity set
+  settled is hidden inside the anonymity set, which the settle's own public
+  epoch and amount narrow to the window's same-amount ZK deposits
 ```
 
-The result is who-initiated unlinkability: the output lands at a fresh address the
-committer bound at deposit time, the relay cannot redirect it (actionHash
-binding), and no participant signature appears at settle.
+The result is who-initiated unlinkability inside that set: the output lands at the
+address the committer bound at deposit time (fresh by client convention, not by an
+on-chain check), the relay cannot redirect it (actionHash binding), and no
+participant signature appears at settle. What the program does not do is guarantee
+the set is large: it enforces no floor, no denomination, and no freshness, for the
+reasons in Section 2.5, so the participant checks the window before proving and
+the CLI refuses by default if they do not.
 
 ---
 

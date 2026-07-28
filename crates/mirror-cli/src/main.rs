@@ -502,6 +502,14 @@ struct ProveArgs {
     /// Also write the emitted SettleZk bundle (JSON) to this path.
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Prove even though the window's commit count is below the pool's k_floor.
+    /// `prove` refuses by default: SettleZk publishes the epoch and the amount,
+    /// so a thin window means the output can be attributed by elimination. The
+    /// program cannot refuse this for you (a settle-time floor would strand the
+    /// escrow, which has no refund path), so the choice is yours and it is
+    /// recorded in the emitted bundle.
+    #[arg(long)]
+    accept_thin_set: bool,
 }
 
 #[derive(Args)]
@@ -821,12 +829,24 @@ fn run_prove(args: ProveArgs) -> Result<()> {
         leaves: args.leaves,
         work_dir: args.work_dir,
         out: args.out,
+        accept_thin_set: args.accept_thin_set,
     })?;
 
     if use_snarkjs {
         println!("proof generated and VERIFIED by snarkjs (fallback path).");
     } else {
         println!("proof generated and VERIFIED in-process (pure Rust; no Node process).");
+    }
+    println!();
+    println!("anonymity set for this settle (measured by the client, NOT checked on-chain):");
+    println!("  epoch:          {}", emit.anonymity.epoch);
+    println!(
+        "  nominal_k:      {}  (commits in the window: crowd + ZK, every amount; an UPPER bound)",
+        emit.anonymity.nominal_k
+    );
+    println!("  k_floor:        {}", emit.anonymity.k_floor);
+    if emit.anonymity.accepted_below_floor {
+        println!("  WAIVED:         settling below the floor at your explicit request");
     }
     println!();
     println!("SettleZk instruction (submit from the pool authority / rotating coordinator):");

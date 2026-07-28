@@ -50,13 +50,18 @@
 //!   the action input into the pool at commit; at settle a relay proves in zero
 //!   knowledge (Groth16 over the SAME Poseidon accumulator) that an output
 //!   corresponds to SOME committed member without revealing which, and the action
-//!   executes to a FRESH address. This cryptographically hides which participant
-//!   initiated. `SETTLE_ZK` verifies the membership proof against a recent root
-//!   (a small root-history ring buffer on the Pool), enforces per-nullifier
+//!   executes to an address the member bound at commit time (clients bind a fresh
+//!   one). This cryptographically hides which member initiated, up to what the
+//!   settle publishes. `SETTLE_ZK` verifies the membership proof against a recent
+//!   root (a small root-history ring buffer on the Pool), enforces per-nullifier
 //!   anti-replay, binds the recipient+amount into the proof's `actionHash` so the
 //!   relay cannot redirect, and executes the v1 action (transfer the escrow to
-//!   the fresh recipient). Swap/stake-from-pool are documented extensions of the
-//!   same pattern (execute a different action from the pool authority via CPI).
+//!   the bound recipient). It enforces NO k-anonymity floor, NO denomination, and
+//!   NO recipient freshness: the `settle_zk` module header states exactly why
+//!   each of those cannot be a settle-time check on a path whose escrow has no
+//!   refund, and where the compensating control lives instead.
+//!   Swap/stake-from-pool are documented extensions of the same pattern (execute
+//!   a different action from the pool authority via CPI).
 //!
 //! Build:
 //!

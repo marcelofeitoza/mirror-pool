@@ -81,8 +81,8 @@ honest against the tree.
 | Component | Path | Status |
 | --- | --- | --- |
 | Shared types + wire format | `crates/mirror-core` | **Implemented** - `Commitment`/`Nullifier`/`Secret`, `commit()`/`nullifier()` (circomlib Poseidon, cross-check-proven against the circuit), `ActionClass` + `SizeBucket`, `Epoch`/`EpochSchedule`, `KAnon` honest accounting, `wire` byte layout. Unit tests passing. |
-| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification. 42 mollusk tests; `build-sbf` green; deployed + exercised on public devnet. |
-| ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and executes to a fresh output. A real proof verifies on-chain (fixture test) and live in the soak. |
+| On-chain program | `programs/mirror-pool` | **Implemented** - fail-closed `InitPool`/`Commit`/`CommitDeposit`/`SettleEpoch`/`SettleZk`/`ClaimReward`, depth-20 Poseidon frontier accumulator + 32-root history ring, Epoch/Nullifier/Dwell PDAs, on-chain crowd-path k-floor + double-settle prevention, and on-chain Groth16 (alt_bn128) membership verification. 44 mollusk tests; `build-sbf` green; deployed + exercised on public devnet. |
+| ZK-deniable initiation | `circuits/` + `programs/mirror-pool` | **Implemented** - Poseidon membership circuit + Groth16 setup; `SettleZk` verifies the proof on-chain (public inputs `[root, nullifierHash, actionHash, epoch]`) and releases the escrow to the address the member bound (clients bind a fresh one). A real proof verifies on-chain (fixture test) and live in the soak. `SettleZk` enforces no k-floor, no denomination and no recipient freshness, and the reasons are in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) section 4. |
 | Adversarial harness | `crates/mirror-harness` | **Implemented** - heuristic + learned attacks measuring attacker advantage over `1/k`, Baseline vs mirror-pool. FIFO advantage collapses from high under per-actor delay to near zero under shared-epoch batching. Also prints an information-theoretic effective-k table (Serjantov-Danezis `2^H(p)` + min-entropy) whose mirror-pool provenance classes are DERIVED from the shipped funding mechanism, with funding-policy, adversary-strength, dwell and adoption ablations; see [`docs/EFFECTIVE_K.md`](docs/EFFECTIVE_K.md). |
 | Funding-provenance path | `crates/mirror-cli` + `crates/mirror-coordinator` | **Implemented, not yet soaked** - `fund-commit` funds a FRESH commit wallet by unshielding from the value pool (vault is the sender, relay the only signer, denomination enforced), and `funding::FundingRounds` batches those withdrawals to a round boundary with a minimum-round floor and an arrival-independent release order. Covered by unit tests (including that a released withdrawal is relay-only signed and a thin round never reaches the chain) but NOT by the live soaks, which predate it. The residual it leaves (public boundary amounts and slots) is measured, not assumed. |
 | Gasless coordinator | `crates/mirror-coordinator` | **Implemented** - slot-window batching, `k_floor` gate, rotating fee-payer, and real atomic crowd settlement (ComputeBudget + `SettleEpoch` + N participant behaviors, shared accounts in an ALT). |
@@ -179,8 +179,13 @@ mirror-pool/
 Overstating an anonymity set is the documented failure mode of prior mixers, so
 this project reports the *real* set and is explicit about its limits. `KAnon` in
 `mirror-core` separates the nominal commit count from the real set (nominal
-minus operator-owned and Sybil decoys), and an epoch settles only when the real
-set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
+minus operator-owned and Sybil decoys), and a crowd epoch settles only when the
+real set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`. On the ZK
+path that floor is checked by the client at proof time rather than by the program
+at settle: the escrow there has no refund, so an on-chain floor would strand it,
+and only the secret holder can produce the proof in the first place. The
+reasoning, and the set the ZK path actually gives, are in
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) section 4.
 
 **What mirror-pool defends against**
 
@@ -221,6 +226,17 @@ set meets `k_floor`. Anonymity is `1/real_k`, never `1/nominal`.
   deposit/withdraw magnitude and the pool TVL remain visible even there.)
 - **The behavioral pool does not provide value-transfer privacy or unlinkable
   payments.** It anonymizes *who initiated a shared action*, not *who paid whom*.
+- **The ZK path's anonymity set is per-window and per-amount, and the program
+  does not enforce a floor on it.** `SettleZk` publishes the settled epoch and
+  amount, so the set covering an output is that window's ZK deposits *of the same
+  amount*, not the pool's total deposits; and the program will settle into a set
+  of one. The floor is a client check (`mirror-cli prove` refuses below `k_floor`
+  unless waived), because the ZK escrow has no refund path and an on-chain floor
+  would strand it. Related and stated with the same bluntness: the ZK escrow is a
+  **pool-wide pot**, so no on-chain check ties a settled amount to any single
+  deposit, and a fee-only crowd commit can spend it. A v1 pool must not hold value
+  it cannot afford to lose. Both limits are pinned by tests and explained in
+  [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) section 4.
 - **It does not manufacture anonymity from operator-owned cover traffic.**
   Decoys the operator controls inflate the nominal count and add zero real
   anonymity to anyone who clusters the operator; they are excluded from

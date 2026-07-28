@@ -1,14 +1,65 @@
 //! SETTLE_ZK: settle ONE ZK opt-in membership.
 //!
 //! This is the ZK-deniable half of the protocol. A relay proves in zero
-//! knowledge that an output corresponds to SOME member committed via
-//! `COMMIT_DEPOSIT`, without revealing which one, and the action executes to a
-//! FRESH address. The membership proof (Groth16 over the same Poseidon
-//! accumulator the crowd path uses) is verified on-chain with `groth16-solana`.
+//! knowledge that an output corresponds to SOME member of the accumulator,
+//! without revealing which one, and the escrow is released to the address the
+//! member bound at commit time. The membership proof (Groth16 over the same
+//! Poseidon accumulator the crowd path uses) is verified on-chain with
+//! `groth16-solana`.
 //!
 //! One membership settles per call so the transaction and compute stay well
 //! inside limits (data is ~401 bytes, verification is < ~200k CU); the
 //! coordinator batches independent memberships across calls.
+//!
+//! # What this instruction does NOT check
+//!
+//! Stated here because the anonymity of this path depends on it, and because
+//! the checks below are easy to mistake for guarantees they do not give. Each
+//! item is pinned by a test in `tests/integration.rs`.
+//!
+//! - **No k-anonymity floor.** Unlike `SETTLE_EPOCH`, this handler never reads
+//!   `pool.k_floor` and never touches an Epoch account: it will settle a window
+//!   that holds a single commitment. That is deliberate. The crowd path can
+//!   enforce a floor cheaply because an under-floor epoch simply ROLLS FORWARD
+//!   and nobody loses anything. On this path the escrow's ONLY exit is a
+//!   `SETTLE_ZK` bound by `actionHash` to one `(recipient, amount)` and by the
+//!   leaf to one epoch: there is no refund instruction and no re-binding, so a
+//!   settle-time floor would convert "thin anonymity" into "permanently stranded
+//!   escrow" for every window that never reaches it. The floor is enforced
+//!   client-side at proof time instead (`mirror-cli prove`), which is both
+//!   sufficient and safe: only the secret holder can produce this proof, the
+//!   window's size is public before they decide, and declining costs them
+//!   nothing but time. See `settle_zk_ignores_k_floor_and_needs_no_epoch_account`.
+//! - **No denomination, and no link between `amount` and any single deposit.**
+//!   The escrow is a pool-wide pot. Nothing ties the settled `amount` to what
+//!   the leaf's owner escrowed at `COMMIT_DEPOSIT`, and a crowd `COMMIT` leaf
+//!   (which escrows nothing) satisfies the membership circuit just as well as a
+//!   deposit leaf, since both paths append the same `Poseidon(secret,
+//!   actionHash, epoch)` shape to the same tree. A v1 pool therefore must not
+//!   hold value it cannot afford to lose. Closing this needs a fixed
+//!   denomination plus domain-separated leaves, which is a layout and circuit
+//!   change; a half fix would read like a full one. See
+//!   `settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend`.
+//! - **No recipient freshness.** `recipient` is only required to match the
+//!   proof's `actionHash`. "Fresh address" is a CLIENT convention, not a
+//!   property this program enforces, and it is not meaningfully enforceable
+//!   here: emptiness (`lamports == 0`) is a proxy for "unused" that says nothing
+//!   about linkability, an address is only unlinkable until its owner sweeps it,
+//!   and, worst of all, anyone who learns the bound address could permanently
+//!   strand the escrow by dusting it with one lamport. See
+//!   `settle_zk_accepts_a_recipient_that_is_not_fresh`.
+//!
+//! # What the anonymity set actually is
+//!
+//! The proof hides the member among EVERY leaf under the proven root. The two
+//! values this instruction publishes then narrow what an observer must consider:
+//! the `epoch` public input (the leaf binds it, so only leaves committed to that
+//! epoch can be the source) and `amount` (escrow amounts are public at
+//! `COMMIT_DEPOSIT`). So the set that actually covers an output is the window's
+//! ZK deposits OF THE SAME AMOUNT. That per-window narrowing is the price paid
+//! for the timing defense - binding the epoch is what forces every settle of a
+//! window to wait for the same close, which is what denies the FIFO matching
+//! that is the strongest published attack on this class of pool.
 //!
 //! Body layout after the tag byte (see `wire::SETTLE_ZK_LEN`):
 //!
@@ -28,7 +79,9 @@
 //! 1. authority      signer     writable; MUST equal pool.authority; pays nf rent
 //! 2. nullifier      writable   Nullifier PDA to create (anti-replay);
 //!                              seeds [b"nf", pool, epoch_id LE, nullifierHash]
-//! 3. recipient      writable   fresh output address; receives the escrow
+//! 3. recipient      writable   the address bound by actionHash; receives the
+//!                              escrow. Clients bind a fresh one; the program
+//!                              only checks the binding (see above)
 //! 4. system_program            for the create-account CPI
 //! 5. clock          sysvar     current slot for the window-closed gate
 //! ```
@@ -236,7 +289,7 @@ pub fn process(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> P
         .verify()
         .map_err(|_| MirrorPoolError::ProofVerificationFailed)?;
 
-    // (8) Execute the action: transfer the escrow from the pool to the fresh
+    // (8) Execute the action: transfer the escrow from the pool to the bound
     // recipient. The pool is program-owned, so move lamports directly (a system
     // transfer only moves lamports out of system-owned accounts), keeping the
     // pool rent-exempt.

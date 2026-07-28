@@ -2,8 +2,9 @@
 
 mirror-pool is an anonymity system over the **initiators** of an action, not over
 funds. It offers two settlement paths that share one accumulator, one epoch clock,
-one k-floor, and one anti-Sybil economy, and deliver two distinct strengths of the
-same idea:
+one declared `k_floor`, and one anti-Sybil economy, and deliver two distinct
+strengths of the same idea. The floor is *enforced* in different places on the two
+paths, for a reason Section 4 sets out in full and neither path hides:
 
 - **Crowd path** (`Commit` / `SettleEpoch`). N participants each sign their own
   identical action; the coordinator composes them into one atomic transaction that
@@ -14,11 +15,16 @@ same idea:
   (timing, amount, gas payer, fingerprint), not the on-chain signer.
 - **ZK opt-in path** (`CommitDeposit` / `SettleZk`). A participant escrows the
   action input; at settlement a relay verifies a Groth16 membership proof on-chain
-  that an output corresponds to *some* committed member without revealing which,
-  and the action executes to a *fresh* output address with no participant
-  signature. This provides cryptographic who-initiated unlinkability: the deposit
-  is visible, the output goes to a fresh address, and no participant signs at
-  settle.
+  that an output corresponds to *some* member of the accumulator without revealing
+  which, and the escrow is released, with no participant signature, to the address
+  that member bound at deposit time (clients bind a freshly generated one; the
+  program checks the binding, not the freshness). This provides cryptographic
+  who-initiated unlinkability *within the set the settlement leaves standing*: the
+  deposit is visible, no participant signs at settle, and the link between the two
+  is hidden by the proof. Section 4 states which set that is, and Section 4 also
+  states the three things `SettleZk` does not check (a floor, a denomination, and
+  recipient freshness) and why each of them cannot be a settle-time check on this
+  path.
 
 Both behavioral paths leave every **amount** public by design (Non-goal 1). A third,
 **optional confidential-value layer** deliberately steps BEYOND the "behavior, not
@@ -337,18 +343,86 @@ Precision here prevents overclaiming. The two paths hide different things.
 **ZK opt-in path (`CommitDeposit` / `SettleZk`).**
 
 - **Public:** that a wallet made a deposit (with its escrow amount) into epoch E;
-  the pool parameters; every settlement transaction; and that some output was
-  released to a fresh address.
-- **Hidden:** the bijection between the epoch's depositors and the epoch's settled
-  outputs. The output lands at a fresh address the committer bound at deposit time,
-  no participant signs at settle, and settlement carries a zero-knowledge
-  membership proof, so an observer knows the deposit set but cannot attribute any
-  single settled output to any single depositor with probability better than 1/k
-  (k as defined in Section 5).
+  the pool parameters; every settlement transaction; the settled `epoch` and
+  `amount`, which are inputs to the proof and instruction data; and the recipient
+  address the escrow was released to.
+- **Hidden:** the bijection between the depositors and the settled outputs. No
+  participant signs at settle, and settlement carries a zero-knowledge membership
+  proof, so an observer knows the deposit set but cannot attribute any single
+  settled output to any single depositor with probability better than 1/k. What k
+  is here is the whole question, and the answer is narrower than the proof alone
+  suggests.
+
+**What the ZK anonymity set actually is.** The proof hides the member among
+**every leaf under the proven root** - crowd `Commit` leaves included, since both
+paths append the same `Poseidon(secret, actionHash, epoch)` shape to one
+accumulator. Two public values then narrow the set an observer has to consider:
+
+1. **The epoch.** `SettleZk` publishes it, and the leaf binds it, so only leaves
+   committed to that epoch can be the source. This narrowing is the deliberate
+   price of the timing defense: binding the epoch is what forces every settle of a
+   window to wait for the same close, which is what denies the FIFO matching of
+   Section 3.1. A Tornado-style global set would be wider and would hand that
+   attack back.
+2. **The amount.** Escrow amounts are public at `CommitDeposit` and the settled
+   amount is public at `SettleZk`, so amount matching (Section 3.2) excludes every
+   deposit of a different size.
+
+So the honest statement of the set is: **the window's ZK deposits of the same
+amount**, and a participant should count exactly that, not the pool's total
+deposits and not the window's commit count.
+
+**What `SettleZk` does not check, and why not.** All three are pinned by tests in
+`programs/mirror-pool/tests/integration.rs`, so this section cannot quietly drift
+away from the program.
+
+- **No on-chain k-floor.** `SettleZk` reads neither `pool.k_floor` nor any Epoch
+  account; it will settle a window holding a single commitment
+  (`settle_zk_ignores_k_floor_and_needs_no_epoch_account`). This is an asymmetry
+  with `SettleEpoch` and it is deliberate. The crowd path can enforce a floor
+  cheaply because an under-floor epoch **rolls forward** and costs a participant
+  nothing but time. The ZK escrow has no roll-forward and **no refund
+  instruction**: its only exit is a `SettleZk` bound by `actionHash` to one
+  `(recipient, amount)` and by the leaf to one epoch. A settle-time floor would
+  therefore convert "thin anonymity" into "permanently stranded escrow" for every
+  window that never fills, which is a strictly worse outcome than a thin settle
+  the participant can decline. And declining is available: only the secret holder
+  can produce this proof, so unlike the crowd path (where the participant hands
+  over a signed action and the relay decides when to settle) no third party can
+  force a thin settle here. The floor is therefore enforced where refusing is free
+  and informed - `mirror-cli prove` refuses to prove into a window below the
+  pool's `k_floor` unless the participant waives it explicitly with
+  `--accept-thin-set`, and records the number waived in the emitted bundle. A
+  floor that strands funds is not a safer floor, and a floor that counts crowd
+  commits and mismatched amounts would have reported cover this path does not
+  have.
+- **No denomination, and no link between the settled amount and any single
+  deposit.** The escrow is a **pool-wide pot**. Nothing on-chain ties the settled
+  `amount` to what the leaf's owner escrowed, and a fee-only crowd `Commit` leaf
+  satisfies the membership circuit as well as a deposit leaf does
+  (`settle_zk_escrow_is_a_pool_wide_pot_any_leaf_can_spend` demonstrates exactly
+  that: 22 crowd commits reproduce a leaf that then spends a different
+  participant's escrow). This is a **soundness** caveat, not only a privacy one:
+  **a v1 pool must not hold value it cannot afford to lose**, and the same
+  disclosure applies here as to the confidential layer's dev trusted setup.
+  Closing it needs a fixed denomination plus domain-separated leaves, i.e. a
+  layout and circuit change (`docs/ROADMAP.md`); shipping half of it would read
+  like a full fix.
+- **No recipient freshness.** "The output goes to a fresh address" is a **client
+  convention**, not a program guarantee: `SettleZk` only requires the recipient to
+  match the proof's `actionHash`. Nor is freshness meaningfully enforceable here.
+  An emptiness test (`lamports == 0`) is a proxy for "unused" that says nothing
+  about linkability; an address stays unlinkable only until its owner sweeps it
+  (residual 5 below); and, decisively, because the recipient is fixed at deposit
+  time and the escrow has no refund, anyone who learned the bound address could
+  **permanently strand the escrow by dusting it with one lamport**. The property
+  that matters is delivery discipline by the participant, which no on-chain check
+  can supply. `settle_zk_accepts_a_recipient_that_is_not_fresh` pins the current
+  behaviour.
 
 Both paths keep membership public, exactly as Tornado did for funds: the *link
 inside the set* is what is protected, and on the ZK path that protection is
-cryptographic.
+cryptographic within the set described above.
 
 **Funding leg (`fund-commit` + funding rounds, optional but recommended).** This is
 what a participant does *before* either path, and it is where the strongest
@@ -425,12 +499,21 @@ mirror-pool's rule, enforced in code:
   `real_k() = nominal.saturating_sub(excluded)` in
   `crates/mirror-core/src/lib.rs`. Operator wallets and detected Sybils go into
   `excluded`.
-- An epoch may not settle below the floor: `KAnon::meets_floor(&schedule)` checks
-  `real_k() >= EpochSchedule::k_floor`, and the coordinator rolls the epoch forward
-  (`MirrorError::BelowKFloor`) rather than executing into a set small enough to
-  deanonymize by elimination. On-chain, `SettleEpoch` independently enforces the
-  necessary condition `commit_count >= k_floor` as a backstop. Settling k=3 late is
-  strictly better than settling k=1 on time.
+- A crowd epoch may not settle below the floor: `KAnon::meets_floor(&schedule)`
+  checks `real_k() >= EpochSchedule::k_floor`, and the coordinator rolls the epoch
+  forward (`MirrorError::BelowKFloor`) rather than executing into a set small
+  enough to deanonymize by elimination. On-chain, `SettleEpoch` independently
+  enforces the necessary condition `commit_count >= k_floor` as a backstop.
+  Settling k=3 late is strictly better than settling k=1 on time.
+- On the ZK path the same floor is enforced at **proof time** rather than at
+  settle: `SettleZk` has no on-chain floor, because the escrow has no
+  roll-forward and no refund, so a settle-time floor would strand it (Section 4).
+  `mirror-cli prove` therefore refuses to prove into a window below `k_floor`
+  unless the participant waives it with `--accept-thin-set`. On this path
+  "settling late" is not one of the options, because a closed window's set never
+  grows again: the real choice is made when the participant deposits, which is
+  why a ZK pool's `epoch_slots` (window length) is the knob that determines
+  whether its sets are ever thick.
 
 **Falsifiability.** The claim "this epoch provided k-anonymity of k" is falsifiable
 in two concrete ways, and we ship the tools to falsify it:
@@ -509,10 +592,11 @@ Stated bluntly, because a privacy tool that is vague about its non-goals is a tr
    signed on-chain action did not already show). The crowd path defeats
    copy-trading and per-actor signal extraction; it does not cryptographically hide
    which committer acted. The ZK opt-in path is the one that does: `CommitDeposit` +
-   `SettleZk` verify a Groth16 membership proof and release to a fresh recipient
+   `SettleZk` verify a Groth16 membership proof and release to the bound recipient
    with no participant signature, removing the coordinator from the trust base for
-   attribution. Choose the path that matches the guarantee you need; this is a
-   disclosed distinction, not a hidden one.
+   attribution - within the set Section 4 defines, which the participant is
+   responsible for checking before they prove. Choose the path that matches the
+   guarantee you need; this is a disclosed distinction, not a hidden one.
 5. **No network-layer anonymity.** IP-level correlation between a participant and
    the coordinator's API is out of scope; use your own transport protections.
 
@@ -634,7 +718,25 @@ because a threat model that only enumerates its wins is untrustworthy.
    like a mirror-pool settlement. That is intentional (uniformity is the defense),
    but it means the pool's aggregate activity (volume per bucket per epoch) is
    public analytics.
-10. **Confidential-value boundary and TVL (optional layer only).** When the
+10. **The ZK path's set is per-window and per-amount, and nothing on-chain
+    enforces either.** `SettleZk` publishes the epoch and the amount, so the set
+    covering an output is the window's same-amount ZK deposits (Section 4), and
+    the program will settle into a set of one. Two things follow that a
+    participant has to act on rather than assume: check the window before you
+    prove (the CLI refuses below `k_floor` and prints the count it used), and
+    treat a pool whose deposits are heterogeneous as offering amount-matching
+    cover only to deposits that match yours. The compensating control is a client
+    gate, so a modified client can waive it - which is acceptable precisely
+    because the only party who can waive it is the one whose anonymity is at
+    stake, and unacceptable to describe as an on-chain guarantee, which is why it
+    is not described as one.
+11. **The ZK escrow is a shared pot (soundness, v1).** No on-chain check ties the
+    settled amount to any single deposit, and a fee-only crowd `Commit` leaf can
+    spend it (Section 4, with the test that demonstrates it). A v1 pool must not
+    hold value it cannot afford to lose. This is disclosed with the same bluntness
+    as the confidential layer's dev trusted setup, and the fix (fixed denomination
+    plus domain-separated leaves) is a v2 layout and circuit change.
+12. **Confidential-value boundary and TVL (optional layer only).** When the
     confidential-value layer is enabled, amounts are hidden *inside* the pool, but
     the public boundary is not: a shield exposes the deposited amount and depositor,
     an unshield exposes the withdrawn amount and recipient, and the vault's TVL is a
@@ -649,10 +751,14 @@ because a threat model that only enumerates its wins is untrustworthy.
 None of these residuals reintroduce the property each path sells: within a settled
 epoch that met its floor, the crowd path keeps every participant's action
 indistinguishable *as a signal* from the rest of the crowd, the ZK path keeps the
-depositor-to-output bijection hidden at the 1/k bound, and the confidential-value
-layer keeps in-pool amounts and internal-transfer initiators hidden. They erode the
-context around the set, not the indistinguishability inside it, and every one is
-either measured by the harness or has a named roadmap mitigation.
+depositor-to-output bijection hidden at the 1/k bound over the set of Section 4,
+and the confidential-value layer keeps in-pool amounts and internal-transfer
+initiators hidden. Residuals 10 and 11 are the exceptions worth naming twice: they
+are not erosion around the set, they are conditions on when the ZK path's claim
+holds at all (a window that met the floor, with matching amounts) and on what a v1
+pool may safely hold. Every other one erodes the context around the set rather than
+the indistinguishability inside it, and each is either measured by the harness or
+has a named roadmap mitigation.
 
 ---
 
