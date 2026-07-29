@@ -67,6 +67,86 @@ pub fn fr_to_be(f: &Fr) -> Be32 {
     out
 }
 
+/// Climb a depth-[`DEPTH`] inclusion path NATIVELY and return the root it
+/// reaches, together with the little-endian index bits the circuit witnesses.
+///
+/// `path_elements[i]` is the sibling at level `i` (bottom-up) and bit `i` of
+/// `leaf_index` selects the side: `false` = the running node is the LEFT child.
+/// That is the decomposition `mirror_core::merkle_root_from_path` uses, and the
+/// convention circom's `PathSelector` implements.
+///
+/// Shared verbatim with [`crate::association`], whose statement is this one plus
+/// a second inclusion of the same leaf: one definition of "climb a path", used
+/// by both circuits and by both witness builders.
+pub fn native_inclusion(
+    leaf: Fr,
+    leaf_index: u64,
+    path_elements: &[Fr],
+) -> Result<(Fr, Vec<bool>), PoseidonGadgetError> {
+    let mut indices = Vec::with_capacity(path_elements.len());
+    let mut cur = leaf;
+    for (level, sibling) in path_elements.iter().enumerate() {
+        let right = (leaf_index >> level) & 1 == 1;
+        indices.push(right);
+        cur = if right {
+            hash_native(&[*sibling, cur])?
+        } else {
+            hash_native(&[cur, *sibling])?
+        };
+    }
+    Ok((cur, indices))
+}
+
+/// Allocate the private half of ONE depth-[`DEPTH`] inclusion path as witnesses
+/// and enforce that `leaf` climbs it to `root`.
+///
+/// Cost, per level: one booleanity row from `Boolean::new_witness` (circom's
+/// `s * (1 - s) === 0`), two `conditionally_select` rows (circom's two
+/// `PathSelector` mux rows), and a `Poseidon(2)`. Plus one row for the final
+/// `===`. The association circuit calls this TWICE, over two independent paths
+/// for the same leaf, which is exactly what `association.circom` does with two
+/// `MerkleProof(20)` instances.
+pub(crate) fn enforce_inclusion(
+    cs: ConstraintSystemRef<Fr>,
+    leaf: &FpVar<Fr>,
+    root: &FpVar<Fr>,
+    path_elements: Option<&Vec<Fr>>,
+    path_indices: Option<&Vec<bool>>,
+) -> Result<(), SynthesisError> {
+    let mut siblings = Vec::with_capacity(DEPTH);
+    for level in 0..DEPTH {
+        siblings.push(FpVar::new_witness(cs.clone(), || {
+            let p = path_elements.ok_or(SynthesisError::AssignmentMissing)?;
+            p.get(level)
+                .copied()
+                .ok_or(SynthesisError::AssignmentMissing)
+        })?);
+    }
+    // `Boolean::new_witness` emits the booleanity constraint, which is circom's
+    // `s * (1 - s) === 0`.
+    let mut bits = Vec::with_capacity(DEPTH);
+    for level in 0..DEPTH {
+        bits.push(Boolean::new_witness(cs.clone(), || {
+            let p = path_indices.ok_or(SynthesisError::AssignmentMissing)?;
+            p.get(level)
+                .copied()
+                .ok_or(SynthesisError::AssignmentMissing)
+        })?);
+    }
+
+    // `bit == true` means the running node is the RIGHT child, so the sibling
+    // goes on the left - the same convention as circom's `PathSelector` and as
+    // the on-chain accumulator.
+    let mut cur = leaf.clone();
+    for level in 0..DEPTH {
+        let sibling = &siblings[level];
+        let left = FpVar::conditionally_select(&bits[level], sibling, &cur)?;
+        let right = FpVar::conditionally_select(&bits[level], &cur, sibling)?;
+        cur = hash_var(&[left, right])?;
+    }
+    root.enforce_equal(&cur)
+}
+
 /// The membership circuit.
 ///
 /// Every field is an `Option` so the SAME type serves two roles: `blank()` for
@@ -131,18 +211,7 @@ impl MembershipWitness {
         let commitment = hash_native(&[secret, action_hash, epoch_f])?;
         let nullifier_hash = hash_native(&[secret, epoch_f])?;
 
-        let mut indices = Vec::with_capacity(DEPTH);
-        let mut cur = commitment;
-        for (level, sibling) in path_elements.iter().enumerate() {
-            let right = (leaf_index >> level) & 1 == 1;
-            indices.push(right);
-            cur = if right {
-                hash_native(&[*sibling, cur])?
-            } else {
-                hash_native(&[cur, *sibling])?
-            };
-        }
-        let root = cur;
+        let (root, indices) = native_inclusion(commitment, leaf_index, path_elements)?;
 
         Ok(Self {
             circuit: MembershipCircuit {
@@ -191,32 +260,6 @@ impl ConstraintSynthesizer<Fr> for MembershipCircuit {
         let secret = FpVar::new_witness(cs.clone(), || {
             self.secret.ok_or(SynthesisError::AssignmentMissing)
         })?;
-        let mut siblings = Vec::with_capacity(DEPTH);
-        for level in 0..DEPTH {
-            siblings.push(FpVar::new_witness(cs.clone(), || {
-                let p = self
-                    .path_elements
-                    .as_ref()
-                    .ok_or(SynthesisError::AssignmentMissing)?;
-                p.get(level)
-                    .copied()
-                    .ok_or(SynthesisError::AssignmentMissing)
-            })?);
-        }
-        // `Boolean::new_witness` emits the booleanity constraint, which is
-        // circom's `s * (1 - s) === 0`.
-        let mut bits = Vec::with_capacity(DEPTH);
-        for level in 0..DEPTH {
-            bits.push(Boolean::new_witness(cs.clone(), || {
-                let p = self
-                    .path_indices
-                    .as_ref()
-                    .ok_or(SynthesisError::AssignmentMissing)?;
-                p.get(level)
-                    .copied()
-                    .ok_or(SynthesisError::AssignmentMissing)
-            })?);
-        }
 
         // 1. Recompute the committed leaf.
         let commitment = hash_var(&[secret.clone(), action_hash, epoch.clone()])?;
@@ -225,20 +268,14 @@ impl ConstraintSynthesizer<Fr> for MembershipCircuit {
         let recomputed_nullifier = hash_var(&[secret, epoch])?;
         nullifier_hash.enforce_equal(&recomputed_nullifier)?;
 
-        // 3. Climb the inclusion path. `bit == true` means the running node is
-        //    the RIGHT child, so the sibling goes on the left - the same
-        //    convention as circom's `PathSelector` and as the on-chain
-        //    accumulator.
-        let mut cur = commitment;
-        for level in 0..DEPTH {
-            let sibling = &siblings[level];
-            let left = FpVar::conditionally_select(&bits[level], sibling, &cur)?;
-            let right = FpVar::conditionally_select(&bits[level], &cur, sibling)?;
-            cur = hash_var(&[left, right])?;
-        }
-        root.enforce_equal(&cur)?;
-
-        Ok(())
+        // 3. Climb the inclusion path.
+        enforce_inclusion(
+            cs,
+            &commitment,
+            &root,
+            self.path_elements.as_ref(),
+            self.path_indices.as_ref(),
+        )
     }
 }
 

@@ -218,7 +218,7 @@ mirror-pool/
     mirror-behaviors     # Behavior trait + pooled-action adapters[implemented]
     mirror-soak          # live Surfpool end-to-end soak suite    [implemented]
     mirror-ceremony      # multi-party Groth16 phase-2 ceremony   [implemented]
-    mirror-circuits      # arkworks-native membership + JoinSplit [implemented]
+    mirror-circuits      # arkworks-native: all three circuits    [implemented]
   circuits/              # Poseidon membership circuit + Groth16 setup [implemented]
   programs/
     mirror-pool          # on-chain Pinocchio program (SBF)       [implemented]
@@ -392,16 +392,17 @@ reasoning, and the set the ZK path actually gives, are in
   pre-committed beacon value, and exactly what 1-of-N honest does and does not give
   you.
 - [`docs/ARKWORKS.md`](docs/ARKWORKS.md) - the arkworks-native constraint-synthesis
-  path for the membership circuit AND the confidential-value JoinSplit: an
-  in-circuit Poseidon gadget, circomlib's `Num2Bits` / `Switcher` /
-  `ForceEqualIfEnabled` at circom's cost, a Groth16 setup and a proof with no
-  `circom` / `snarkjs` / `node` / `npm` anywhere, verified with the same
-  `groth16-solana` verifier the program links. Includes the measured constraint
-  comparison against the committed circom `.r1cs` files (5,363 vs 5,427 and
-  12,958 vs 13,098 multiplication rows, with both deltas itemized), the replay of
-  all three committed circom JoinSplit fixtures through the arkworks system with
-  identical public signals, the gadget-versus-`sol_poseidon` cross-check, and a
-  plain statement of what is still circom-only.
+  path for ALL THREE circuits (membership, the confidential-value JoinSplit, and
+  the opt-in association statement): an in-circuit Poseidon gadget, circomlib's
+  `Num2Bits` / `Switcher` / `ForceEqualIfEnabled` at circom's cost, a Groth16
+  setup and a proof with no `circom` / `snarkjs` / `node` / `npm` anywhere,
+  verified with the same `groth16-solana` verifier the program links. Includes
+  the measured constraint comparison against the circom `.r1cs` files (5,363 vs
+  5,427, 12,958 vs 13,098 and 10,224 vs 10,347 multiplication rows, every delta
+  itemized), the replay of all five committed circom proof fixtures through the
+  arkworks systems with identical public signals, the
+  gadget-versus-`sol_poseidon` cross-check, and a precise statement of what still
+  needs circom at build time.
 - [`docs/PROOF.md`](docs/PROOF.md) - the live Surfpool soak: both paths + the
   adversarial cases, with transaction signatures and on-chain assertions.
 - [`paper/mirror-pool.pdf`](paper/mirror-pool.pdf) - the design paper: the

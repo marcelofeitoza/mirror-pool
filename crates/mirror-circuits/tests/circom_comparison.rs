@@ -70,7 +70,7 @@ fn parse_r1cs(d: &[u8]) -> R1csShape {
     let n_pub_out = u32_at(d, p + 4);
     let n_pub_in = u32_at(d, p + 8);
     let n_prv_in = u32_at(d, p + 12);
-    assert_eq!(n_pub_out, 0, "membership declares no public outputs");
+    assert_eq!(n_pub_out, 0, "these circuits declare no public outputs");
     p += 16 + 8; // skip nLabels
     let n_constraints = u32_at(d, p);
 
@@ -159,6 +159,52 @@ fn circom_membership_r1cs_shape_is_what_the_docs_claim() {
         21 * circom_poseidon_rows(3) + circom_poseidon_rows(4) + selectors,
         shape.quadratic as usize,
         "the S-box accounting must explain every quadratic constraint"
+    );
+}
+
+/// The same, for the opt-in association circuit. It is the membership statement
+/// plus a SECOND depth-20 inclusion of the same commitment, so the accounting is
+/// membership's with one more `MerkleProof(20)`: 20 extra `Poseidon(2)` and 20
+/// extra `PathSelector`s, and one extra `===` (which is affine, so it lands in
+/// the linear column rather than the quadratic one).
+#[test]
+#[ignore = "needs the gitignored circom build artifact circuits/association.r1cs"]
+fn circom_association_r1cs_shape_is_what_the_docs_claim() {
+    let shape = read_shape("association");
+    println!("circom association.r1cs: {shape:?}");
+
+    assert_eq!(
+        shape,
+        R1csShape {
+            n_wires: 21_966,
+            n_pub_in: 5,
+            // secret + 20 pathElements + 20 pathIndices
+            //        + 20 assocPathElements + 20 assocPathIndices
+            n_prv_in: 81,
+            n_constraints: 21_922,
+            quadratic: 10_347,
+            linear: 11_575,
+        },
+        "the committed circom association circuit changed shape; docs/ARKWORKS.md is now stale"
+    );
+
+    // 41 Poseidon(2) (nullifier + 2 x 20 Merkle levels) at 3 constraints per
+    // S-box, 1 Poseidon(3), and 3 constraints per path selector on both trees,
+    // accounts for every quadratic row exactly.
+    let selectors = 2 * 3 * 20;
+    assert_eq!(
+        41 * circom_poseidon_rows(3) + circom_poseidon_rows(4) + selectors,
+        shape.quadratic as usize,
+        "the S-box accounting must explain every quadratic constraint"
+    );
+
+    // The membership half is literally the same rows: association is membership
+    // plus one MerkleProof(20), which is 20 Poseidon(2) and 20 PathSelectors.
+    let membership = read_shape("membership");
+    assert_eq!(
+        shape.quadratic as usize - membership.quadratic as usize,
+        20 * circom_poseidon_rows(3) + 3 * 20,
+        "the delta over membership must be exactly one more depth-20 inclusion"
     );
 }
 
