@@ -8,10 +8,9 @@
 //! `src/vk.rs`, `src/transaction_vk.rs`, `src/association_vk.rs`. Those files are
 //! copied verbatim from `circuits/artifacts/`, which the circuit build and the
 //! trusted setup produce; the digest is therefore a 32-byte commitment to the
-//! exact setup output, carried in the program's bytecode. The membership key is
-//! the output of a real phase-2 ceremony (see below); the transaction and
-//! association keys are still DEV-setup keys from
-//! `circuits/build_transaction.sh` and `circuits/build_association.sh`.
+//! exact setup output, carried in the program's bytecode. All three are now the
+//! output of a real phase-2 ceremony (see the per-constant provenance below); no
+//! DEV-setup key is pinned any more.
 //!
 //! # What it is for
 //!
@@ -41,25 +40,37 @@
 
 /// `src/vk.rs` - membership circuit, 4 public inputs, 769-byte encoding.
 ///
-/// This one pins a CEREMONY key: the phase-2 output recorded in
+/// A CEREMONY key: the phase-2 output recorded in
 /// `docs/ceremony-run/membership-deployed-transcript.json` (final transcript
 /// hash `884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05`).
-/// The other two below still pin DEV-setup keys.
+/// Unlike the two below, its beacon slot was chosen AFTER the contribution
+/// rather than pre-committed; `docs/CEREMONY.md` section 10.3 states that gap.
 pub const MEMBERSHIP_VK_SHA256: [u8; 32] = [
     0xbe, 0x5f, 0x77, 0x6d, 0x2a, 0x4b, 0xa8, 0x36, 0x55, 0xc5, 0x0a, 0x9e, 0xcf, 0x47, 0x19, 0x2c,
     0xd3, 0xaa, 0x74, 0x07, 0x5c, 0xd9, 0xe3, 0xd8, 0xa6, 0x2b, 0xd9, 0x9e, 0x04, 0x3e, 0x4c, 0x76,
 ];
 
 /// `src/transaction_vk.rs` - JoinSplit circuit, 7 public inputs, 961-byte encoding.
+///
+/// A CEREMONY key: the phase-2 output recorded in
+/// `docs/ceremony-run/transaction-deployed-transcript.json` (final transcript
+/// hash `6d0449341db0744509782a2249e3fd8182aa4bc228f3b2774312fefd81bbaa80`),
+/// closed on the beacon slot pre-committed in
+/// `docs/ceremony-run/BEACON-PRECOMMITMENT.md`.
 pub const TRANSACTION_VK_SHA256: [u8; 32] = [
-    0x9c, 0x31, 0x0a, 0x00, 0x68, 0xa7, 0x03, 0x6b, 0x1b, 0xbf, 0xba, 0xed, 0x59, 0xd5, 0x8c, 0x65,
-    0x74, 0x01, 0x54, 0xd6, 0xaf, 0xf4, 0x52, 0x9b, 0x73, 0x8e, 0xcf, 0xf8, 0xc7, 0x60, 0x12, 0x12,
+    0x4b, 0x54, 0x20, 0x99, 0xce, 0xa5, 0xbd, 0x4d, 0xfd, 0xfd, 0x6f, 0x9d, 0x5d, 0x64, 0x9b, 0xc2,
+    0x3a, 0xcd, 0x9a, 0xab, 0x35, 0xd8, 0xf3, 0xac, 0x1a, 0x98, 0x4e, 0x13, 0xb3, 0x8e, 0x28, 0xc1,
 ];
 
 /// `src/association_vk.rs` - association circuit, 5 public inputs, 833-byte encoding.
+///
+/// A CEREMONY key: the phase-2 output recorded in
+/// `docs/ceremony-run/association-deployed-transcript.json` (final transcript
+/// hash `5ef80404f6136cd2a9f843c57fe928c87200142f1a7d4c0ce181ff26f0808e1d`),
+/// closed on the same pre-committed beacon slot as the JoinSplit key.
 pub const ASSOCIATION_VK_SHA256: [u8; 32] = [
-    0x77, 0x03, 0x1f, 0xc7, 0x32, 0xe4, 0xbe, 0x82, 0xfb, 0xd2, 0xc7, 0x7c, 0xb2, 0x07, 0x6b, 0xf9,
-    0x2b, 0x4f, 0xdb, 0x1c, 0xe9, 0xa7, 0x4b, 0xf8, 0xcf, 0xa0, 0x85, 0x46, 0x4e, 0x3d, 0x23, 0xbd,
+    0x90, 0xd1, 0x35, 0x82, 0xab, 0xa2, 0x67, 0x08, 0x67, 0x2b, 0x3f, 0x11, 0x8d, 0xea, 0x34, 0x5c,
+    0x96, 0x36, 0x53, 0x4b, 0x1b, 0x9d, 0xe3, 0xfd, 0x7f, 0xce, 0x47, 0x08, 0x06, 0x28, 0x32, 0xee,
 ];
 
 #[cfg(test)]

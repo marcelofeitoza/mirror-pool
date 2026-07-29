@@ -365,6 +365,13 @@ fn committed_transfer_witness() -> TransactWitness {
 /// transaction zkey/wasm, for the TRANSFER witness. Gated behind
 /// MIRROR_PROVE_LIVE=1 and #[ignore] so CI without node/snarkjs/zkey still passes.
 ///
+/// SCOPE: this test is about the snarkjs shell-out and the byte serialization, not
+/// about trust. It proves under the `build_transaction.sh` DEV zkey and verifies
+/// against THAT zkey's own verifying key, exported into the work directory, rather
+/// than against the committed one. The deployed JoinSplit key is a phase-2
+/// CEREMONY key and the dev zkey cannot produce proofs under it; the ceremony path
+/// is covered by the test below.
+///
 /// Run with:
 ///   MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored transact_pipeline
 #[test]
@@ -375,20 +382,57 @@ fn transact_pipeline_generates_and_verifies_real_proof() {
         return;
     }
     let root = repo_root();
+    let wasm = root.join("circuits/transaction_js/transaction.wasm");
+    let zkey = root.join("circuits/transaction_final.zkey");
 
     // The committed TRANSFER witness (2 real inputs, publicAmount 0).
     let witness = committed_transfer_witness();
 
-    let opts = TransactProveOpts {
-        snarkjs: "snarkjs".to_string(),
-        use_snarkjs: true,
-        wasm: root.join("circuits/transaction_js/transaction.wasm"),
-        r1cs: root.join("circuits/transaction.r1cs"),
-        zkey: root.join("circuits/transaction_final.zkey"),
-        vk: root.join("circuits/artifacts/transaction_verification_key.json"),
-        work_dir: Some(std::env::temp_dir().join("mirror-cli-transact-live-test")),
-    };
-    let proof = prove_transact(&witness, &opts).expect("snarkjs must prove + verify the transfer");
+    let work = std::env::temp_dir().join("mirror-cli-transact-live-test");
+    std::fs::create_dir_all(&work).unwrap();
+
+    // The dev zkey's OWN verifying key (see SCOPE above).
+    let vk = work.join("dev_zkey_transaction_verification_key.json");
+    let (program, prefix) = crate::prove::snarkjs_command("snarkjs").unwrap();
+    let export = std::process::Command::new(&program)
+        .args(&prefix)
+        .args([
+            "zkey",
+            "export",
+            "verificationkey",
+            &zkey.to_string_lossy(),
+            &vk.to_string_lossy(),
+        ])
+        .output()
+        .expect("spawning snarkjs to export the dev zkey's verifying key");
+    assert!(
+        export.status.success() && vk.exists(),
+        "snarkjs zkey export verificationkey failed: {}{}",
+        String::from_utf8_lossy(&export.stdout),
+        String::from_utf8_lossy(&export.stderr)
+    );
+
+    let input = work.join("input.json");
+    std::fs::write(
+        &input,
+        serde_json::to_string_pretty(&witness.to_input_json()).unwrap(),
+    )
+    .unwrap();
+
+    let proof_path = work.join("proof.json");
+    let public_path = work.join("public.json");
+    crate::prove::run_fullprove("snarkjs", &input, &wasm, &zkey, &proof_path, &public_path)
+        .expect("snarkjs fullprove");
+    crate::prove::verify_proof("snarkjs", &vk, &public_path, &proof_path)
+        .expect("snarkjs verify must confirm OK");
+    cross_check_public(&public_path, &witness.public_inputs())
+        .expect("snarkjs public signals must equal the witness builder's");
+
+    let proof_json = std::fs::read_to_string(&proof_path).unwrap();
+    let proof = SnarkjsProof::parse(&proof_json)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
 
     // The proof serializes into a full Transact instruction (tag + body + blobs).
     let pi = witness.public_inputs();
@@ -412,6 +456,43 @@ fn transact_pipeline_generates_and_verifies_real_proof() {
         data.len(),
         1 + mirror_core::wire::TRANSACT_HEADER_LEN + 4 + 48 + 48
     );
+}
+
+/// The final transcript hash of the phase-2 ceremony the committed JoinSplit
+/// verifying key was exported from. Published in `docs/CEREMONY.md` and
+/// re-derivable from `docs/ceremony-run/transaction-deployed-transcript.json`.
+const DEPLOYED_TRANSACTION_TRANSCRIPT_HASH: &str =
+    "6d0449341db0744509782a2249e3fd8182aa4bc228f3b2774312fefd81bbaa80";
+
+/// The proving key that matches the COMMITTED JoinSplit verifying key.
+///
+/// The deployed transaction key is a phase-2 CEREMONY output, not a
+/// `build_transaction.sh` dev setup, so `circuits/transaction_final.zkey` no
+/// longer corresponds to `circuits/artifacts/transaction_vk.rs` and cannot
+/// produce a proof the program accepts. The matching proving key is the
+/// ceremony's head key. Like the zkey it is a multi-megabyte gitignored local
+/// artifact, so this live test needs the ceremony directory on disk; the
+/// transcript-hash assertion makes sure it is the RIGHT ceremony.
+fn deployed_transaction_proving_key(repo: &std::path::Path) -> PathBuf {
+    let dir = repo.join("ceremony/transaction");
+    assert!(
+        dir.join("transcript.json").exists(),
+        "MIRROR_PROVE_LIVE=1 was set, so this test must actually run, but the transaction \
+         ceremony directory {} is missing. It holds the proving key matching the committed \
+         verifying key and is gitignored (multi-megabyte key files); obtain it from the \
+         ceremony operator, or unset MIRROR_PROVE_LIVE to skip.",
+        dir.display()
+    );
+    let session =
+        mirror_ceremony::session::Session::open(&dir).expect("opening the transaction ceremony");
+    let report = session
+        .verify()
+        .expect("the transaction ceremony transcript must verify");
+    assert_eq!(
+        report.final_transcript_hash, DEPLOYED_TRANSACTION_TRANSCRIPT_HASH,
+        "this is not the ceremony the committed verifying key was exported from"
+    );
+    session.head_key_path()
 }
 
 /// The committed on-chain TRANSACTION verifying key (byte-for-byte the one
@@ -448,13 +529,15 @@ fn rust_transact_pipeline_verifies_and_on_chain_verifier_accepts() {
     // The committed TRANSFER witness (2 real inputs, publicAmount 0).
     let witness = committed_transfer_witness();
 
-    // Prove entirely in Rust (default path; use_snarkjs = false).
+    // Prove entirely in Rust (default path; use_snarkjs = false) under the CEREMONY
+    // key the committed verifying key was exported from.
     let opts = TransactProveOpts {
         snarkjs: "snarkjs".to_string(),
         use_snarkjs: false,
         wasm: root.join("circuits/transaction_js/transaction.wasm"),
         r1cs: root.join("circuits/transaction.r1cs"),
         zkey: root.join("circuits/transaction_final.zkey"),
+        proving_key: Some(deployed_transaction_proving_key(&root)),
         vk: root.join("circuits/artifacts/transaction_verification_key.json"),
         work_dir: None,
     };

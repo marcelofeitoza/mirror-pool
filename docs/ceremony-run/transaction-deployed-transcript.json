@@ -1,0 +1,118 @@
+{
+  "version": 2,
+  "circuit": "transaction",
+  "circuit_r1cs_digest": "908988ec0ee6626b7d8fd39892e12166b5ec75ef1a3a259b64bdc1a6c8990063",
+  "phase1": {
+    "digest": "1c401abb57c9ce531370f3015c3e75c0892e0f32b8b1e94ace0f6682d9695922",
+    "curve": "bn254",
+    "power": 16,
+    "ceremony_power": 28,
+    "contributions": 55,
+    "contributor_names": [
+      "weijie",
+      "kobi",
+      "poma",
+      "pepesha",
+      "amrullah",
+      "zac",
+      "youssef",
+      "mike",
+      "brecht",
+      "vano",
+      "zhiniang",
+      "daniel",
+      "kevin",
+      "weijie",
+      "anon0",
+      "aurel",
+      "philip",
+      "cody",
+      "petr",
+      "edu",
+      "rf",
+      "roman",
+      "shomari",
+      "vb",
+      "stefan",
+      "geoff",
+      "alex",
+      "dimitris",
+      "gustavo",
+      "anant",
+      "golem",
+      "josephc",
+      "oskar",
+      "igor",
+      "leonard",
+      "stefaan",
+      "chihcheng",
+      "james",
+      "wanseob",
+      "weitang",
+      "evan",
+      "vaibhav",
+      "albert",
+      "yingtong",
+      "ben",
+      "tkorwin",
+      "saravanan",
+      "tyler",
+      "jordi",
+      "weijie",
+      "joe",
+      "zaki",
+      "juan",
+      "jarrad",
+      "<beacon 0320e586fccaf245c9a1>"
+    ]
+  },
+  "initial_key_digest": "3f7eb98b3a72011d21e4af5b45eff1402007688c07770973a8dec4a6816e8beb",
+  "initial_delta_g1": "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002",
+  "initial_delta_g2": "198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c21800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa",
+  "contributions": [
+    {
+      "index": 0,
+      "contributor_id": "marcelo@mirror-pool",
+      "kind": {
+        "type": "entropy"
+      },
+      "provenance": {
+        "machine_fingerprint": "29a367e527147334187aedfaad027936",
+        "entropy_source": "os_plus_user",
+        "timestamp_unix": 1785284113
+      },
+      "prev_hash": "c46de501fd719f539d8276f79a531b58895d6f5be85b5b9ba4d5a94224795b76",
+      "new_delta_g1": "228c4a78ed11ef16f03351aa37bd02d16c5eb1f4bbd5c80e6546a6562bc1531d2ee134e0abfbf6def129146c2a6046f009eb85839820d43846132b7876a3b65a",
+      "new_delta_g2": "25ddba03adf9029a5aa60f172b941bf88e3a2eee2a411588e7830a72187269bc05add55b3076ba681e79dfaa76e73dda1ac398af090cc5a48d92cd44c11de2e725fe88d0b6c8cf48fcb53eb822e50cfd90ac08efcd3b0d2acdc771844e01b21f0dd4aa1e663e7442774a676137ec538e9b312f5d699aedfcde0bae998ebb70c6",
+      "new_key_digest": "0a5e8e2c91ae93990e7eb32e7dc7f4718c132c4c069badff5c7e3802bbaa2e1f",
+      "pok": {
+        "r": "21068a27f4de91ea21a7aec901823958b344a652ebd1a04a9ef1faa6cb15a23c18ba068c702ac15f595000163b03deac13efe55e6ebe07679eec02597cff7f00",
+        "z": "191cc131a0f22edd712f8a8e7c62c1c6c2f61aa5941b9521f83b6fca04285f4f"
+      },
+      "hash": "4e2073330814a912de9fd7854bd7a18d38ff9d265734d1120863ad74f9225d10"
+    },
+    {
+      "index": 1,
+      "contributor_id": "marcelo@mirror-pool",
+      "kind": {
+        "type": "beacon",
+        "source": "736f6c616e612d6d61696e6e65742d6265746120736c6f742034333538343636363120626c6f636b68617368203637593568785564587478637a714363466e516b63716d50584a554462537137794b46477168557a574c6748",
+        "iterations_exp": 20
+      },
+      "provenance": {
+        "machine_fingerprint": "29a367e527147334187aedfaad027936",
+        "entropy_source": "beacon",
+        "timestamp_unix": 1785285604
+      },
+      "prev_hash": "4e2073330814a912de9fd7854bd7a18d38ff9d265734d1120863ad74f9225d10",
+      "new_delta_g1": "10c90bd0a8021c8d58ec3f37368715e14d0e83bc28216ef92c87c62c027128481d8d2c72cfaee0e8b6ab331cb4714ecc742e6409dcd6f0ba7da549cf1997f973",
+      "new_delta_g2": "0da242e97d2945b97e7119238934e0dd07c99153583370967da01a4113435b2123881ba4ba1893c69929ef620c7703f0d9c4d924c347dd925d3e7c75fa6231ed2262bc6675b28f90f3842803609a52238d4eea4881a6690d9bd4c19dfd364b061393f1c37b5808b3ef1ceec38fa5c2e2ce09be0d699ed38df7ae457052676b63",
+      "new_key_digest": "63f1dc3c424587e40a89670f6d0d481acc311b791155e3e37f353fc89cd0f87d",
+      "pok": {
+        "r": "0ed04aa31896eee439ed571153a5f1c1b4ee9e9d5349ebe0b572a77cf35ee4da28891197c56f37688734ac7d2b06bc963b6a40036e1c0c844cdf11e0bb24c612",
+        "z": "221b8203ec8495dec2c1dab038a9c575826eace77006e68e5800c4a5ca097bf7"
+      },
+      "hash": "6d0449341db0744509782a2249e3fd8182aa4bc228f3b2774312fefd81bbaa80"
+    }
+  ]
+}

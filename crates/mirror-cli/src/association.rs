@@ -50,6 +50,11 @@ pub struct ProveAssociatedOpts {
     pub r1cs: PathBuf,
     /// Association proving key (gitignored build output).
     pub zkey: PathBuf,
+    /// A ceremony-produced proving key (`key_NNNN.mpk`). When set it REPLACES
+    /// `zkey` as the source of the proving key. The deployed association
+    /// verifying key is a ceremony output, so this is the path that produces
+    /// proofs the program accepts.
+    pub proving_key: Option<PathBuf>,
     /// Association verifying key JSON (only used by the `--use-snarkjs` fallback).
     pub vk: PathBuf,
     /// snarkjs invocation for the `--use-snarkjs` fallback.
@@ -197,6 +202,11 @@ pub fn run(opts: ProveAssociatedOpts) -> Result<SettleZkAssociatedEmit> {
     );
     let proof_bytes = if opts.use_snarkjs {
         prove_with_snarkjs(&opts, &input, &expected, &path.root)?
+    } else if let Some(mpk) = &opts.proving_key {
+        let key = mirror_ceremony::key::CeremonyKey::load(mpk)
+            .with_context(|| format!("loading ceremony proving key {}", mpk.display()))?;
+        crate::prove_rust::prove_with_key(&opts.wasm, &opts.r1cs, &key.pk, &input, &expected)
+            .context("in-process Rust Groth16 proving under a ceremony key (association circuit)")?
     } else {
         crate::prove_rust::prove(
             &crate::prove_rust::Artifacts {
@@ -209,6 +219,7 @@ pub fn run(opts: ProveAssociatedOpts) -> Result<SettleZkAssociatedEmit> {
         )
         .context("in-process Rust Groth16 proving (association circuit)")?
     };
+    check_against_committed_vk(&proof_bytes, &expected)?;
 
     // (5) Serialize into SettleZkAssociated instruction data.
     let data = groth16::settle_zk_associated_data(
@@ -346,6 +357,40 @@ pub fn association_public_inputs(
         epoch_be,
         *association_root,
     ]
+}
+
+/// The last check before a proof is emitted: does it verify under the key the
+/// PROGRAM will use?
+///
+/// Every earlier check passes even when the proving key is the wrong one, because
+/// a proof is verified against the key it was made under. The deployed association
+/// verifying key is a phase-2 ceremony output while `--zkey` still defaults to the
+/// dev key `build_association.sh` produces, which makes "prove under the wrong
+/// key" the easy mistake rather than an unlikely one.
+fn check_against_committed_vk(
+    bytes: &groth16::ProofBytes,
+    public_inputs: &[Hash32; wire::ASSOCIATION_N_PUBLIC_INPUTS],
+) -> Result<()> {
+    let vk = crate::vk::key_for(wire::CIRCUIT_ASSOCIATION)?;
+    let mut verifier = groth16_solana::groth16::Groth16Verifier::new(
+        &bytes.proof_a,
+        &bytes.proof_b,
+        &bytes.proof_c,
+        public_inputs,
+        vk,
+    )
+    .map_err(|e| anyhow!("constructing the on-chain verifier: {e:?}"))?;
+    verifier.verify().map_err(|_| {
+        anyhow!(
+            "this proof does NOT verify against the committed association verifying key, so the \
+             program would reject it on chain.\n\nThe usual cause is a proving-key mismatch: the \
+             deployed association key came from the phase-2 ceremony, while `--zkey` still \
+             defaults to the dev key that `bash circuits/build_association.sh` produces. Prove \
+             under the ceremony key instead:\n\n    --proving-key ceremony/association/key_NNNN.mpk\
+             \n\nSee docs/CEREMONY.md. Refusing to emit rather than let you pay to submit a proof \
+             that cannot land."
+        )
+    })
 }
 
 /// Legacy fallback: shell out to snarkjs `groth16 fullprove` + `verify` against

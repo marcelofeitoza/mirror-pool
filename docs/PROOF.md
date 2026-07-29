@@ -843,8 +843,12 @@ mirror-cli init-vk --circuit membership --dry-run \
 solana program dump EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq /tmp/onchain.so --url devnet
 cmp /tmp/onchain.so programs/mirror-pool/target/deploy/mirror_pool.so
 
-# 4. the vendored key equals the ceremony-exported artifact (header aside)
-diff <(tail -n +9 programs/mirror-pool/src/vk.rs) circuits/artifacts/vk.rs
+# 4. each vendored key equals the ceremony-exported artifact (comments aside:
+#    the vendored copy carries an extra PROVENANCE header)
+strip() { grep -v '^//' "$1" | awk 'NF || seen { seen = 1; print }'; }
+for c in vk transaction_vk association_vk; do
+  diff <(strip "programs/mirror-pool/src/$c.rs") <(strip "circuits/artifacts/$c.rs")
+done
 ```
 
 Not reproducible by a third party: the key-level ceremony checks (initial-key

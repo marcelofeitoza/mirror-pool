@@ -206,6 +206,57 @@ pub fn cli_bin() -> Result<PathBuf> {
     )
 }
 
+/// The HEAD proving key of a local phase-2 ceremony directory, e.g.
+/// `ceremony/transaction/key_0002.mpk`.
+///
+/// The deployed verifying keys are ceremony outputs, so a proof made under the
+/// `circuits/*_final.zkey` dev key cannot land. The soak therefore proves under
+/// the ceremony key, and this resolves which file that is: the highest-numbered
+/// `key_NNNN.mpk` in the directory. Key files are multi-megabyte and gitignored
+/// (only the transcript is published), exactly like the `.zkey`/`.wasm` the soak
+/// already requires, so a missing one is a setup error rather than a skip.
+///
+/// `MIRROR_<CIRCUIT>_PROVING_KEY` overrides the lookup for a ceremony directory
+/// kept somewhere else.
+pub fn ceremony_head_key(root: &Path, circuit: &str) -> Result<PathBuf> {
+    let env_var = format!("MIRROR_{}_PROVING_KEY", circuit.to_uppercase());
+    if let Ok(p) = std::env::var(&env_var) {
+        let p = PathBuf::from(p);
+        if !p.exists() {
+            bail!("{env_var} points at {}, which does not exist", p.display());
+        }
+        return Ok(p);
+    }
+    let dir = root.join("ceremony").join(circuit);
+    let mut best: Option<(u32, PathBuf)> = None;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Some(index) = name
+                .strip_prefix("key_")
+                .and_then(|s| s.strip_suffix(".mpk"))
+                .and_then(|s| s.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(b, _)| index > *b) {
+                best = Some((index, path));
+            }
+        }
+    }
+    match best {
+        Some((_, path)) => Ok(path),
+        None => bail!(
+            "no ceremony proving key found in {} (run the {circuit} ceremony as described in \
+             docs/CEREMONY.md, or set {env_var})",
+            dir.display()
+        ),
+    }
+}
+
 /// Resolve `bin` on PATH, or `None` if it is not installed.
 pub fn which(bin: &str) -> Option<String> {
     let out = Command::new("sh")

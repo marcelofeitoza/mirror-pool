@@ -174,8 +174,16 @@ struct TxProveArgs {
     #[arg(long, default_value = DEFAULT_TX_R1CS)]
     r1cs: PathBuf,
     /// Groth16 proving key (gitignored; `bash circuits/build_transaction.sh`).
+    /// This is the DEV setup key. The deployed JoinSplit verifying key came from
+    /// the phase-2 ceremony, so a proof made under this default is well-formed but
+    /// WILL be rejected on chain. Use `--proving-key` to land one.
     #[arg(long, default_value = DEFAULT_TX_ZKEY)]
     zkey: PathBuf,
+    /// Prove under a CEREMONY-produced key (`key_NNNN.mpk`) instead of `--zkey`.
+    /// This is the key the deployed program's verifying key was exported from, so
+    /// this is the flag that produces a proof the program accepts.
+    #[arg(long, conflicts_with = "use_snarkjs")]
+    proving_key: Option<PathBuf>,
     /// Groth16 verification key (committed under circuits/artifacts/). Only used by
     /// the `--use-snarkjs` fallback.
     #[arg(long, default_value = DEFAULT_TX_VK)]
@@ -205,6 +213,7 @@ impl TxProveArgs {
             wasm: self.wasm.clone(),
             r1cs: self.r1cs.clone(),
             zkey: self.zkey.clone(),
+            proving_key: self.proving_key.clone(),
             vk: self.vk.clone(),
             work_dir: self.work_dir.clone(),
         }
@@ -583,8 +592,14 @@ struct ProveAssociatedArgs {
     #[arg(long, default_value = DEFAULT_ASSOC_R1CS)]
     r1cs: PathBuf,
     /// Groth16 proving key (gitignored; `bash circuits/build_association.sh`).
+    /// This is the DEV setup key. The deployed association verifying key came from
+    /// the phase-2 ceremony, so a proof made under this default is well-formed but
+    /// WILL be rejected on chain. Use `--proving-key` to land one.
     #[arg(long, default_value = DEFAULT_ASSOC_ZKEY)]
     zkey: PathBuf,
+    /// Prove under a CEREMONY-produced key (`key_NNNN.mpk`) instead of `--zkey`.
+    #[arg(long, conflicts_with = "use_snarkjs")]
+    proving_key: Option<PathBuf>,
     /// Groth16 verification key (committed under circuits/artifacts/). Only used
     /// by the `--use-snarkjs` fallback.
     #[arg(long, default_value = DEFAULT_ASSOC_VK)]
@@ -1243,6 +1258,7 @@ fn run_prove_associated(args: ProveAssociatedArgs) -> Result<()> {
         wasm: args.wasm,
         r1cs: args.r1cs,
         zkey: args.zkey,
+        proving_key: args.proving_key,
         vk: args.vk,
         snarkjs: args.snarkjs,
         use_snarkjs,

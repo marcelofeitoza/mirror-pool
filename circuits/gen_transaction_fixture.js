@@ -310,6 +310,34 @@ async function main() {
 
   // ------------------------------------------------------- prove + verify ----
 
+  // Key-rotation escape hatch. When MIRROR_DUMP_INPUTS names a directory, write
+  // each case's circom input.json there and stop: no proving, no snarkjs, and
+  // nothing under artifacts/ is touched. The proofs are then produced under a
+  // CEREMONY proving key with
+  //
+  //   mirror-cli ceremony prove-fixture --dir ceremony/transaction \
+  //     --input <dir>/TRANSFER_input.json \
+  //     --expect-public-from artifacts/transaction_proof_fixture.json --out ...
+  //
+  // which re-checks that the rebuilt proof commits to exactly the public signals
+  // the committed fixture already published. That keeps ONE definition of these
+  // witnesses (this file) while letting the proving key move off the dev setup.
+  const dumpDir = process.env.MIRROR_DUMP_INPUTS;
+  if (dumpDir) {
+    fs.mkdirSync(dumpDir, { recursive: true });
+    for (const [name, built] of [
+      ["SHIELD", buildShield()],
+      ["TRANSFER", buildTransfer()],
+      ["UNSHIELD", buildUnshield()],
+    ]) {
+      const out = path.join(dumpDir, `${name}_input.json`);
+      fs.writeFileSync(out, JSON.stringify(built.input, null, 2) + "\n");
+      console.log(`wrote ${out}`);
+    }
+    console.log("\nMIRROR_DUMP_INPUTS set: wrote inputs only, proved nothing.");
+    process.exit(0);
+  }
+
   const vk = JSON.parse(fs.readFileSync(VK, "utf8"));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mp-tx-"));
 

@@ -70,6 +70,10 @@ pub enum CeremonyCommand {
     /// Prove the membership circuit under the ceremony key and verify the proof
     /// with the on-chain verifier. The decisive end-to-end check.
     ProveCheck(ProveCheckArgs),
+    /// Re-prove a committed proof fixture under the ceremony key, keeping its
+    /// public signals byte-identical. Used when a circuit's deployed key moves
+    /// from a dev setup to a ceremony output.
+    ProveFixture(ProveFixtureArgs),
 }
 
 #[derive(Args)]
@@ -77,7 +81,7 @@ pub struct StartArgs {
     /// Directory to create the ceremony in.
     #[arg(long)]
     dir: PathBuf,
-    /// Circuit label (`membership` or `transaction`).
+    /// Circuit label (`membership`, `transaction` or `association`).
     #[arg(long)]
     circuit: String,
     /// The compiled circuit. Only its SHA-256 is recorded, to pin the transcript.
@@ -245,6 +249,39 @@ pub struct ProveCheckArgs {
     out_dir: Option<PathBuf>,
 }
 
+/// `ceremony prove-fixture`: rebuild a committed `{proof, publicSignals}` fixture
+/// under this ceremony's key.
+///
+/// A fixture is a proof plus the public signals it commits to. When a circuit's
+/// deployed verifying key moves from a dev setup to a ceremony output, the old
+/// proof stops verifying, but the WITNESS behind it is unchanged and so are the
+/// public signals it produces. This command re-proves that same witness under the
+/// ceremony key and REQUIRES the resulting public signals to equal the ones the
+/// old fixture published, so "only the proof moved" is a checked claim rather
+/// than a promise.
+#[derive(Args)]
+pub struct ProveFixtureArgs {
+    /// The ceremony directory whose head key should produce the proof.
+    #[arg(long)]
+    dir: PathBuf,
+    /// Circuit witness generator (the circom build's `.wasm`).
+    #[arg(long)]
+    wasm: PathBuf,
+    /// Compiled R1CS (the circom build's `.r1cs`).
+    #[arg(long)]
+    r1cs: PathBuf,
+    /// The circom `input.json` for the witness to prove.
+    #[arg(long)]
+    input: PathBuf,
+    /// The fixture being replaced. Its `publicSignals` are what the new proof
+    /// must reproduce, element for element.
+    #[arg(long)]
+    expect_public_from: PathBuf,
+    /// Where to write the rebuilt `{proof, publicSignals}` fixture.
+    #[arg(long)]
+    out: PathBuf,
+}
+
 /// Dispatch.
 pub fn run(args: CeremonyArgs) -> Result<()> {
     match args.command {
@@ -257,6 +294,7 @@ pub fn run(args: CeremonyArgs) -> Result<()> {
         CeremonyCommand::ExportVk(a) => export_vk(a),
         CeremonyCommand::InspectPtau(a) => inspect_ptau(a),
         CeremonyCommand::ProveCheck(a) => prove_check(a),
+        CeremonyCommand::ProveFixture(a) => prove_fixture(a),
     }
 }
 
@@ -671,6 +709,140 @@ fn prove_check(args: ProveCheckArgs) -> Result<()> {
     Ok(())
 }
 
+fn prove_fixture(args: ProveFixtureArgs) -> Result<()> {
+    let session = Session::open(&args.dir)?;
+    let report = session.verify()?;
+    println!(
+        "ceremony verified: {} step(s), {} independent contributor(s), final transcript hash {}",
+        report.steps, report.independence.independent_contributors, report.final_transcript_hash
+    );
+    let key = session.load_head_key()?;
+    println!(
+        "proving under the ceremony key {}",
+        hexfmt::encode(&key.digest())
+    );
+
+    let input: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&args.input)
+            .with_context(|| format!("reading circuit input {}", args.input.display()))?,
+    )
+    .with_context(|| format!("parsing circuit input {}", args.input.display()))?;
+
+    // The public signals the OLD fixture published. Reproducing them is the whole
+    // contract of this command: same witness, same statement, new proof.
+    let previous: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&args.expect_public_from)
+            .with_context(|| format!("reading fixture {}", args.expect_public_from.display()))?,
+    )
+    .with_context(|| format!("parsing fixture {}", args.expect_public_from.display()))?;
+    let signals = previous
+        .get("publicSignals")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            anyhow!(
+                "{} has no publicSignals array",
+                args.expect_public_from.display()
+            )
+        })?;
+    let expected: Vec<mirror_core::Hash32> = signals
+        .iter()
+        .map(|s| {
+            let dec = s
+                .as_str()
+                .ok_or_else(|| anyhow!("publicSignals entries must be decimal strings"))?;
+            crate::groth16::to_be32(dec)
+        })
+        .collect::<Result<_>>()?;
+
+    let generated = crate::prove_rust::prove_with_key_full(
+        &args.wasm, &args.r1cs, &key.pk, &input, &expected,
+    )
+    .context(
+        "proving the fixture witness under the ceremony key (the cross-check against the old \
+             fixture's public signals runs inside this step)",
+    )?;
+    println!(
+        "public signals reproduced: {} signal(s) identical to {}",
+        expected.len(),
+        args.expect_public_from.display()
+    );
+
+    // The decisive check: the EXACT on-chain verifier, over the key a deployment
+    // would embed.
+    onchain_verify(&key, &generated.bytes, &expected)?;
+
+    let fixture = serde_json::json!({
+        "proof": {
+            "pi_a": generated.snarkjs.pi_a,
+            "pi_b": generated.snarkjs.pi_b,
+            "pi_c": generated.snarkjs.pi_c,
+            "protocol": "groth16",
+            "curve": "bn128",
+        },
+        "publicSignals": signals,
+    });
+    write_out(
+        &args.out,
+        &(serde_json::to_string_pretty(&fixture).context("serializing fixture")? + "\n"),
+    )?;
+    println!("wrote {}", args.out.display());
+    println!();
+    println!("PASS: the on-chain groth16-solana verifier accepts this rebuilt fixture under the");
+    println!("      ceremony-exported verifying key, on the same public signals as before.");
+    Ok(())
+}
+
+/// Run the EXACT on-chain verifier a deployment would run, over the verifying key
+/// exported from `key`.
+///
+/// `groth16-solana` fixes the public-input count in the verifier's type, so the
+/// arm is selected by the length the circuit actually produced. The three lengths
+/// below are the three circuits this repo deploys (membership 4, association 5,
+/// JoinSplit 7); anything else is a circuit this command has never seen and is
+/// refused rather than silently truncated.
+fn onchain_verify(
+    key: &CeremonyKey,
+    proof: &crate::groth16::ProofBytes,
+    public: &[mirror_core::Hash32],
+) -> Result<()> {
+    use groth16_solana::groth16::{Groth16Verifier, Groth16Verifyingkey};
+
+    let vk_bytes = vk_export::solana_bytes(&key.pk.vk);
+    let ic: &'static [[u8; 64]] = Box::leak(vk_bytes.ic.clone().into_boxed_slice());
+    let vk = Groth16Verifyingkey {
+        nr_pubinputs: vk_bytes.nr_pubinputs,
+        vk_alpha_g1: vk_bytes.alpha_g1,
+        vk_beta_g2: vk_bytes.beta_g2,
+        vk_gamme_g2: vk_bytes.gamma_g2,
+        vk_delta_g2: vk_bytes.delta_g2,
+        vk_ic: ic,
+    };
+
+    macro_rules! verify_n {
+        ($n:literal) => {{
+            let inputs: [mirror_core::Hash32; $n] = public
+                .try_into()
+                .expect("length checked by the match arm above");
+            let mut verifier =
+                Groth16Verifier::new(&proof.proof_a, &proof.proof_b, &proof.proof_c, &inputs, &vk)
+                    .map_err(|e| anyhow!("constructing the on-chain verifier: {e:?}"))?;
+            verifier.verify().map_err(|e| {
+                anyhow!("the on-chain groth16-solana verifier REJECTED the proof: {e:?}")
+            })
+        }};
+    }
+
+    match public.len() {
+        4 => verify_n!(4),
+        5 => verify_n!(5),
+        7 => verify_n!(7),
+        other => Err(anyhow!(
+            "no on-chain verifier arm for a circuit with {other} public inputs (this repo deploys \
+             4, 5 and 7)"
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // printing
 // ---------------------------------------------------------------------------
@@ -808,6 +980,13 @@ fn default_public_inputs(circuit: &str) -> Vec<String> {
             "inputNullifier[1]",
             "outputCommitment[0]",
             "outputCommitment[1]",
+        ],
+        "association" => &[
+            "root",
+            "nullifierHash",
+            "actionHash",
+            "epoch",
+            "associationRoot",
         ],
         _ => &[],
     };

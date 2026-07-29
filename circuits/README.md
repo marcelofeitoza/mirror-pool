@@ -261,14 +261,29 @@ cd programs/mirror-pool && cargo build-sbf && cargo test
 
 **3. The vendored program-side keys match the `artifacts/` copies.** The program
 embeds its own copies so the deployed `.so` is self-contained; they must not
-diverge:
+diverge.
+
+All three vendored copies now carry a leading PROVENANCE comment block that names
+the ceremony the key came from, so a plain `diff` reports a difference on a tree
+that is perfectly consistent. Compare the CODE, ignoring comment lines, which is
+the property that actually matters (every line of either file is either a `//`
+comment or part of the key):
 
 ```bash
-diff programs/mirror-pool/src/transaction_vk.rs circuits/artifacts/transaction_vk.rs
-diff programs/mirror-pool/src/association_vk.rs circuits/artifacts/association_vk.rs
-# vk.rs is the same bytes with a 5-line vendoring header prepended:
-diff <(tail -n +6 programs/mirror-pool/src/vk.rs) circuits/artifacts/vk.rs
+# drop comment lines, then any blank lines they left at the top
+strip() { grep -v '^//' "$1" | awk 'NF || seen { seen = 1; print }'; }
+for c in vk transaction_vk association_vk; do
+  diff <(strip "programs/mirror-pool/src/$c.rs") <(strip "circuits/artifacts/$c.rs") \
+    && echo "$c: vendored copy matches the artifact"
+done
 ```
+
+The comment-insensitive form is deliberate and is the check to quote: it does not
+break when a header grows a line, and it cannot hide a key change, because the key
+is not in a comment. `programs/mirror-pool/src/vk_digest.rs` pins the SHA-256 of
+each key's canonical encoding, and `digests_match_the_vendored_keys` recomputes all
+three from the vendored modules, so a divergence that somehow survived this diff
+still fails the test suite.
 
 ### Why extracting `merkle.circom` did not disturb the membership key
 

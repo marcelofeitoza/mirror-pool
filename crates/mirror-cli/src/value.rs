@@ -243,6 +243,11 @@ pub struct TransactProveOpts {
     /// Compiled R1CS (gitignored build output), needed by the in-process Rust prover.
     pub r1cs: PathBuf,
     pub zkey: PathBuf,
+    /// A ceremony-produced proving key (`key_NNNN.mpk` from `ceremony contribute`
+    /// / `ceremony beacon`). When set it REPLACES `zkey` as the source of the
+    /// proving key. The deployed JoinSplit verifying key is a ceremony output, so
+    /// this is the path that produces proofs the program accepts.
+    pub proving_key: Option<PathBuf>,
     pub vk: PathBuf,
     pub work_dir: Option<PathBuf>,
 }
@@ -258,13 +263,26 @@ pub fn prove_transact(
     opts: &TransactProveOpts,
 ) -> Result<groth16::ProofBytes> {
     witness.check_balanced()?;
-    if opts.use_snarkjs {
-        prove_transact_snarkjs(witness, opts)
+    let expected = witness.public_inputs();
+    let bytes = if opts.use_snarkjs {
+        prove_transact_snarkjs(witness, opts)?
+    } else if let Some(mpk) = &opts.proving_key {
+        // In-process Rust proving under a CEREMONY key.
+        let key = mirror_ceremony::key::CeremonyKey::load(mpk)
+            .with_context(|| format!("loading ceremony proving key {}", mpk.display()))?;
+        crate::prove_rust::prove_with_key(
+            &opts.wasm,
+            &opts.r1cs,
+            &key.pk,
+            &witness.to_input_json(),
+            &expected,
+        )
+        .context("in-process Rust Groth16 proving under a ceremony key (transaction circuit)")?
     } else {
         // In-process Rust proving. `prove_rust::prove` computes the witness by
         // running the compiled transaction.wasm under wasmer, reads the proving key
-        // from transaction_final.zkey, proves + verifies with ark-groth16, and
-        // cross-checks the circuit's 7 public signals against the witness's.
+        // from the `.zkey`, proves + verifies with ark-groth16, and cross-checks
+        // the circuit's 7 public signals against the witness's.
         crate::prove_rust::prove(
             &crate::prove_rust::Artifacts {
                 wasm: &opts.wasm,
@@ -272,10 +290,47 @@ pub fn prove_transact(
                 zkey: &opts.zkey,
             },
             &witness.to_input_json(),
-            &witness.public_inputs(),
+            &expected,
         )
-        .context("in-process Rust Groth16 proving (transaction circuit)")
-    }
+        .context("in-process Rust Groth16 proving (transaction circuit)")?
+    };
+    check_against_committed_vk(&bytes, &expected)?;
+    Ok(bytes)
+}
+
+/// The last check before a proof is emitted: does it verify under the key the
+/// PROGRAM will use?
+///
+/// Every earlier check passes even when the proving key is the wrong one, because
+/// a proof is verified against the key it was made under. The deployed JoinSplit
+/// verifying key is a phase-2 ceremony output while `--zkey` still defaults to the
+/// dev key `build_transaction.sh` produces, which makes "prove under the wrong
+/// key" the easy mistake rather than an unlikely one. Refusing here costs nothing;
+/// finding out on chain costs a submitted transaction.
+fn check_against_committed_vk(
+    bytes: &groth16::ProofBytes,
+    public_inputs: &[Hash32; wire::TRANSACT_N_PUBLIC_INPUTS],
+) -> Result<()> {
+    let vk = crate::vk::key_for(wire::CIRCUIT_TRANSACTION)?;
+    let mut verifier = groth16_solana::groth16::Groth16Verifier::new(
+        &bytes.proof_a,
+        &bytes.proof_b,
+        &bytes.proof_c,
+        public_inputs,
+        vk,
+    )
+    .map_err(|e| anyhow!("constructing the on-chain verifier: {e:?}"))?;
+    verifier.verify().map_err(|_| {
+        anyhow!(
+            "this proof does NOT verify against the committed JoinSplit verifying key, so the \
+             program would reject it on chain.\n\nThe usual cause is a proving-key mismatch: the \
+             deployed transaction key came from the phase-2 ceremony, while `--zkey` still \
+             defaults to the dev key that `bash circuits/build_transaction.sh` produces. Prove \
+             under the ceremony key instead:\n\n    --proving-key ceremony/transaction/key_NNNN.mpk\
+             \n\nSee docs/CEREMONY.md. Refusing to emit rather than let you pay to submit a proof \
+             that cannot land."
+        )
+    })
 }
 
 /// Legacy fallback: shell out to snarkjs `groth16 fullprove` + `verify` (needs Node).

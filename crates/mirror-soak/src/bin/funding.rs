@@ -68,10 +68,11 @@ use mirror_coordinator::{
 };
 use mirror_core::{commit as core_commit, ActionClass, Epoch, Secret, SizeBucket};
 use mirror_soak::{
-    airdrop, begin_proof_section, checks_table, cli_bin, clone_keypair, commit_ix, first_line,
-    hex_decode, init_pool_ix, install_vk, lamports, load_keypair, new_keypair, note_is_spendable,
-    parse_kv, pool_pda, read_vpool, repo_root, run_cli, run_cli_expect_fail, send, sigs_table,
-    value_pool_pda, value_vault_pda, wait_until_slot, write_lines, Report, DEFAULT_RPC_URL,
+    airdrop, begin_proof_section, ceremony_head_key, checks_table, cli_bin, clone_keypair,
+    commit_ix, first_line, hex_decode, init_pool_ix, install_vk, lamports, load_keypair,
+    new_keypair, note_is_spendable, parse_kv, pool_pda, read_vpool, repo_root, run_cli,
+    run_cli_expect_fail, send, sigs_table, value_pool_pda, value_vault_pda, wait_until_slot,
+    write_lines, Report, DEFAULT_RPC_URL,
 };
 
 use solana_instruction::AccountMeta;
@@ -329,8 +330,12 @@ async fn main() -> Result<()> {
     let cli = cli_bin()?;
     let wasm = root.join("circuits/transaction_js/transaction.wasm");
     let r1cs = root.join("circuits/transaction.r1cs");
-    let zkey = root.join("circuits/transaction_final.zkey");
-    for (label, p) in [("wasm", &wasm), ("r1cs", &r1cs), ("zkey", &zkey)] {
+    // The DEPLOYED JoinSplit verifying key is a phase-2 ceremony output, so the
+    // soak proves under the ceremony proving key. A proof made under the
+    // `circuits/transaction_final.zkey` dev key is well-formed and would be
+    // rejected on chain.
+    let proving_key = ceremony_head_key(&root, "transaction")?;
+    for (label, p) in [("wasm", &wasm), ("r1cs", &r1cs)] {
         if !p.exists() {
             bail!(
                 "confidential circuit artifact missing: {label} at {} (build with `bash circuits/build_transaction.sh`)",
@@ -340,7 +345,7 @@ async fn main() -> Result<()> {
     }
     let wasm_s = wasm.to_string_lossy().to_string();
     let r1cs_s = r1cs.to_string_lossy().to_string();
-    let zkey_s = zkey.to_string_lossy().to_string();
+    let pk_s = proving_key.to_string_lossy().to_string();
 
     println!("mirror-soak-funding: funding-round end-to-end soak against Surfpool");
     println!("  rpc:          {}", args.rpc_url);
@@ -540,8 +545,8 @@ async fn main() -> Result<()> {
                 &wasm_s,
                 "--r1cs",
                 &r1cs_s,
-                "--zkey",
-                &zkey_s,
+                "--proving-key",
+                &pk_s,
                 "--out",
                 &emit_path.to_string_lossy(),
             ],
@@ -656,8 +661,8 @@ async fn main() -> Result<()> {
                 &wasm_s,
                 "--r1cs",
                 &r1cs_s,
-                "--zkey",
-                &zkey_s,
+                "--proving-key",
+                &pk_s,
                 "--out",
                 &emit_path.to_string_lossy(),
             ],
@@ -1085,8 +1090,8 @@ async fn main() -> Result<()> {
             &wasm_s,
             "--r1cs",
             &r1cs_s,
-            "--zkey",
-            &zkey_s,
+            "--proving-key",
+            &pk_s,
         ],
     );
     report.check(
@@ -1153,7 +1158,7 @@ async fn main() -> Result<()> {
             &mut blobs,
             &wasm_s,
             &r1cs_s,
-            &zkey_s,
+            &pk_s,
             tx_profile,
             &mut report,
         )
@@ -1226,7 +1231,7 @@ async fn run_failure_case(
     blobs: &mut Vec<String>,
     wasm_s: &str,
     r1cs_s: &str,
-    zkey_s: &str,
+    pk_s: &str,
     tx_profile: TxProfile,
     report: &mut Report,
 ) -> Result<()> {
@@ -1261,8 +1266,8 @@ async fn run_failure_case(
                 wasm_s,
                 "--r1cs",
                 r1cs_s,
-                "--zkey",
-                zkey_s,
+                "--proving-key",
+                pk_s,
                 "--out",
                 &emit_path.to_string_lossy(),
             ],
@@ -1333,8 +1338,8 @@ async fn run_failure_case(
                 wasm_s,
                 "--r1cs",
                 r1cs_s,
-                "--zkey",
-                zkey_s,
+                "--proving-key",
+                pk_s,
                 "--out",
                 &emit_path.to_string_lossy(),
             ],

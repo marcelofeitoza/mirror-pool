@@ -378,7 +378,13 @@ pub fn run(opts: ProveOpts) -> Result<SettleZkEmit> {
     // to here passes, and it is only rejected on chain after the user has paid to
     // submit it. Verifying here against the SAME key the program pins turns that
     // into a local error with a name.
-    check_against_committed_vk(&proof_bytes, &path.root, &nullifier_hash, &action_hash, note.epoch)?;
+    check_against_committed_vk(
+        &proof_bytes,
+        &path.root,
+        &nullifier_hash,
+        &action_hash,
+        note.epoch,
+    )?;
 
     // (5) Serialize into SettleZk instruction data.
     let data = groth16::settle_zk_data(
@@ -1330,8 +1336,9 @@ mod tests {
         );
 
         // The guard is the only thing standing between that and a wasted fee.
-        let err = check_against_committed_vk(&proof_bytes, &root, &nullifier_hash, &action_hash, epoch)
-            .expect_err("a dev-key proof MUST be refused against the committed ceremony key");
+        let err =
+            check_against_committed_vk(&proof_bytes, &root, &nullifier_hash, &action_hash, epoch)
+                .expect_err("a dev-key proof MUST be refused against the committed ceremony key");
         let msg = format!("{err}");
         assert!(
             msg.contains("does NOT verify against the committed membership verifying key"),

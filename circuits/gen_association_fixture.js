@@ -188,6 +188,22 @@ async function main() {
   console.log("  pool leaves       =", poolLeaves.length, "(ours at", POOL_LEAF_INDEX + ")");
   console.log("  assoc leaves      =", assocLeaves.length, "(ours at", ASSOC_LEAF_INDEX + ")");
 
+  // Key-rotation escape hatch. When MIRROR_DUMP_INPUTS names a directory, write
+  // the circom input.json there and stop: no proving, no snarkjs, and nothing
+  // under artifacts/ is touched. The proof is then produced under a CEREMONY
+  // proving key with `mirror-cli ceremony prove-fixture`, which re-checks that
+  // the rebuilt proof commits to exactly the public signals the committed
+  // fixture already published. One definition of this witness stays here.
+  const dumpDir = process.env.MIRROR_DUMP_INPUTS;
+  if (dumpDir) {
+    fs.mkdirSync(dumpDir, { recursive: true });
+    const out = path.join(dumpDir, "ASSOCIATION_input.json");
+    fs.writeFileSync(out, JSON.stringify(input, null, 2) + "\n");
+    console.log(`\nwrote ${out}`);
+    console.log("MIRROR_DUMP_INPUTS set: wrote the input only, proved nothing.");
+    process.exit(0);
+  }
+
   const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WASM, ZKEY);
 
   console.log("\npublicSignals (order emitted by snarkjs):");

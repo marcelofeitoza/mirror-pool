@@ -50,10 +50,11 @@ use clap::Parser;
 use mirror_coordinator::client::{RpcSolanaClient, SolanaClient};
 use mirror_coordinator::{submit_transact, TxProfile, ValueTransactRequest};
 use mirror_soak::{
-    begin_proof_section, checks_table, cli_bin, first_line, fund, hex_decode, install_vk,
-    is_custom, lamports, new_keypair, note_is_spendable, parse_kv, read_vpool, repo_root, run_cli,
-    run_cli_expect_fail, sigs_table, value_nullifier_pda, value_pool_pda, value_vault_pda, which,
-    write_lines, write_report_json, Report, DEFAULT_RPC_URL, SYSTEM_PROGRAM_ID,
+    begin_proof_section, ceremony_head_key, checks_table, cli_bin, first_line, fund, hex_decode,
+    install_vk, is_custom, lamports, new_keypair, note_is_spendable, parse_kv, read_vpool,
+    repo_root, run_cli, run_cli_expect_fail, sigs_table, value_nullifier_pda, value_pool_pda,
+    value_vault_pda, which, write_lines, write_report_json, Report, DEFAULT_RPC_URL,
+    SYSTEM_PROGRAM_ID,
 };
 
 use solana_instruction::AccountMeta;
@@ -220,12 +221,17 @@ async fn main() -> Result<()> {
     let cli = cli_bin()?;
     let snarkjs = which("snarkjs").unwrap_or_else(|| "snarkjs".to_string());
     let wasm = root.join("circuits/transaction_js/transaction.wasm");
-    let zkey = root.join("circuits/transaction_final.zkey");
+    let r1cs = root.join("circuits/transaction.r1cs");
     let vk = root.join("circuits/artifacts/transaction_verification_key.json");
+    // The DEPLOYED JoinSplit verifying key is a phase-2 ceremony output, so the
+    // soak proves under the ceremony proving key. A proof made under the
+    // `circuits/transaction_final.zkey` dev key is well-formed and would be
+    // rejected on chain.
+    let proving_key = ceremony_head_key(&root, "transaction")?;
     let wasm_s = wasm.to_string_lossy().to_string();
-    let zkey_s = zkey.to_string_lossy().to_string();
+    let pk_s = proving_key.to_string_lossy().to_string();
     let vk_s = vk.to_string_lossy().to_string();
-    for (label, p) in [("wasm", &wasm), ("zkey", &zkey), ("vk", &vk)] {
+    for (label, p) in [("wasm", &wasm), ("r1cs", &r1cs), ("vk", &vk)] {
         if !p.exists() {
             bail!(
                 "confidential circuit artifact missing: {label} at {} (build with `bash circuits/build_transaction.sh`)",
@@ -435,8 +441,8 @@ async fn main() -> Result<()> {
             &notes_dir.to_string_lossy(),
             "--wasm",
             &wasm_s,
-            "--zkey",
-            &zkey_s,
+            "--proving-key",
+            &pk_s,
             "--vk",
             &vk_s,
             "--snarkjs",
@@ -580,8 +586,8 @@ async fn main() -> Result<()> {
             &notes_dir.to_string_lossy(),
             "--wasm",
             &wasm_s,
-            "--zkey",
-            &zkey_s,
+            "--proving-key",
+            &pk_s,
             "--vk",
             &vk_s,
             "--snarkjs",
@@ -738,8 +744,8 @@ async fn main() -> Result<()> {
             &notes_dir.to_string_lossy(),
             "--wasm",
             &wasm_s,
-            "--zkey",
-            &zkey_s,
+            "--proving-key",
+            &pk_s,
             "--vk",
             &vk_s,
             "--snarkjs",
@@ -821,8 +827,8 @@ async fn main() -> Result<()> {
             &notes_dir.to_string_lossy(),
             "--wasm",
             &wasm_s,
-            "--zkey",
-            &zkey_s,
+            "--proving-key",
+            &pk_s,
             "--vk",
             &vk_s,
             "--snarkjs",
@@ -904,8 +910,8 @@ async fn main() -> Result<()> {
             &notes_dir.to_string_lossy(),
             "--wasm",
             &wasm_s,
-            "--zkey",
-            &zkey_s,
+            "--proving-key",
+            &pk_s,
             "--vk",
             &vk_s,
             "--snarkjs",
