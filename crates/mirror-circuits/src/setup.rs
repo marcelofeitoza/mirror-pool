@@ -1,4 +1,4 @@
-//! Groth16 setup, proving, and constraint accounting for the arkworks circuit.
+//! Groth16 setup, proving, and constraint accounting for the arkworks circuits.
 //!
 //! Everything in this module is Rust: no `circom` compile step, no `snarkjs`
 //! phase-2, no `node`, no `npm install`. The trade is the usual one - a
@@ -19,6 +19,9 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, SynthesisErro
 use ark_snark::SNARK;
 use ark_std::rand::{CryptoRng, RngCore};
 
+use crate::association::{
+    AssociationCircuit, AssociationWitness, N_PUBLIC_INPUTS as ASSOCIATION_N_PUBLIC_INPUTS,
+};
 use crate::membership::{MembershipCircuit, MembershipWitness, N_PUBLIC_INPUTS};
 use crate::transaction::{
     TransactionCircuit, TransactionWitness, N_PUBLIC_INPUTS as TRANSACTION_N_PUBLIC_INPUTS,
@@ -64,6 +67,11 @@ pub fn shape(witness: &MembershipWitness) -> Result<(Shape, bool), SynthesisErro
 
 /// Synthesize the JoinSplit circuit and report its shape.
 pub fn transaction_shape(witness: &TransactionWitness) -> Result<(Shape, bool), SynthesisError> {
+    shape_of(witness.circuit.clone())
+}
+
+/// Synthesize the association circuit and report its shape.
+pub fn association_shape(witness: &AssociationWitness) -> Result<(Shape, bool), SynthesisError> {
     shape_of(witness.circuit.clone())
 }
 
@@ -136,6 +144,42 @@ pub fn transaction_prove<R: RngCore + CryptoRng>(
 pub fn transaction_verify(
     vk: &VerifyingKey<Bn254>,
     public_inputs: &[Fr; TRANSACTION_N_PUBLIC_INPUTS],
+    proof: &Proof<Bn254>,
+) -> Result<bool, SynthesisError> {
+    let pvk = Groth16::<Bn254>::process_vk(vk)?;
+    Groth16::<Bn254>::verify_with_processed_vk(&pvk, public_inputs, proof)
+}
+
+/// Run a single-party Groth16 setup over the association circuit.
+///
+/// The same trust statement as [`setup`]: NOT a ceremony, and nothing here
+/// should secure value. See the module docs.
+pub fn association_setup<R: RngCore + CryptoRng>(
+    rng: &mut R,
+) -> Result<ProvingKey<Bn254>, SynthesisError> {
+    let (pk, _vk) = Groth16::<Bn254>::circuit_specific_setup(AssociationCircuit::blank(), rng)?;
+    Ok(pk)
+}
+
+/// Prove an association witness under `pk`, and verify the proof in-process
+/// against `pk.vk` before returning it, for the same reason [`prove`] does.
+pub fn association_prove<R: RngCore + CryptoRng>(
+    pk: &ProvingKey<Bn254>,
+    witness: &AssociationWitness,
+    rng: &mut R,
+) -> Result<Proof<Bn254>, SynthesisError> {
+    let proof = Groth16::<Bn254>::prove(pk, witness.circuit.clone(), rng)?;
+    if !association_verify(&pk.vk, &witness.public_inputs, &proof)? {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    Ok(proof)
+}
+
+/// Verify an association proof with arkworks' own verifier (the in-process
+/// cross-check; the on-chain verifier is exercised separately in `tests/`).
+pub fn association_verify(
+    vk: &VerifyingKey<Bn254>,
+    public_inputs: &[Fr; ASSOCIATION_N_PUBLIC_INPUTS],
     proof: &Proof<Bn254>,
 ) -> Result<bool, SynthesisError> {
     let pvk = Groth16::<Bn254>::process_vk(vk)?;

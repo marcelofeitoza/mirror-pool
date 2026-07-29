@@ -5,6 +5,8 @@
 //! Also pins the shape of the constraint system and the cross-check vector the
 //! on-chain accumulator test reproduces with the `sol_poseidon` syscall.
 
+use std::str::FromStr;
+
 use ark_bn254::{Bn254, Fr};
 use ark_groth16::VerifyingKey;
 use groth16_solana::groth16::{Groth16Verifier, Groth16Verifyingkey};
@@ -13,6 +15,11 @@ use mirror_circuits::onchain;
 use mirror_circuits::poseidon::hash_native;
 use mirror_circuits::setup;
 use rand::SeedableRng;
+use serde_json::Value;
+
+// The committed circom artifacts, embedded so the cross-check is hermetic.
+const META: &str = include_str!("../../../circuits/artifacts/fixture_meta.json");
+const FIXTURE: &str = include_str!("../../../circuits/artifacts/proof_fixture.json");
 
 /// A deterministic RNG so a failing run is reproducible. Setup randomness is the
 /// Groth16 toxic waste; a fixed seed is correct for a test and catastrophic for
@@ -73,6 +80,62 @@ pub const CROSS_CHECK_LEAF_HEX: &str =
     "17f05ec0329a0f4379a258bdb21ea7bcf77d18f8b29e938de4107000cbe29e47";
 pub const CROSS_CHECK_ROOT_HEX: &str =
     "17eb8b099a02413857616f6707ae037e92f08aa788d501f49da9a78a67b6a7c2";
+
+/// The equivalence check against the COMMITTED circom fixture.
+///
+/// `circuits/gen_fixture.js` built `proof_fixture.json` from constants that are
+/// published in that script: secret `1111...9999`, epoch 7, leaf index 21
+/// (`0b10101`, so both path-index bits are exercised) in an otherwise-empty
+/// depth-20 tree, recipient `0x01..0x20`, amount 0.25 SOL. Rebuilding that
+/// witness here and requiring the arkworks system to be SATISFIED by it and to
+/// derive the SAME four public signals snarkjs emitted is the same check the
+/// JoinSplit and association fixtures get.
+///
+/// The public-input ORDER is read from the committed `fixture_meta.json`, not
+/// restated, so a circom-side reorder fails this test.
+#[test]
+fn arkworks_agrees_with_the_committed_circom_fixture() {
+    let meta: Value = serde_json::from_str(META).expect("meta json");
+    assert_eq!(
+        meta["publicInputOrder"],
+        serde_json::json!(["root", "nullifierHash", "actionHash", "epoch"])
+    );
+    let n_public = meta["nPublic"].as_u64().expect("nPublic") as usize;
+    assert_eq!(n_public, 4);
+
+    // The scenario, exactly as `gen_fixture.js` fixes it.
+    let secret = Fr::from_str("111122223333444455556666777788889999").expect("secret");
+    let mut recipient = [0u8; 32];
+    for (i, b) in recipient.iter_mut().enumerate() {
+        *b = (i + 1) as u8;
+    }
+    let action_hash = fr_from_be(&mirror_core::transfer_action_hash(&recipient, 250_000_000));
+    // A single leaf in an otherwise-empty tree: every sibling is the zero ladder.
+    let witness =
+        MembershipWitness::new(secret, action_hash, 7, 21, &zero_ladder()).expect("witness");
+
+    let (shape, satisfied) = setup::shape(&witness).expect("synthesis");
+    assert!(
+        satisfied,
+        "the arkworks system must accept the witness circom accepted"
+    );
+    assert_eq!(shape.instance_variables, n_public);
+
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture json");
+    let expected: Vec<Fr> = fixture["publicSignals"]
+        .as_array()
+        .expect("publicSignals array")
+        .iter()
+        .map(|s| Fr::from_str(s.as_str().expect("decimal string")).expect("field element"))
+        .collect();
+    assert_eq!(expected.len(), n_public, "fixture shape");
+    for (i, want) in expected.iter().enumerate() {
+        assert_eq!(
+            &witness.public_inputs[i], want,
+            "public signal {i} disagrees with the committed circom fixture"
+        );
+    }
+}
 
 /// The measured shape of the arkworks constraint system, pinned so a change in
 /// the gadget or the statement cannot silently move the number
