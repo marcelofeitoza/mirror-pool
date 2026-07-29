@@ -337,14 +337,20 @@ transaction  9c310a0068a7036b1bbfbaed59d58c65740154d6aff4529b738ecff8c7601212
 association  77031fc732e4be82fbd2c77cb2076bf92b4fdb1ce9a74bf8cfa085464e3d23bd
 ```
 
-> **This run predates the membership ceremony.** The membership digest above is
-> the one for the old dev-setup key. The membership verifying key has since been
-> replaced by the phase-2 ceremony output (`docs/CEREMONY.md`), so the constant in
-> `vk_digest.rs` is now
-> `be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76`. The
-> transaction and association digests are unchanged. The transcript above is left
-> exactly as captured; nothing else about the mechanism changed, and the
-> write-once behaviour it demonstrates is the same.
+> **This run predates all three ceremonies.** Every digest above is one of the old
+> dev-setup keys. All three verifying keys have since been replaced by phase-2
+> ceremony outputs (`docs/CEREMONY.md`), so the constants in `vk_digest.rs` are now
+>
+> ```text
+> membership   be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76
+> transaction  4b542099cea5bd4dfdfd6f9d5d649bc23acd9aab35d8f3ac1a984e13b38e28c1
+> association  90d13582aba26708672b3f118dea345c9636534b1b9de3fd7fce4708062832ee
+> ```
+>
+> The transcript above is left exactly as captured; nothing else about the
+> mechanism changed, and the write-once behaviour it demonstrates is the same.
+> Those three digests ARE what the deployed devnet program pins today, and the
+> live registries hold exactly them (`docs/PROOF.md`).
 
 Re-running `init-vk` for `membership` against the live registry failed on-chain
 with `custom program error: 0x1c` (28, `VkRegistryAlreadyInitialized`), after

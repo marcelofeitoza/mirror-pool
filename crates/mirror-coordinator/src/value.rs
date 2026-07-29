@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use solana_hash::Hash;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
-use solana_message::{v0, VersionedMessage};
+use solana_message::{v0, AddressLookupTableAccount, VersionedMessage};
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
@@ -65,17 +65,40 @@ impl ValueTransactRequest {
 
 /// Build the v0 message for a Transact: normalized ComputeBudget (limit + price)
 /// then the `Transact` instruction, with `fee_payer` (the relay authority) as the
-/// transaction fee payer. No Address Lookup Table: a Transact's accounts are
-/// per-settlement (the two nullifier PDAs change every time), so they stay static.
+/// transaction fee payer, and no Address Lookup Table.
+///
+/// A Transact is close to the 1232-byte packet limit, because the instruction
+/// carries a 256-byte proof, seven 32-byte public inputs and two encrypted-note
+/// blobs. Whether it fits without a lookup table depends on how many accounts the
+/// deployed program's `Transact` takes; since the verifying key moved into a
+/// registry account it takes one more, which is enough to push the shield case
+/// over. Use [`build_transact_message_with_luts`] when it does not fit.
 pub fn build_transact_message(
     fee_payer: &Pubkey,
     req: &ValueTransactRequest,
     recent_blockhash: Hash,
 ) -> Result<VersionedMessage> {
+    build_transact_message_with_luts(fee_payer, req, recent_blockhash, &[])
+}
+
+/// As [`build_transact_message`], resolving any account that appears in one of
+/// `luts` through that table instead of inlining its 32 bytes.
+///
+/// Only the accounts that are the SAME for every Transact against a pool belong
+/// in a table: the program, the value pool, its vault, the verifying-key registry
+/// and the system program. The two nullifier PDAs change every settlement and the
+/// signers cannot be looked up at all, so they stay inline. That is exactly the
+/// same shape the crowd path already uses ([`crate::crowd::setup_pool_alt`]).
+pub fn build_transact_message_with_luts(
+    fee_payer: &Pubkey,
+    req: &ValueTransactRequest,
+    recent_blockhash: Hash,
+    luts: &[AddressLookupTableAccount],
+) -> Result<VersionedMessage> {
     let mut instructions = Vec::with_capacity(3);
     instructions.extend(compute_budget_instructions(&req.tx_profile));
     instructions.push(req.instruction());
-    let message = v0::Message::try_compile(fee_payer, &instructions, &[], recent_blockhash)
+    let message = v0::Message::try_compile(fee_payer, &instructions, luts, recent_blockhash)
         .context("compile transact message")?;
     Ok(VersionedMessage::V0(message))
 }
@@ -92,8 +115,21 @@ pub async fn submit_transact(
     req: &ValueTransactRequest,
     extra_signers: &[&Keypair],
 ) -> Result<Signature> {
+    submit_transact_with_luts(client, relay, req, extra_signers, &[]).await
+}
+
+/// As [`submit_transact`], compressing the pool's static accounts through
+/// `luts`. Needed wherever the inline form would exceed the 1232-byte packet
+/// limit; see [`build_transact_message_with_luts`].
+pub async fn submit_transact_with_luts(
+    client: &dyn SolanaClient,
+    relay: &Keypair,
+    req: &ValueTransactRequest,
+    extra_signers: &[&Keypair],
+    luts: &[AddressLookupTableAccount],
+) -> Result<Signature> {
     let blockhash = client.get_latest_blockhash().await?;
-    let message = build_transact_message(&relay.pubkey(), req, blockhash)?;
+    let message = build_transact_message_with_luts(&relay.pubkey(), req, blockhash, luts)?;
 
     // The relay signs first (fee payer + authority), then any extra co-signers.
     let mut signers: Vec<&Keypair> = Vec::with_capacity(1 + extra_signers.len());

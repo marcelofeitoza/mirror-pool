@@ -53,9 +53,9 @@ use mirror_core::{
     Nullifier, Secret, SizeBucket,
 };
 use mirror_soak::{
-    airdrop, checks_table, cli_bin, clone_keypair, commit_ix, first_line, fund, hex_decode,
-    init_pool_ix, install_vk, is_custom, new_keypair, parse_kv, pool_pda, repo_root, run_cli, send,
-    sigs_table, wait_until_slot, which, write_report_json, Report, CLOCK_SYSVAR_ID,
+    airdrop, ceremony_head_key, checks_table, cli_bin, clone_keypair, commit_ix, first_line, fund,
+    hex_decode, init_pool_ix, install_vk, is_custom, new_keypair, parse_kv, pool_pda, repo_root,
+    run_cli, send, sigs_table, wait_until_slot, which, write_report_json, Report, CLOCK_SYSVAR_ID,
     DEFAULT_RPC_URL, SYSTEM_PROGRAM_ID,
 };
 
@@ -341,9 +341,13 @@ async fn main() -> Result<()> {
     report.check(
         "membership verifying key published into its write-once registry PDA",
         !sig.is_empty(),
-        format!("init_vk signature={sig}"),
+        format!("init_vk: {sig}"),
     );
-    report.sig("init_vk_membership", &sig);
+    // Only a real publication has a signature to record; an idempotent
+    // "already published" run has nothing to link to.
+    if !sig.starts_with("already published") {
+        report.sig("init_vk_membership", &sig);
+    }
 
     let pool_acc = client
         .get_account(&pool)
@@ -631,6 +635,10 @@ async fn main() -> Result<()> {
     println!("== 4. ZK opt-in path (deposit-commit -> prove -> SettleZk) ==");
     let cli = cli_bin()?;
     let snarkjs = which("snarkjs").unwrap_or_else(|| "snarkjs".to_string());
+    // The proving key matching the DEPLOYED membership verifying key: the head
+    // key of the phase-2 ceremony, not the dev zkey.
+    let membership_key = ceremony_head_key(&root, "membership")?;
+    let membership_key_s = membership_key.to_string_lossy().to_string();
 
     let depositor = new_keypair(&keys_dir, "zk-depositor")?;
     fund(&args.rpc_url, &depositor.pubkey(), 5, 100_000_000)?;
@@ -705,6 +713,12 @@ async fn main() -> Result<()> {
             &args.rpc_url,
             "--snarkjs",
             &snarkjs,
+            // The DEPLOYED membership verifying key is a phase-2 ceremony
+            // output, so the proof has to be made under the ceremony proving
+            // key. A proof made under the `circuits/membership_final.zkey` dev
+            // key is well-formed and the program rejects it.
+            "--proving-key",
+            &membership_key_s,
             "--out",
             &emit_path.to_string_lossy(),
             "--accept-thin-set",

@@ -415,6 +415,12 @@ pub fn run_cli_expect_fail(cli: &Path, cwd: &Path, args: &[&str]) -> Result<Stri
 /// circuit it will use. Nothing here is a choice: the program hashes the bytes
 /// and accepts only the key its bytecode pins, so this is publication, not
 /// configuration. See docs/VK_REGISTRY.md.
+///
+/// Idempotent, because the registry is per-PROGRAM and not per-pool: a second run
+/// against the same program id finds the key already published. `init-vk` handles
+/// that by reading the account back and confirming it holds exactly the committed
+/// key, so it returns success with no signature to report; a registry holding a
+/// DIFFERENT key still fails, which is the case worth stopping on.
 pub fn install_vk(
     cli: &Path,
     cwd: &Path,
@@ -438,7 +444,17 @@ pub fn install_vk(
             &payer_path.to_string_lossy(),
         ],
     )?;
-    Ok(parse_kv(&out, "signature:").unwrap_or_default().to_string())
+    // A fresh publication prints `signature: <sig>`; an idempotent no-op prints
+    // `already published: ...`. Both mean the registry now holds exactly the
+    // committed key, which is the property the caller asserts, so report which
+    // one happened rather than returning an empty string that reads as a failure.
+    if let Some(sig) = parse_kv(&out, "signature:") {
+        return Ok(sig);
+    }
+    if out.contains("already published") {
+        return Ok("already published (registry holds exactly the committed key)".to_string());
+    }
+    bail!("init-vk for {circuit} neither published nor reported an existing key:\n{out}")
 }
 
 /// Pull the value of a `key: value` line out of CLI output.

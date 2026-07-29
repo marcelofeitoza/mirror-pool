@@ -86,13 +86,14 @@ use mirror_core::{
 };
 use solana_instruction::AccountMeta;
 use solana_keypair::Keypair;
+use solana_message::AddressLookupTableAccount;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
 
 use crate::client::SolanaClient;
 use crate::config::TxProfile;
-use crate::value::{submit_transact, ValueTransactRequest};
+use crate::value::{submit_transact_with_luts, ValueTransactRequest};
 
 /// The account index the ValuePool authority (the relay) occupies in a
 /// `Transact` account list. Fixed by the on-chain program's account order.
@@ -122,7 +123,9 @@ pub const DEFAULT_ROUND_SLOTS: u64 = 150;
 pub const DEFAULT_MIN_ROUND_SIZE: usize = 4;
 
 /// Configuration for the funding-round batcher.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// No longer `Copy`: `lookup_tables` owns its addresses.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FundingRoundConfig {
     /// Round length in slots. Every withdrawal accepted in `[r*n, (r+1)*n)` is
     /// released together at slot `(r+1)*n`.
@@ -136,6 +139,13 @@ pub struct FundingRoundConfig {
     /// participant's withdrawal amount is public and distinctive: the batcher
     /// still hides arrival order, but it cannot hide the amount, and it says so.
     pub denomination: Option<u64>,
+    /// Address lookup tables the release transactions may resolve accounts
+    /// through. Empty means "inline every account", which is only viable while a
+    /// Transact still fits in a 1232-byte packet; since the verifying key moved
+    /// into a registry account the instruction takes one more account, so a
+    /// deployment generally needs the pool's static accounts in a table here.
+    /// This changes packing only: the same instruction, the same signers.
+    pub lookup_tables: Vec<AddressLookupTableAccount>,
 }
 
 impl Default for FundingRoundConfig {
@@ -144,6 +154,7 @@ impl Default for FundingRoundConfig {
             round_slots: DEFAULT_ROUND_SLOTS,
             min_round_size: DEFAULT_MIN_ROUND_SIZE,
             denomination: None,
+            lookup_tables: Vec::new(),
         }
     }
 }
@@ -665,7 +676,15 @@ impl FundingRounds {
                         break;
                     }
                 };
-                match submit_transact(client, relay, &request.transact, &[]).await {
+                match submit_transact_with_luts(
+                    client,
+                    relay,
+                    &request.transact,
+                    &[],
+                    &self.config.lookup_tables,
+                )
+                .await
+                {
                     Ok(signature) => {
                         signatures.push(signature);
                         requests[i] = None;
@@ -783,6 +802,7 @@ mod tests {
             round_slots: 100,
             min_round_size: 3,
             denomination,
+            lookup_tables: Vec::new(),
         }
     }
 

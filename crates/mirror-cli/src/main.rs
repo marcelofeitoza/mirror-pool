@@ -53,7 +53,7 @@ mod value;
 mod value_note;
 mod vk;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use mirror_core::{ActionClass, Epoch, Hash32, Secret, SizeBucket};
 use sha2::{Digest, Sha256};
@@ -1011,9 +1011,34 @@ fn run_init_vk(args: InitVkArgs) -> Result<()> {
         return Ok(());
     }
 
+    let chain = Chain::new(args.chain.rpc_url);
+
+    // The registry is WRITE-ONCE, and publication is permissionless, so "someone
+    // already published it" is a normal outcome rather than an error - a soak
+    // driver, a second operator, or a re-run all reach it. Resubmitting would
+    // fail with VkRegistryAlreadyInitialized and say nothing about whether the
+    // key in force is the right one, which is the question that actually
+    // matters. So read the account and compare its stored bytes against the
+    // committed key: identical means the publication step is DONE, and anything
+    // else is a real problem worth stopping on.
+    if let Some(stored) = chain
+        .vk_registry_bytes(&registry, circuit_id, canonical.len())
+        .context("reading the verifying-key registry account")?
+    {
+        if stored == canonical {
+            println!("already published: the registry holds exactly this key; nothing to do");
+            return Ok(());
+        }
+        bail!(
+            "registry {registry} already holds a DIFFERENT key (sha256 {}). The registry is \
+             write-once and there is no update instruction, so this program id cannot be made to \
+             accept the committed key. Deploy to a fresh program id.",
+            vk::digest(&stored)
+        );
+    }
+
     let payer_kp = chain::read_keypair(&args.payer)?;
     let ix = chain::init_vk_ix(&program_id, &payer_kp.pubkey(), circuit_id, &canonical);
-    let chain = Chain::new(args.chain.rpc_url);
     let sig = chain
         .submit(&[ix], &[&payer_kp])
         .context("submitting InitVk")?;

@@ -74,8 +74,9 @@ funding leg is library code plus a CLI that emits a request: it is not wired int
 running service and has never been soaked, and we label it as such. Everything else
 is deployed and browser-verifiable on public devnet (program
 \code{Eez\-Wd\-Frm\-HtR2\-PCuuc\-Uruvkgy\-B9HW3\-w2Ksk\-ZNeY\-mX\-szBq}),
-with two live soaks passing $17/17$ behavioral and $25/25$ confidential on-chain
-assertions, backed by $262$ host tests and $99$ on-chain program tests.
+with two live soaks passing $18/18$ behavioral and $27/27$ confidential on-chain
+assertions against exactly the bytecode deployed there, backed by $302$ host tests
+and $121$ on-chain program tests.
 \end{abstract}
 
 \section{Introduction}
@@ -748,25 +749,45 @@ by the initial key's verifying key. \code{snarkjs groth16 verify} accepts the sa
 the exported \code{verification\_key.json}.
 
 \paragraph{What has been done, and what has not.} The ceremony has been \emph{run}
-for the \textbf{membership} circuit, and the committed and deployed membership
-verifying key is its output. It was opened over the same public 55-contribution
+for \textbf{all three} circuits, and every committed and deployed verifying key is
+a ceremony output. Each was opened over the same public 55-contribution
 powers-of-tau, contributed to once with OS randomness plus user entropy, and closed
-with the Solana mainnet-beta blockhash at slot \code{435825712}
-(\code{9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu}), giving final transcript hash
-\code{884c8860\ldots 7a9cdd05}; the transcript is published in the repository at
-\code{docs/ceremony-run/mem\-ber\-ship-deployed-transcript.json} and re-verifies from
-that file alone with the beacon value supplied. The devnet program was upgraded in
-place to bytecode pinning that key's SHA-256.
+with a Solana mainnet-beta blockhash. No dev-setup key is deployed. All three
+transcripts are published in the repository under \code{docs/ceremony-run/} and
+re-verify from those files alone with the beacon values supplied; the devnet program
+was upgraded in place to bytecode pinning their SHA-256 digests.
 
-Two things it does not buy, stated plainly. It had \textbf{one} independent
-contributor, so the 1-of-N honest assumption reduces to that single party having
-destroyed their scalar; and the beacon slot was chosen \emph{after} the contribution
-rather than announced in advance, so while the value is public and was unpredictable
-before its slot existed, a verifier cannot rule out that a favourable block was
-selected. Run without the beacon value, \code{ceremony verify} reports
-\code{beacon pre-commitment: NOT supplied} rather than implying the check ran. The
-\textbf{JoinSplit} and \textbf{association} keys still come from the insecure dev
-setup (Section~\ref{sec:limits}).
+\begin{center}
+\small
+\begin{tabular}{@{}llcl@{}}
+\toprule
+\textbf{circuit} & \textbf{beacon slot} & \textbf{pre-committed?} & \textbf{final transcript hash} \\
+\midrule
+membership  & 435825712 & no  & \code{884c8860\ldots 7a9cdd05} \\
+transaction & 435846661 & \textbf{yes} & \code{6d044934\ldots 81bbaa80} \\
+association & 435846661 & \textbf{yes} & \code{5ef80404\ldots f0808e1d} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The \emph{pre-committed} column is the part that matters, and the two answers are
+not averaged together. A beacon only removes the last contributor's ability to
+grind the final key if its source was fixed before the value could be known;
+otherwise the operator can wait and close on whichever of several candidate blocks
+suits them. For the JoinSplit and association ceremonies the source was fixed
+first: \code{docs/ceremony-run/BEACON-PRECOMMITMENT.md} was written and pushed at
+slot \code{435842661}, naming slot \code{435846661} and the exact source string,
+roughly 25 minutes before that block existed. The slot was produced
+(\code{67Y5hxUd\ldots zWLgH}), so the commitment was honoured as written rather than
+falling back to a later slot. The membership ceremony ran earlier and chose its
+slot \emph{after} its contribution, so for that key a verifier can confirm the last
+step is the announced beacon but cannot rule out that a favourable block was
+selected. Run without a beacon value at all, \code{ceremony verify} reports
+\code{beacon pre-commitment: NOT supplied} rather than implying the check ran.
+
+What none of the three buys is a distributed trust assumption: each has
+\textbf{one} independent contributor, so 1-of-N honest reduces to that single party
+having destroyed their scalar (Section~\ref{sec:limits}).
 
 \section{Evaluation: public devnet deployment}
 \label{sec:eval}
@@ -780,19 +801,20 @@ would on mainnet, without spending mainnet SOL. The SHA-256 of the on-chain
 program bytes equals the SHA-256 of the locally built \code{mirror\_pool.so}, so
 the deployed program is exactly the source in this repository.
 
-\paragraph{Which bytecode the tables belong to.} The program at that address has
-since been \emph{upgraded in place} (signature \code{58gKGUdv\ldots FWHm}, slot
-\code{479600717}) to the current build, and the dumped on-chain bytes are again
-byte-for-byte the local \code{mirror\_pool.so}. The current build differs from the
-one the tables below were captured against in three ways: verifying keys now live in
+\paragraph{Which bytecode the tables belong to.} The program at that address was
+\emph{upgraded in place} (signature \code{27Hg4jV8\ldots VLbF}, slot
+\code{479622920}) to the current build, the dumped on-chain bytes are byte-for-byte
+the local \code{mirror\_pool.so} (SHA-256 \code{5b8cfdc0\ldots 4c3fa7d93}), and both
+soaks were then \emph{re-run against it}. Every signature and CU figure below
+therefore describes the program a reviewer inspects on the Explorer today. That
+build carries three things the pre-registry one did not: verifying keys live in
 write-once, digest-pinned accounts instead of compile-time constants; the ZK escrow
-is domain-separated from the crowd leaf and bound to a fixed denomination; and the
-membership verifying key is the ceremony key of Section~\ref{sec:ceremony}. The
-soaks have \emph{not} been re-run against devnet since that upgrade, so every
-signature and CU figure below is a record of the earlier bytecode at the same
-address, and none of it is evidence about the registry, the escrow fix, or the
-ceremony key. The evidence for those three is the on-chain program test suite built
-from this source.
+is domain-separated from the crowd leaf and bound to a fixed denomination; and all
+three verifying keys are the ceremony keys of Section~\ref{sec:ceremony}. Assertion
+counts moved with it, from $17$ to $18$ and from $25$ to $27$: the added rows are
+the verifying-key publication and, on the confidential side, the address lookup
+table that keeps a \code{Transact} inside one $1232$-byte packet now that the
+instruction carries the registry account.
 
 \begin{itemize}[leftmargin=1.4em,itemsep=0.1em]
   \item \textbf{Program id:} \code{EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq}\\
@@ -804,7 +826,7 @@ from this source.
         \href{https://explorer.solana.com/tx/2r6mo2YrDtjJP8bnVqRJXaVDgVLkxaAmtKAHvgkwYvWb8rchvd63QinFqbmuj5Gk2Se8M9g9ajcCkC5R6QNprtyv?cluster=devnet}{tx 2r6m\ldots rtyv}
 \end{itemize}
 
-\subsection{Behavioral soak: crowd $+$ ZK settlement ($17/17$)}
+\subsection{Behavioral soak: crowd $+$ ZK settlement ($18/18$)}
 
 A fresh pool per run (\code{epoch\_slots}$=128$, \code{k\_floor}$=3$,
 \code{entry\_fee}$=10^6$ lamports, \code{reward\_bps}$=2500$). Four participants
@@ -818,7 +840,8 @@ fail closed on-chain: under-floor no-settle (\code{BelowKFloor}, custom error
 \code{0x2}), duplicate nullifier (\code{NullifierSpent}, \code{0x3}), re-settle
 (\code{EpochAlreadySettled}, \code{0x6}), mismatched recipient
 (\code{ActionHashMismatch}, \code{0xe}), and ZK replay (\code{NullifierSpent}).
-All $17/17$ assertions passed.
+All $18/18$ assertions passed, the eighteenth being the publication of the
+membership verifying key into its write-once registry.
 
 \begin{table}[h]
 \centering
@@ -827,18 +850,19 @@ All $17/17$ assertions passed.
 \toprule
 \textbf{flow} & \textbf{CU} & \textbf{flow} & \textbf{CU} \\
 \midrule
-\code{init\_pool}          & 21{,}766 & \code{underfloor\_commit}   & 39{,}499 \\
-\code{crowd\_commit} (x4)  & 39{,}647 to 41{,}006 & \code{crowd\_settle}        & 21{,}111 \\
-\code{zk\_deposit\_commit} & 42{,}447 & \code{zk\_settle} (Groth16) & 102{,}115 \\
+\code{init\_pool}          & 20{,}461 & \code{underfloor\_commit}   & 43{,}467 to 44{,}824 \\
+\code{crowd\_commit} (x4)  & 38{,}959 to 40{,}331 & \code{crowd\_settle}        & 18{,}733 \\
+\code{zk\_deposit\_commit} & 40{,}957 & \code{zk\_settle} (Groth16) & 106{,}101 \\
 \bottomrule
 \end{tabular}
 \caption{Measured compute units per behavioral flow, finalized devnet
 transactions. The on-chain Groth16 membership verification (\code{zk\_settle})
-runs in about 102K CU, comfortably inside a transaction's budget alongside the
-settlement work.}
+runs in about 106K CU, comfortably inside a transaction's budget alongside the
+settlement work. Publishing the membership verifying key (\code{init\_vk}) costs
+$5{,}472$ CU, once per deployment.}
 \end{table}
 
-\subsection{Confidential-value soak: shield / transfer / unshield ($25/25$)}
+\subsection{Confidential-value soak: shield / transfer / unshield ($27/27$)}
 
 Fresh pools per run: a main ValuePool and a fixed-denomination ValuePool
 ($10^7$ lamports). Amounts: shield $5\times10^7$, hidden transfer $2\times10^7$,
@@ -853,7 +877,9 @@ and debits the vault by exactly the withdrawn amount; a wrong-denomination depos
 is rejected on-chain (\code{DenominationMismatch}, \code{0x17}) and refused
 client-side; a mutated public input is rejected (\code{ProofVerificationFailed},
 \code{0xc}); and conservation holds ($\text{vault} = \text{baseline} +
-\text{net deposit} - \text{net withdrawal}$). All $25/25$ assertions passed.
+\text{net deposit} - \text{net withdrawal}$). All $27/27$ assertions passed; the
+two beyond the previous $25$ are the verifying-key publication and the lookup
+table that keeps a \code{Transact} inside one packet.
 
 \begin{table}[h]
 \centering
@@ -862,23 +888,24 @@ client-side; a mutated public input is rejected (\code{ProofVerificationFailed},
 \toprule
 \textbf{flow} & \textbf{CU} & \textbf{flow} & \textbf{CU} \\
 \midrule
-\code{init\_value\_pool\_main}  & 28{,}964 & \code{transfer} (JoinSplit) & 197{,}616 \\
-\code{init\_value\_pool\_denom} & 33{,}503 & \code{unshield} (JoinSplit) & 202{,}843 \\
-\code{shield} (JoinSplit)       & 196{,}837 & \code{denom\_shield\_exact}  & 197{,}077 \\
+\code{init\_value\_pool\_main}  & 24{,}476 & \code{transfer} (JoinSplit) & 193{,}946 \\
+\code{init\_value\_pool\_denom} & 23{,}015 & \code{unshield} (JoinSplit) & 195{,}713 \\
+\code{shield} (JoinSplit)       & 198{,}587 & \code{denom\_shield\_exact}  & 205{,}407 \\
 \bottomrule
 \end{tabular}
 \caption{Measured compute units per confidential flow, finalized devnet
 transactions. Each 2-in/2-out JoinSplit (7 public inputs) verifies on-chain in
-about 197K to 203K CU.}
+about 194K to 205K CU. Publishing the JoinSplit verifying key (\code{init\_vk})
+costs $4{,}108$ CU, once per deployment.}
 \end{table}
 
 \paragraph{Test suite.} Beyond the two live soaks, the repository ships
-\textbf{264 host tests} (\code{cargo test --workspace}, covering the Poseidon
+\textbf{302 host tests} (\code{cargo test --workspace}, covering the Poseidon
 scheme cross-check against the circuit, the wire layout, \code{KAnon} accounting,
 the coordinator batching, $k$-floor and funding-round logic, ECIES notes, the
-trusted-setup ceremony, and the effective-$k$ and funding-model functions; $11$
-further tests are environment-gated and skipped by default) and \textbf{105
-on-chain program tests} (mollusk integration tests plus in-crate unit tests).
+trusted-setup ceremony including the three deployed transcripts, and the
+effective-$k$ and funding-model functions; $13$ further tests are
+environment-gated and skipped by default) and \textbf{121 on-chain program tests} (mollusk integration tests plus in-crate unit tests).
 \code{cargo build-sbf} is green and \code{cargo check --workspace} passes.
 
 \section{Honest limitations}
@@ -888,21 +915,21 @@ A privacy tool that is vague about its non-goals is a trap. We list what still
 leaks and what we do not claim.
 
 \begin{itemize}[leftmargin=1.4em,itemsep=0.15em]
-  \item \textbf{One of three deployed trusted setups is a real ceremony; the other
-        two are dev/test.} The \textbf{membership} key deployed here is the output
-        of a real phase-2 ceremony over a public 55-contribution powers-of-tau,
+  \item \textbf{All three deployed trusted setups are real ceremonies, each with
+        ONE independent contributor.} Every deployed verifying key is the output of
+        a phase-2 ceremony over the same public 55-contribution powers-of-tau,
         closed by a Solana mainnet-beta blockhash beacon
-        (Section~\ref{sec:ceremony}). It had \textbf{one} independent contributor
-        and its beacon slot was not pre-announced, so it is a real ceremony with a
-        single point of trust rather than a distributed one: safe only if that one
-        party destroyed their scalar. The \textbf{JoinSplit} and
-        \textbf{association} keys came from a single-contributor, reproducible dev
-        setup whose phase-2 entropy is a hard-coded public string, so their toxic
-        waste is public. Those two verify and the program pins them, but the system
-        MUST NOT secure real value until a ceremony output is exported for each and
-        the program redeployed with it, and the membership key should be re-run with
-        external contributors and a pre-announced beacon rule. This is a soundness
-        caveat, disclosed here rather than buried.
+        (Section~\ref{sec:ceremony}); no dev-setup key is deployed, so no toxic
+        waste is public by construction any more. What remains is that each
+        ceremony had \textbf{one} independent contributor, which is a single point
+        of trust rather than a distributed one: sound only if that one party
+        destroyed their scalar. Anyone unwilling to extend that trust should treat
+        the proof system as unsound for their purposes. The JoinSplit and
+        association ceremonies additionally closed on a beacon slot pre-committed
+        in public before its value existed; the membership one, deployed earlier,
+        did not, so for that key slot-shopping cannot be ruled out. Re-running all
+        three with external, mutually independent contributors is the outstanding
+        work. This is a soundness caveat, disclosed here rather than buried.
   \item \textbf{Devnet, not mainnet.} The deployment proves execution on a live
         public cluster; it is not a mainnet-beta production deployment, and the
         system is not audited. Do not rely on it to protect real activity.
@@ -918,7 +945,7 @@ leaks and what we do not claim.
         modeled funding trace, not a live pool. A live-provenance loader is a named
         roadmap item.
   \item \textbf{The funding path is not wired and not soaked.} The unshield it is
-        built on is soak-proven on devnet ($25/25$), but the layer above it is two
+        built on is soak-proven on devnet ($27/27$), but the layer above it is two
         disconnected halves: \code{fund-commit} proves an unshield to a fresh
         wallet and \emph{prints} the emitted request, and \code{FundingRounds} is a
         unit-tested batcher type that would hold such requests to a round boundary.
@@ -1010,9 +1037,8 @@ and composing an amount-privacy primitive with a behavior-privacy one is exactly
 the ``who + how much'' point.
 
 \paragraph{An honest tradeoff: transparent setups.} mirror-pool uses Groth16,
-which needs a per-circuit trusted setup (Section~\ref{sec:ceremony}; the deployed
-membership key comes from a real, but single-contributor, ceremony, and the deployed
-JoinSplit and association keys are still from the dev setup). Approaches built on
+which needs a per-circuit trusted setup (Section~\ref{sec:ceremony}; all three
+deployed keys come from real, but single-contributor, ceremonies). Approaches built on
 STARKs or other transparent, post-quantum setups (for example Bulletproofs-style
 range proofs or STARK-based systems) avoid a trusted setup entirely, at the cost
 of larger proofs or higher verifier work. That is a real tradeoff, not a strict
@@ -1100,7 +1126,7 @@ ablations; the dwell and adoption sweeps; and the Sybil-dominance case collapsin
 to \code{real\_k}). Deterministic (seed
 \code{0x4d4952524f52}), so any reviewer re-derives them bit-for-bit.
 
-\paragraph{Public devnet soaks (the $17/17$ and $25/25$ assertion tables and the
+\paragraph{Public devnet soaks (the $18/18$ and $27/27$ assertion tables and the
 CU numbers).}
 \begin{quote}\footnotesize\ttfamily
 PROG=EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq\\

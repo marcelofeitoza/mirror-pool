@@ -62,9 +62,9 @@ use clap::Parser;
 use mirror_coordinator::client::{RpcSolanaClient, SolanaClient};
 use mirror_coordinator::crowd::epoch_pda;
 use mirror_coordinator::{
-    submit_transact, DirectoryIntake, FundingIntake, FundingRequest, FundingRoundConfig,
-    FundingRounds, FundingService, FundingServiceConfig, RelaySet, RoundOutcome, TxProfile,
-    ValueTransactRequest,
+    setup_pool_alt, submit_transact_with_luts, DirectoryIntake, FundingIntake, FundingRequest,
+    FundingRoundConfig, FundingRounds, FundingService, FundingServiceConfig, RelaySet,
+    RoundOutcome, TxProfile, ValueTransactRequest,
 };
 use mirror_core::{commit as core_commit, ActionClass, Epoch, Secret, SizeBucket};
 use mirror_soak::{
@@ -72,11 +72,12 @@ use mirror_soak::{
     commit_ix, first_line, hex_decode, init_pool_ix, install_vk, lamports, load_keypair,
     new_keypair, note_is_spendable, parse_kv, pool_pda, read_vpool, repo_root, run_cli,
     run_cli_expect_fail, send, sigs_table, value_pool_pda, value_vault_pda, wait_until_slot,
-    write_lines, Report, DEFAULT_RPC_URL,
+    write_lines, Report, DEFAULT_RPC_URL, SYSTEM_PROGRAM_ID,
 };
 
 use solana_instruction::AccountMeta;
 use solana_keypair::Keypair;
+use solana_message::AddressLookupTableAccount;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
@@ -210,7 +211,7 @@ async fn tx_facts(rpc: &RpcSolanaClient, signature: &str) -> Result<TxFacts> {
     let EncodedTransaction::Json(ui) = confirmed.transaction.transaction else {
         bail!("expected a JSON-encoded transaction for {signature}");
     };
-    let account_keys = match ui.message {
+    let mut account_keys = match ui.message {
         UiMessage::Raw(raw) => raw.account_keys,
         UiMessage::Parsed(parsed) => parsed
             .account_keys
@@ -218,6 +219,20 @@ async fn tx_facts(rpc: &RpcSolanaClient, signature: &str) -> Result<TxFacts> {
             .map(|k| k.pubkey)
             .collect::<Vec<_>>(),
     };
+    // Addresses resolved through an Address Lookup Table are NOT in the message's
+    // static key list; they arrive separately in `meta.loadedAddresses`, and the
+    // balance arrays are indexed over static-then-writable-then-readonly. The
+    // funding release compiles against a lookup table (the pool's static accounts
+    // do not otherwise fit in one packet), so the pool vault itself is a loaded
+    // address. Appending them in that exact order is what keeps this forensics
+    // honest: without it `delta_of(vault)` silently returns None and the
+    // provenance claim would be evaluated against a truncated account list.
+    let loaded: Option<solana_transaction_status_client_types::UiLoadedAddresses> =
+        meta.loaded_addresses.clone().into();
+    if let Some(loaded) = loaded {
+        account_keys.extend(loaded.writable);
+        account_keys.extend(loaded.readonly);
+    }
     let deltas: Vec<i128> = meta
         .post_balances
         .iter()
@@ -408,9 +423,13 @@ async fn main() -> Result<()> {
     report.check(
         "JoinSplit verifying key published into its write-once registry PDA",
         !vk_sig.is_empty(),
-        format!("init_vk signature={vk_sig}"),
+        format!("init_vk: {vk_sig}"),
     );
-    report.sig("init_vk_transaction", &vk_sig);
+    // Only a real publication has a signature to record; an idempotent
+    // "already published" run has nothing to link to.
+    if !vk_sig.starts_with("already published") {
+        report.sig("init_vk_transaction", &vk_sig);
+    }
 
     let vpool = value_pool_pda(&program_id, &relay.pubkey());
     let vault = value_vault_pda(&program_id, &vpool);
@@ -447,6 +466,34 @@ async fn main() -> Result<()> {
             vp.denomination
         ),
     );
+
+    // One Address Lookup Table for the accounts every funding Transact shares.
+    // Without it the release does not fit in a 1232-byte packet: the instruction
+    // carries a 256-byte proof, seven 32-byte public inputs and two
+    // encrypted-note blobs, and since the verifying key moved into a registry
+    // account it takes one more account than it used to. The nullifier PDAs and
+    // the fresh commit wallet change every release, so those stay inline.
+    let vk_registry = Pubkey::find_program_address(
+        &[b"vk", &[mirror_core::wire::CIRCUIT_TRANSACTION]],
+        &program_id,
+    )
+    .0;
+    let alt = setup_pool_alt(
+        client.as_ref(),
+        &relay,
+        &payer,
+        vec![program_id, SYSTEM_PROGRAM_ID, vk_registry, vpool, vault],
+    )
+    .await
+    .context("setup_pool_alt for the funding value pool")?;
+    report.check(
+        "funding-pool ALT created + extended (keeps a release inside one packet)",
+        alt.addresses.len() == 5,
+        format!("alt={} ({} shared accounts)", alt.key, alt.addresses.len()),
+    );
+    // A freshly extended table is only usable from the NEXT slot onward.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let luts = vec![alt];
 
     // The behavioral pool the funded commit wallets will commit into.
     let pool = pool_pda(&program_id, &pool_authority.pubkey());
@@ -552,7 +599,7 @@ async fn main() -> Result<()> {
             ],
         )?;
         let req = emit_to_request(&emit_path, &program_id)?;
-        let sig = submit_transact(client.as_ref(), &relay, &req, &[&p.main])
+        let sig = submit_transact_with_luts(client.as_ref(), &relay, &req, &[&p.main], &luts)
             .await
             .with_context(|| format!("submitting shield {}", p.index))?;
         report.sig(&format!("shield_{}", p.index), sig.to_string());
@@ -717,6 +764,7 @@ async fn main() -> Result<()> {
                 round_slots: args.round_slots,
                 min_round_size: args.min_round_size,
                 denomination: Some(args.denomination),
+                lookup_tables: luts.clone(),
             },
             poll_interval: Duration::from_millis(250),
         },
@@ -1159,6 +1207,7 @@ async fn main() -> Result<()> {
             &wasm_s,
             &r1cs_s,
             &pk_s,
+            &luts,
             tx_profile,
             &mut report,
         )
@@ -1232,6 +1281,7 @@ async fn run_failure_case(
     wasm_s: &str,
     r1cs_s: &str,
     pk_s: &str,
+    luts: &[AddressLookupTableAccount],
     tx_profile: TxProfile,
     report: &mut Report,
 ) -> Result<()> {
@@ -1273,7 +1323,7 @@ async fn run_failure_case(
             ],
         )?;
         let req = emit_to_request(&emit_path, program_id)?;
-        submit_transact(client, relay, &req, &[&p.main])
+        submit_transact_with_luts(client, relay, &req, &[&p.main], luts)
             .await
             .with_context(|| format!("submitting second shield {}", p.index))?;
         let c0 = emit_field(&emit_path, "out_commitment0_hex")?;
@@ -1362,6 +1412,7 @@ async fn run_failure_case(
                 round_slots: args.round_slots,
                 min_round_size: args.min_round_size,
                 denomination: Some(args.denomination),
+                lookup_tables: luts.to_vec(),
             },
             poll_interval: Duration::from_millis(250),
         },
@@ -1404,7 +1455,7 @@ async fn run_failure_case(
     // Spend the poisoned request's nullifiers out of band. This funds its wallet
     // early (harmless) and guarantees its in-round submit fails.
     let poisoned_request = emit_to_request(poisoned_emit, program_id)?;
-    let out_of_band = submit_transact(client, relay, &poisoned_request, &[])
+    let out_of_band = submit_transact_with_luts(client, relay, &poisoned_request, &[], luts)
         .await
         .context("submitting the poisoned request out of band")?;
     report.sig("out_of_band_spend", out_of_band.to_string());
@@ -1480,10 +1531,13 @@ fn probe_release_order(
     round: u64,
     reversed: bool,
 ) -> Result<Vec<Pubkey>> {
+    // Release-ORDER simulation only: it never submits, so it needs no lookup
+    // tables.
     let mut probe = FundingRounds::new(FundingRoundConfig {
         round_slots: args.round_slots,
         min_round_size: args.min_round_size,
         denomination: Some(args.denomination),
+        lookup_tables: Vec::new(),
     })?;
     let mut order: Vec<&Participant> = participants.iter().collect();
     if reversed {

@@ -144,6 +144,9 @@ async fn run_funding(args: FundingArgs) -> Result<()> {
             round_slots: args.round_slots,
             min_round_size: args.min_round_size,
             denomination: args.denomination,
+            // No lookup tables configured from the CLI yet; a deployment whose
+            // Transact does not fit inline must supply them programmatically.
+            lookup_tables: Vec::new(),
         },
         poll_interval: Duration::from_millis(args.poll_ms),
     };

@@ -4,31 +4,34 @@ This file has two independent, honestly-labeled proofs of the same program:
 a **public Solana devnet deployment** (top, browser-verifiable on the Solana
 Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
 
-> **The deployed program matches this source tree again, but the tables below do
-> NOT belong to that bytecode.** The devnet program id below has since been
-> **upgraded in place** to the current build (signature
-> `58gKGUdvKowyv4phxNUxKxiPbbnWNps9SKhxVkLWt7V8Q7DQLhrTuH2UWhUPtDzmeSPTEBExzXYeGVeYDuGFWHm`,
-> slot `479600717`; the dumped on-chain bytes are byte-for-byte the locally built
+> **The tables below were captured against the bytecode that is deployed at that
+> address right now.** The devnet program was upgraded in place to the current
+> build (signature
+> `27Hg4jV8W4UeCY9RX9kpNfwJoMVz5BE4qRMpV9AqwN1Z3Y1bygy9vMwszM4E4vhZs69otSHg3Dwrn61DDTGfVLbF`,
+> slot `479622920`; the dumped on-chain bytes are byte-for-byte the locally built
 > `mirror_pool.so`, sha256
-> `6b026cf95e7f76d8a45c248004f98e2f647e7fc806203e1785bdeddcbea4f466`). That build
-> carries three things the earlier one did not: the write-once digest-pinned
-> verifying-key registry with its `InitVk` instruction
-> ([`VK_REGISTRY.md`](VK_REGISTRY.md)), the ZK-escrow domain-separation fix, and
-> the phase-2 **ceremony** membership key.
+> `5b8cfdc0112b084ce3a5189333b719388a8b29a3f6300a7fed531ba4c3fa7d93`), and BOTH
+> devnet suites were then re-run against it. That is the point of the re-run: the
+> program a reviewer inspects on the Explorer is the program these numbers
+> describe. The earlier tables, captured against older bytecode at the same
+> address, are gone rather than annotated.
 >
-> Every run recorded in this file - behavioral 17/17, confidential 25/25, funding
-> 25/25 - was captured against the EARLIER bytecode at this same address and is
-> left exactly as captured. It is still valid evidence for what it was evidence of
-> (the pool's behavioral and confidential mechanics on a live public cluster); it
-> is NOT evidence about the registry, the escrow fix, or the ceremony key, and the
-> instruction shapes differ (the settle instructions now take one more account,
-> and `InitPool` takes a 31-byte body where the old one took 23). **The soaks have
-> not been re-run against devnet since the upgrade.** The behavioral soak WAS
-> re-run end to end against a local Surfpool on a fresh deployment of the
-> registry bytecode and passed 18/18 (the extra assertion being the verifying-key
-> publication); those local-validator signatures are recorded in
-> [`VK_REGISTRY.md`](VK_REGISTRY.md) section 8 and deliberately NOT merged into
-> the tables below.
+> This build carries three things the pre-registry one did not: the write-once
+> digest-pinned verifying-key registry with its `InitVk` instruction
+> ([`VK_REGISTRY.md`](VK_REGISTRY.md)), the ZK-escrow domain-separation fix, and
+> phase-2 **ceremony** keys for ALL THREE circuits. Assertion counts moved with
+> it: behavioral 17 -> 18 and confidential 25 -> 27, the extra rows being the
+> verifying-key publication and, on the confidential side, the lookup table that
+> keeps a `Transact` inside one packet now that it carries the registry account.
+
+> **The funding-round soak below ran on a local Surfpool, not on devnet.** It was
+> re-run against the SAME bytecode (a fresh deployment of the identical
+> `mirror_pool.so`) and passed 27/27, so it describes today's program, but its
+> signatures are local-validator signatures and resolve on no public explorer.
+> That is a deliberate scope choice, not an unverified claim: the funding soak
+> drives four participants through shield, unshield, batched release and a
+> mid-round failure, and paying for that on a public cluster buys nothing the
+> local run does not already establish.
 
 > **The ZK escrow fix, for the record.** The crowd `Commit` leaf is
 > domain-separated from the ZK deposit leaf by the program
@@ -36,33 +39,19 @@ Explorer) and the original **local Surfpool mainnet-mirror run** (bottom).
 > `zk_denomination` at init that `CommitDeposit`, `SettleZk` and
 > `SettleZkAssociated` all require. Together they close a fund-theft hole in which
 > a fee-only crowd commit could spend a depositor's escrow
-> ([`THREAT_MODEL.md`](THREAT_MODEL.md) section 4). The bytecode that produced the
-> tables below had NEITHER; the bytecode deployed at that address today has both.
-> The fix's evidence remains the mollusk suite against the compiled SBF program,
-> including the inverted attack test
-> `settle_zk_rejects_a_fee_only_crowd_leaf_spending_a_depositors_escrow`, not a
-> public-cluster run.
+> ([`THREAT_MODEL.md`](THREAT_MODEL.md) section 4). The runs below exercise the
+> bytecode that has both; the inverted attack test
+> `settle_zk_rejects_a_fee_only_crowd_leaf_spending_a_depositors_escrow` in the
+> mollusk suite is what proves the hole is closed rather than merely unexercised.
 
-> **Re-running the soaks on a public cluster is now possible, and has not been
-> done.** The earlier blocker was funding: the upgrade needed roughly 0.83 SOL of
-> rent against a funder holding 0.4498 SOL, and the devnet faucet was refusing the
-> address. The funder has since been topped up and the upgrade landed, so all
-> three soak drivers - each of which publishes its verifying key through `init-vk`
-> before it settles - could now run against devnet. They have not been re-run, so
-> the public-cluster tables below stay exactly as captured. One public-cluster
-> measurement made against the older bytecode, a multi-hour sustained crowd-path
-> run with its topology delta stated, is recorded in [`DEVNET.md`](DEVNET.md).
-
-> **These are records of runs, not descriptions of the current tree.** Both runs
-> predate the move to in-process pure-Rust Groth16 proving, so several assertion
-> rows below say the proof was generated and verified by `snarkjs`. That is what
-> happened in those runs and the rows are left as they were recorded. The
-> participant CLI now proves in-process via `ark-circom`/`ark-groth16` with no
-> Node process, and `--use-snarkjs` is a legacy fallback; `circom`/`snarkjs` are
-> still needed at BUILD time to produce the `.wasm`/`.r1cs`/`.zkey` artifacts,
-> and `snarkjs groth16 setup` is still the ceremony's phase-2 starting point.
-> Nothing else about the runs changed: every signature, compute-unit figure and
-> on-chain assertion below is exactly as captured.
+> **Proving is in-process pure Rust.** The participant CLI proves with
+> `ark-circom`/`ark-groth16` and spawns no Node process; `--use-snarkjs` is a
+> legacy fallback. `circom`/`snarkjs` are still needed at BUILD time to produce
+> the `.wasm`/`.r1cs`/`.zkey` artifacts, and `snarkjs groth16 setup` is still the
+> ceremony's phase-2 starting point. Because all three deployed verifying keys are
+> ceremony outputs, the CLI proves under a ceremony `.mpk` (`--proving-key`), not
+> under the dev `.zkey`; it refuses to emit a proof that does not verify against
+> the committed key, so a key mismatch is a local error rather than a wasted fee.
 
 **What the ZK step in these runs does and does not show.** Each behavioral soak
 makes exactly ONE ZK deposit, into a freshly opened window, so the window it
@@ -89,128 +78,162 @@ mainnet SOL.
 
 - program id: `EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`
 - program (Explorer): https://explorer.solana.com/address/EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq?cluster=devnet
-- deploy/upgrade transaction: https://explorer.solana.com/tx/q87TXz1ftYz8eiDUNa5o9PxVQeie1feikDCH3hBeFg92bhYEGrYDTYUpUAMforuLUatifY2fLU89R92sRnwok6f?cluster=devnet
+- deploy/upgrade transaction: https://explorer.solana.com/tx/27Hg4jV8W4UeCY9RX9kpNfwJoMVz5BE4qRMpV9AqwN1Z3Y1bygy9vMwszM4E4vhZs69otSHg3Dwrn61DDTGfVLbF?cluster=devnet
 - cluster: devnet (`https://api.devnet.solana.com`)
 - driving commitment: `confirmed` for submission; every captured signature
   below was then re-confirmed at the `finalized` commitment before listing.
 
 The program id above is a fresh, bounty-dedicated keypair (kept gitignored
-under `.soak/keys/`). It was deployed and then upgraded in place; the SHA-256 of
-the on-chain program bytes equals the SHA-256 of the locally built
-`mirror_pool.so`, so the deployed program is exactly the source in this repo.
-Both suites below ran against that same address, but against the **earlier**
-bytecode - see the notes at the top of this file and the redeploy record in
-"Trusted-setup ceremony - the DEPLOYED membership key" below.
+under `.soak/keys/`). It was deployed and has since been upgraded in place, so
+the id and every Explorer link in this document survive; the SHA-256 of the
+on-chain program bytes equals the SHA-256 of the locally built `mirror_pool.so`
+(`5b8cfdc0112b084ce3a5189333b719388a8b29a3f6300a7fed531ba4c3fa7d93`), so the
+deployed program is exactly the source in this repo. Both suites below were run
+against that bytecode, after the upgrade.
+
+The three verifying-key registries are published and readable on chain:
+
+| circuit | registry PDA | `InitVk` transaction | sha256(vk) |
+| --- | --- | --- | --- |
+| membership | `6fkK14YXovKkJQ7z2Df7sBeCGPEnRK2XGBrRkMJJbRYg` | [`8VgiyRtg...`](https://explorer.solana.com/tx/8VgiyRtg1qb5g9U3kJNWturZ3tx7XjKbKUUJXtnCSnRPQAPRS7JyynR9du1YsKEDkKBxQv9umVvZ2gHmZSDVV2Q?cluster=devnet) | `be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76` |
+| transaction | `BD1cm4jqbDHxgWX7ZfLmFaWWc1wSJFr5h68YesrkuCfW` | [`61ysGZNm...`](https://explorer.solana.com/tx/61ysGZNmMYNwNgZSsLGTJuargPezabCYnpAKjU33BhXkcVYWedUkow8GF2b9gQ4eMpa3SJeJLPFzgqRrgNjYbWWe?cluster=devnet) | `4b542099cea5bd4dfdfd6f9d5d649bc23acd9aab35d8f3ac1a984e13b38e28c1` |
+| association | `3EyfUQZFSEz1VcTkCK3EsUV5uE8XqyCBmCQHETqjhWVn` | [`5BxnXZM3...`](https://explorer.solana.com/tx/5BxnXZM37b92vazgeGs7XUX7fdHd54rNBSsojLGYmvEGttepxCj5fLLFRJj3cBggSqfzJAYWUsJ7FMiCRBzkJFop?cluster=devnet) | `90d13582aba26708672b3f118dea345c9636534b1b9de3fd7fce4708062832ee` |
+
+Each of those three digests is a phase-2 CEREMONY key, and each is the only key
+its registry can ever hold: `InitVk` hashes the bytes and refuses anything but
+the digest the bytecode pins, and there is no update instruction.
 
 ## Behavioral soak - crowd + ZK settlement (devnet)
 
 Fresh pool per run (fresh relay authority). Config: epoch_slots=128, k_floor=3, entry_fee=1000000 lamports, reward_bps=2500.
 
-- pool PDA: `5ZqjRqhrYHradrMKih8YnejvfwsSLShYbnqXsLqUYWT7` (authority / relay `6FzpfHXu5SKNCpHummh6ZujrRpC6icNxzdtZuYyeew5N`)
-- pool (Explorer): https://explorer.solana.com/address/5ZqjRqhrYHradrMKih8YnejvfwsSLShYbnqXsLqUYWT7?cluster=devnet
+- pool PDA: `3Cj2JhrT7WQsjew5a6EFhHMWLpmamNKNBrRoYmnCHCVw` (authority / relay `3AQ4kzbDe8fmAXYVX9fqEfoXD3hCUb86f4drh6byMpf2`)
+- pool (Explorer): https://explorer.solana.com/address/3Cj2JhrT7WQsjew5a6EFhHMWLpmamNKNBrRoYmnCHCVw?cluster=devnet
 - ZK opt-in escrow amount: 50000000 lamports
 - reward pool accrued at end of run: 1750000 lamports
 - total leaves appended: 7
 
-What was exercised: 4 participants commit the SAME PlainTransfer action into
+What was exercised: the membership verifying key is published into its
+write-once registry; 4 participants commit the SAME PlainTransfer action into
 one shared epoch, settled by ONE atomic gasless transaction (ComputeBudget +
 SettleEpoch + 4 identical transfers, over a pool ALT); a ZK opt-in escrow is
-settled by a snarkjs-verified Groth16 SettleZk to a fresh recipient; and the
-adversarial cases (under-floor no-settle, duplicate nullifier, re-settle,
-mismatched-recipient, replay) all fail closed on-chain.
+settled by a Groth16 SettleZk to a fresh recipient, proved in-process under the
+phase-2 CEREMONY proving key; and the adversarial cases (under-floor no-settle,
+duplicate nullifier, re-settle, mismatched-recipient, replay) all fail closed
+on-chain.
 
-### On-chain assertions (17/17)
+### On-chain assertions (18/18)
 
 | result | assertion | detail |
 | --- | --- | --- |
 | PASS | program deployed + executable | EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq |
+| PASS | membership verifying key published into its write-once registry PDA | init_vk: already published (registry holds exactly the committed key) |
 | PASS | pool initialized with fixed config | version=1 epoch_slots=128 k_floor=3 entry_fee=1000000 authority=relay |
-| PASS | pool ALT created + extended | alt=EXxNZeipF8QzJu8VEzmvX8Dp6xmGXLFzAEREPiXMizqt (6 shared accounts) |
-| PASS | 4 commits batched into one shared epoch | epoch_id=3739202 commit_count=4 settled=false |
+| PASS | pool ALT created + extended | alt=31VjbncRjkHdZAh3Sr6VpQZAbRhgczM6s6dMWrXbE6Z7 (6 shared accounts) |
+| PASS | 4 commits batched into one shared epoch | epoch_id=3747071 commit_count=4 settled=false |
 | PASS | duplicate crowd nullifier rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x3; 5 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program 1 |
-| PASS | crowd epoch marked settled on-chain | epoch_id=3739202 settled=true |
+| PASS | crowd epoch marked settled on-chain | epoch_id=3747071 settled=true |
 | PASS | 4 nullifier PDAs created (anti-replay) | 4/4 nullifier PDAs exist and are program-owned |
 | PASS | 4 identical transfers executed atomically | sink credited 40000000 lamports (= 4 x 10000000 bucket) |
 | PASS | re-settle of a settled epoch rejected (EpochAlreadySettled) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x6; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
 | PASS | under-floor epoch rejected on-chain (BelowKFloor) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x2; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
 | PASS | under-floor epoch rolled forward off-chain (coordinator) | coordinator.on_slot returned RolledForward (real_k < k_floor) |
-| PASS | Groth16 membership proof generated + verified (snarkjs) | mirror-cli prove produced a snarkjs-verified SettleZk |
-| PASS | SettleZk authority == pool relay | authority=6FzpfHXu5SKNCpHummh6ZujrRpC6icNxzdtZuYyeew5N |
+| PASS | Groth16 membership proof generated + verified (in-process ark-groth16) | mirror-cli prove produced a SettleZk whose proof it generated and verified in-process |
+| PASS | SettleZk authority == pool relay | authority=3AQ4kzbDe8fmAXYVX9fqEfoXD3hCUb86f4drh6byMpf2 |
 | PASS | ZK settle to mismatched recipient rejected (ActionHashMismatch) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0xe; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
 | PASS | escrow landed at the FRESH recipient | recipient credited 50000000 lamports (= escrow 50000000) |
-| PASS | ZK nullifier PDA created (anti-replay) | nullifier PDA 3QaTuACW2EESAfRG6icWCGEY7MJh4qPu33bo6rcPs4pW exists + program-owned |
+| PASS | ZK nullifier PDA created (anti-replay) | nullifier PDA 7NvAhLUrxFi1qrFWv2by4tpizwCN19A89hA4yT8hKeUF exists + program-owned |
 | PASS | ZK replay rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x3; 3 log messages:   Program EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq invoke [1]   Program E |
+
+The `init_vk` row reports "already published" because the registry is per
+PROGRAM, not per pool, and this program id had already had its membership key
+published by an earlier run of this same suite. `init-vk` re-reads the account
+and confirms it holds exactly the committed key, so the assertion is a check on
+the key in force rather than on whether this particular run wrote it. The
+transaction that did write it is the first row of the signature table.
 
 ### Finalized transaction signatures + compute units
 
 | flow | signature (Explorer) | commitment | CU consumed |
 | --- | --- | --- | --- |
-| init_pool | [`38rNeKerPRcFxvBzRgGh3xZjXEgDUwi7vhjfGrYnUKbPcLRFbK7Q3wGyditkZyBF2Xg2pJ8LstYXAWGGfnR4KkfX`](https://explorer.solana.com/tx/38rNeKerPRcFxvBzRgGh3xZjXEgDUwi7vhjfGrYnUKbPcLRFbK7Q3wGyditkZyBF2Xg2pJ8LstYXAWGGfnR4KkfX?cluster=devnet) | Finalized | 21766 |
-| crowd_commit_0 | [`4dzqpL2Mep5RNnbsLKsEgoBo7sx87F8pzWUGstLn9h4WjJ4QQnn9PAhRUDZVoYhU5VnXH8aPq9CSxAPTi2dxAaKy`](https://explorer.solana.com/tx/4dzqpL2Mep5RNnbsLKsEgoBo7sx87F8pzWUGstLn9h4WjJ4QQnn9PAhRUDZVoYhU5VnXH8aPq9CSxAPTi2dxAaKy?cluster=devnet) | Finalized | 41006 |
-| crowd_commit_1 | [`Q4HRHLqvw6rC9CK7UdybVs1Q2RZLTNLvSeh9Ao7nZkLX18EWfYwYy1q1gmC48DtEQUEBoKKuD2sV49e6zovfJ4y`](https://explorer.solana.com/tx/Q4HRHLqvw6rC9CK7UdybVs1Q2RZLTNLvSeh9Ao7nZkLX18EWfYwYy1q1gmC48DtEQUEBoKKuD2sV49e6zovfJ4y?cluster=devnet) | Finalized | 39654 |
-| crowd_commit_2 | [`4imuaAxEK66RxcamUSKBdxDEQjPCV11EuK8jVb9nfDJrxPNZXMCxaryfqfV2SaRn645jNCghUpNgGm3BcHZtQKdA`](https://explorer.solana.com/tx/4imuaAxEK66RxcamUSKBdxDEQjPCV11EuK8jVb9nfDJrxPNZXMCxaryfqfV2SaRn645jNCghUpNgGm3BcHZtQKdA?cluster=devnet) | Finalized | 39654 |
-| crowd_commit_3 | [`3ZjS1ZbVv6fwJdpLvvZoEw13ap1jysUu8hyGyv6FE4nAbjTdvnAbL3vq5T5CnMjwcBYuXjGb6cYCJELmgviRVs8m`](https://explorer.solana.com/tx/3ZjS1ZbVv6fwJdpLvvZoEw13ap1jysUu8hyGyv6FE4nAbjTdvnAbL3vq5T5CnMjwcBYuXjGb6cYCJELmgviRVs8m?cluster=devnet) | Finalized | 39647 |
-| underfloor_commit_0 | [`4Pv116kNm8wucjvcnikRKFGFnvJGVkYUvtnJ2TrKE3PfngRgke5Rn9kXqYNfqL7ZiSxGe8tNfzcRvKumfcAhurr5`](https://explorer.solana.com/tx/4Pv116kNm8wucjvcnikRKFGFnvJGVkYUvtnJ2TrKE3PfngRgke5Rn9kXqYNfqL7ZiSxGe8tNfzcRvKumfcAhurr5?cluster=devnet) | Finalized | 39499 |
-| underfloor_commit_1 | [`3uyHnhXYNR18deP3YZPQGorq2sPDT6XxUWxFKsrA5sXQDPsQYFNRf5jhzqJjutwiuCue7onqbNzb8WUx3sC2rims`](https://explorer.solana.com/tx/3uyHnhXYNR18deP3YZPQGorq2sPDT6XxUWxFKsrA5sXQDPsQYFNRf5jhzqJjutwiuCue7onqbNzb8WUx3sC2rims?cluster=devnet) | Finalized | 38147 |
-| crowd_settle | [`4tcgNnhbZe7YKM26F6SnXW1WctASqVEqQ9W4v4NQ85fDfkYe3eq7YqCr4n7bEogm7U5By17Lkc5Tqa7jmZx693NB`](https://explorer.solana.com/tx/4tcgNnhbZe7YKM26F6SnXW1WctASqVEqQ9W4v4NQ85fDfkYe3eq7YqCr4n7bEogm7U5By17Lkc5Tqa7jmZx693NB?cluster=devnet) | Finalized | 21111 |
-| zk_deposit_commit | [`5sv5hVisBMtRCD4EeopUiQNyATAJXBNY3WPAtU7ERpRHgXmChJTyaz54QqThDknvd5EYkbVhbMtPFad7QEr744C`](https://explorer.solana.com/tx/5sv5hVisBMtRCD4EeopUiQNyATAJXBNY3WPAtU7ERpRHgXmChJTyaz54QqThDknvd5EYkbVhbMtPFad7QEr744C?cluster=devnet) | Finalized | 42447 |
-| zk_settle | [`4t7hLjFQh2ZyfqXQd7SZAHUw1A5nnzDjdAKRtMj9MKDeCr3Twx7twLgtAa6oQmzAZSFsHYEGKcwFwMyuyessThto`](https://explorer.solana.com/tx/4t7hLjFQh2ZyfqXQd7SZAHUw1A5nnzDjdAKRtMj9MKDeCr3Twx7twLgtAa6oQmzAZSFsHYEGKcwFwMyuyessThto?cluster=devnet) | Finalized | 102115 |
+| init_vk_membership | [`8VgiyRtg1qb5g9U3kJNWturZ3tx7XjKbKUUJXtnCSnRPQAPRS7JyynR9du1YsKEDkKBxQv9umVvZ2gHmZSDVV2Q`](https://explorer.solana.com/tx/8VgiyRtg1qb5g9U3kJNWturZ3tx7XjKbKUUJXtnCSnRPQAPRS7JyynR9du1YsKEDkKBxQv9umVvZ2gHmZSDVV2Q?cluster=devnet) | Finalized | 5472 |
+| init_pool | [`5AJU1aMvzr51UA2StiXkwSFBiw54g9n8aUV3DpWKWFWUNYReuP9nHBeMX47AFF68Y9SxtbAqVTaZAwx1822aFgE2`](https://explorer.solana.com/tx/5AJU1aMvzr51UA2StiXkwSFBiw54g9n8aUV3DpWKWFWUNYReuP9nHBeMX47AFF68Y9SxtbAqVTaZAwx1822aFgE2?cluster=devnet) | Finalized | 20461 |
+| crowd_commit_0 | [`5fhA9a2p3Y2q4uKN2CQri1zRdwB6HNed9iM12XXMG2Y8AwtjJjwFqbb7E17oTQg7LWnEjRH63CYjCtnfCzMNZ45g`](https://explorer.solana.com/tx/5fhA9a2p3Y2q4uKN2CQri1zRdwB6HNed9iM12XXMG2Y8AwtjJjwFqbb7E17oTQg7LWnEjRH63CYjCtnfCzMNZ45g?cluster=devnet) | Finalized | 40331 |
+| crowd_commit_1 | [`jdvUwM9XREVf8xVLCTdtzNzdUsojYMzs4vt9KfC3VMShFGRoUUn2URtn8NubpDTV4D8b6msm6m8U7VRcN8i2M2h`](https://explorer.solana.com/tx/jdvUwM9XREVf8xVLCTdtzNzdUsojYMzs4vt9KfC3VMShFGRoUUn2URtn8NubpDTV4D8b6msm6m8U7VRcN8i2M2h?cluster=devnet) | Finalized | 38974 |
+| crowd_commit_2 | [`26NePoSsexrV19xhSv4DAghmfnqnq8Ta4ANjP2CQf5AHiNcekminPTainRfa1t3dg1LzoYrhyJWXyp2ou2eZnw18`](https://explorer.solana.com/tx/26NePoSsexrV19xhSv4DAghmfnqnq8Ta4ANjP2CQf5AHiNcekminPTainRfa1t3dg1LzoYrhyJWXyp2ou2eZnw18?cluster=devnet) | Finalized | 38959 |
+| crowd_commit_3 | [`59vt1jTis7Tmwht5bur3VdU9EXAxGUaANQ74pEwdAABo324A2oyrNQgwDcDpuCuFYFqEvuGEPD1MXMfy41zUoMhn`](https://explorer.solana.com/tx/59vt1jTis7Tmwht5bur3VdU9EXAxGUaANQ74pEwdAABo324A2oyrNQgwDcDpuCuFYFqEvuGEPD1MXMfy41zUoMhn?cluster=devnet) | Finalized | 38967 |
+| underfloor_commit_0 | [`4krPmZHt5FXwMVAE5AS3YYVF4e29pxokqYKUhNCtDPbAii4ws63CDTetgD4syWvc3WcM4V1r96a4txQY4jX81MmG`](https://explorer.solana.com/tx/4krPmZHt5FXwMVAE5AS3YYVF4e29pxokqYKUhNCtDPbAii4ws63CDTetgD4syWvc3WcM4V1r96a4txQY4jX81MmG?cluster=devnet) | Finalized | 44824 |
+| underfloor_commit_1 | [`4WATKSq7aRzBwu4Us5CpjXDyzH7k8d7WAmEy3m8JRaU1CaKrECrzZFYZg1nczDzwjyLgqxJE6HQF7cS8LK6wbgMy`](https://explorer.solana.com/tx/4WATKSq7aRzBwu4Us5CpjXDyzH7k8d7WAmEy3m8JRaU1CaKrECrzZFYZg1nczDzwjyLgqxJE6HQF7cS8LK6wbgMy?cluster=devnet) | Finalized | 43467 |
+| crowd_settle | [`5z4PLdcuVtPJ58vEWUrxBjGbPBuQhy4ez4NDB7p9jsMUfhm9sE4YM9znoeLrKNQ5Hpau6sHiXiojEhpB5R82SSKV`](https://explorer.solana.com/tx/5z4PLdcuVtPJ58vEWUrxBjGbPBuQhy4ez4NDB7p9jsMUfhm9sE4YM9znoeLrKNQ5Hpau6sHiXiojEhpB5R82SSKV?cluster=devnet) | Finalized | 18733 |
+| zk_deposit_commit | [`41sUBaZbpmXmStBF8QdJrFu72sqzoYVMUKm92hM2g1uvGmfRvegUdrskxzerYXTvJfhngfQ2XRwiHkBCZJHtXNz7`](https://explorer.solana.com/tx/41sUBaZbpmXmStBF8QdJrFu72sqzoYVMUKm92hM2g1uvGmfRvegUdrskxzerYXTvJfhngfQ2XRwiHkBCZJHtXNz7?cluster=devnet) | Finalized | 40957 |
+| zk_settle | [`y8woZ1Y5RsvojGiQbssbWPqpHuhFngVFfbz13eZDRLgXqzd3CAhT6KQkHvw9iggx6yDaVD6p35Jpte3diSCwKiz`](https://explorer.solana.com/tx/y8woZ1Y5RsvojGiQbssbWPqpHuhFngVFfbz13eZDRLgXqzd3CAhT6KQkHvw9iggx6yDaVD6p35Jpte3diSCwKiz?cluster=devnet) | Finalized | 106101 |
 
 ## Confidential-value soak - shield / transfer / unshield (devnet)
 
 Fresh pools per run. The 2-in/2-out JoinSplit `Transact` layer, driven by the
-participant CLI and the gasless coordinator. (This run predates the move to
-in-process pure-Rust proving, so the CLI proved with snarkjs here; it now proves
-with `ark-circom`/`ark-groth16` by default and `--use-snarkjs` is the legacy
-fallback.) A transfer is signed ONLY by the relay (hides WHO for that transfer)
-and carries `publicAmount == 0` (hides HOW MUCH).
+participant CLI (in-process `ark-circom`/`ark-groth16` proving, no Node process,
+under the phase-2 CEREMONY proving key) and the gasless coordinator. A transfer
+is signed ONLY by the relay (hides WHO for that transfer) and carries
+`publicAmount == 0` (hides HOW MUCH).
 
-- main ValuePool: `3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4` (authority / relay `hfQPKv4EDrUNeEqQjWVC1EKRVaSgFeVRkrkRkCJPG4j`), vault `6S8PHSZ9g9Xd5ea6Vz4iPEa4J59i9hVMGfhUumETg3D2`
-- main pool (Explorer): https://explorer.solana.com/address/3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4?cluster=devnet
-- fixed-denomination ValuePool: `GPqqrTbmyJhskE55Tcy5ZzaRg5UbuA7QWYosQKNgLAi6` (denomination 10000000 lamports)
+- main ValuePool: `DfsDNKnxD4vZS59y9SrUhs3LbEb2U6QDsAApRMc5tYZT` (authority / relay `4yS9DANyA4UqFjVwKr6GMyYcQ7cYNdWZ8tsMAwidVnDa`), vault `7DNtZtnk5hqvcUtGddUStq4GBR2KsfDP6gNPF1eSBXrs`
+- main pool (Explorer): https://explorer.solana.com/address/DfsDNKnxD4vZS59y9SrUhs3LbEb2U6QDsAApRMc5tYZT?cluster=devnet
+- fixed-denomination ValuePool: `29KXP7mx7Hz87NLErLida55PnMs1HyVqJYdyRJBhiicc` (denomination 10000000 lamports)
 - relay fee bound into ext-data: 5000 lamports
 - amounts: shield 50000000 lamports, hidden transfer 20000000 lamports, withdraw 20000000 lamports
 
-### On-chain assertions (25/25)
+### On-chain assertions (27/27)
 
 | result | assertion | detail |
 | --- | --- | --- |
 | PASS | program deployed + executable | EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq |
-| PASS | main ValuePool initialized (authority=relay, fee set, no denom) | vpool=3Eq5uznQjqLVVzwu973aYUXeGVsJskhhVWqxrVVzCFY4 vault=6S8PHSZ9g9Xd5ea6Vz4iPEa4J59i9hVMGfhUumETg3D2 fee=5000 denom=None cc=0 |
-| PASS | fixed-denom ValuePool initialized (denomination pinned) | vpool=GPqqrTbmyJhskE55Tcy5ZzaRg5UbuA7QWYosQKNgLAi6 vault=8TmSateSoFfSDLsR4EhAHn2gue757z5CkX9ZK6PhUvxk denom=Some(10000000) |
-| PASS | shield proof generated + verified (snarkjs) and emitted | mirror-cli shield produced a snarkjs-verified Transact |
+| PASS | JoinSplit verifying key published into its write-once registry PDA | init_vk: already published (registry holds exactly the committed key) |
+| PASS | main ValuePool initialized (authority=relay, fee set, no denom) | vpool=DfsDNKnxD4vZS59y9SrUhs3LbEb2U6QDsAApRMc5tYZT vault=7DNtZtnk5hqvcUtGddUStq4GBR2KsfDP6gNPF1eSBXrs fee=5000 denom=None cc=0 |
+| PASS | fixed-denom ValuePool initialized (denomination pinned) | vpool=29KXP7mx7Hz87NLErLida55PnMs1HyVqJYdyRJBhiicc vault=3YweGZN1Bk4QAdHsfXujz7rMazYRhtqkHXheuQkWwQ7L denom=Some(10000000) |
+| PASS | value-pool ALT created + extended (keeps a Transact inside one packet) | alt=6ZspFXx1Zxe3mv1gdT3vWJgyVioTgxA4NdHdmEUu8Q5x (7 shared accounts) |
+| PASS | shield proof generated + verified (in-process ark-groth16) and emitted | mirror-cli shield produced a Transact whose proof it generated and verified in-process |
 | PASS | vault credited by the shielded deposit amount | vault delta 50000000 lamports (= shield 50000000) |
 | PASS | value root advanced + both output commitments inserted | commitment_count 0->2, root changed |
-| PASS | both input nullifier PDAs created (anti-replay) | nf0=Ho6imx4KE5oB1obLgcpWXC77MLSKrY2iKLumrHUSsfHJ nf1=A8TF6r3n5kkzkMsSD9PRFCDAYntiQUsLcyQznzJbAssd both program-owned + spent |
+| PASS | both input nullifier PDAs created (anti-replay) | nf0=6obWfiXJ78CEoLoWWSm9M6akmAUDz8cA4UdwWn9PkGPv nf1=GHPW9aVZymYk3E3us5w2sffUknxYks1PrrnDMYha2Td both program-owned + spent |
 | PASS | shield publicAmount encodes the deposit magnitude (public deposit) | publicAmount=0000000000000000000000000000000000000000000000000000000002faf080 |
 | PASS | shield replay rejected (NullifierSpent) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x3; 7 log messages:   Program ComputeBudget111111111111111111111111111111 invoke [1]   Program Co |
-| PASS | Alice scan recovered a SPENDABLE note from the enc blobs | recovered note .soak/notes-value/value-09a9aafa280190e439c0b221c5dc80aeb88e422ed99ee523f30900d443c4548d.json (spendable=true) |
+| PASS | Alice scan recovered a SPENDABLE note from the enc blobs | recovered note .soak/notes-value/value-2854acb9a3d2d2b4d9501601ead17765b9f843d98257a34f6a86ce1f177d9c2c.json (spendable=true) |
 | PASS | transfer carries NO cleartext amount (publicAmount == 0) | publicAmount=0000000000000000000000000000000000000000000000000000000000000000 |
 | PASS | on-chain Transact bytes carry a zeroed publicAmount for the transfer | transact_data[1..33] (publicAmount) is 32 zero bytes |
 | PASS | mutated public input rejected (ProofVerificationFailed) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0xc; 11 log messages:   Program ComputeBudget111111111111111111111111111111 invoke [1]   Program C |
 | PASS | transfer advanced the value root (2 new output commitments) | commitment_count 2->4, root changed |
 | PASS | transfer moved NO public lamports (vault unchanged) | vault 50890880 -> 50890880 |
-| PASS | transfer created new nullifier PDAs (input note spent) | nf0=EsdZh4C3DeZjTmDuPKS6KAzP7tJWuSEfb3Z98HBPkWTR nf1=ZY2CPokAiKiaQssidL4wytT1Lm1PsGVWfhZqoyFHL9V both program-owned + spent |
-| PASS | Bob scan auto-discovered his payment note (recipient-directed) | recovered note .soak/notes-value/value-1cd0563afb84d6c628f1a9f06a97a21f909b67677be5c1afc533887ec560eff7.json (spendable=true) |
-| PASS | fresh recipient credited by the withdrawn amount | recipient GkdBCDGW5zpKo76eZr5z8zRAjZCjhbj94JBNRpdZtixv credited 20000000 lamports (= withdraw 20000000) |
+| PASS | transfer created new nullifier PDAs (input note spent) | nf0=4vmFWv8fkimsTggqqxPR5epALyF5At3JR3WKUsz47HV3 nf1=DcDSfM95wycW7fgjDm75cAx2wB8mDg7QFg7M7u6x93PF both program-owned + spent |
+| PASS | Bob scan auto-discovered his payment note (recipient-directed) | recovered note .soak/notes-value/value-1f60096d68b2e6b9a42dfbeb0c66b79c33c0adb68232ad9d8e4b65b524d2e1a1.json (spendable=true) |
+| PASS | fresh recipient credited by the withdrawn amount | recipient D2jm39yLo4pSE4ZzEcmwP58QwiSbde7nVVMi7pFpbn5j credited 20000000 lamports (= withdraw 20000000) |
 | PASS | vault debited by exactly the withdrawn amount | vault debited 20000000 lamports |
 | PASS | unshield advanced the value root | commitment_count 4->6, root changed |
-| PASS | unshield created the input nullifier PDA (anti-replay) | nf0=8nJod3We2bRWvyUUDbBsm6S4j7jM1RkX5C1Bkqv89zoA program-owned + spent |
+| PASS | unshield created the input nullifier PDA (anti-replay) | nf0=GEivfs8LbS36HTLLFx8jMcL3DNW3VSpeCcpqpjEYcpfh program-owned + spent |
 | PASS | fixed-denom shield of EXACTLY the denomination succeeds | vault2 credited 10000000 lamports (= denomination 10000000) |
 | PASS | on-chain: wrong-denomination deposit rejected (DenominationMismatch) | send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x17; 7 log messages:   Program ComputeBudget111111111111111111111111111111 invoke [1]   Program C |
 | PASS | CLI fail-fast: wrong-denomination shield refused client-side | Error: this value pool pins a fixed denomination of 10000000 lamports; a public deposit/withdraw must move exactly that amount (got 10000001)  |
 | PASS | main vault balance == net public deposit - net public withdrawal | vault 30890880 == baseline 890880 + (shield 50000000 - withdraw 20000000) = 30890880 |
 
+Two of those rows are new since the pre-registry runs. The first is the
+verifying-key publication. The second is the Address Lookup Table: a `Transact`
+carries a 256-byte proof, seven 32-byte public inputs and two encrypted-note
+blobs, and now that the verifying key lives in a registry account the
+instruction takes one account more than it used to, which pushes the inline form
+past the 1232-byte packet limit. The table holds only the accounts that are
+identical in every `Transact` against these pools; the nullifier PDAs and the
+signers stay inline. It changes packing, not the instruction and not the signers.
+
 ### Finalized transaction signatures + compute units
 
 | flow | signature (Explorer) | commitment | CU consumed |
 | --- | --- | --- | --- |
-| init_value_pool_main | [`633jbqMtdEQhnAaDQw65x1FVDXM3uhfw3m51cjuSrNDjZxWRinmpTYsJo3MWRtxYV9Jh4UhxLRmhJxZtnL54SDss`](https://explorer.solana.com/tx/633jbqMtdEQhnAaDQw65x1FVDXM3uhfw3m51cjuSrNDjZxWRinmpTYsJo3MWRtxYV9Jh4UhxLRmhJxZtnL54SDss?cluster=devnet) | Finalized | 28964 |
-| init_value_pool_denom | [`38MEi8RMsMyRTHpDbpZzfQdyfRBDJKCgS8D6M33qT9zYTccpK3NnpUqpJguVjWEuic9uhcht6kPgzq8HKC62nDQm`](https://explorer.solana.com/tx/38MEi8RMsMyRTHpDbpZzfQdyfRBDJKCgS8D6M33qT9zYTccpK3NnpUqpJguVjWEuic9uhcht6kPgzq8HKC62nDQm?cluster=devnet) | Finalized | 33503 |
-| shield | [`5imt1JZEVZWrK7CtdsXBHJ4rdN5NxYEqGkXGwT47vddPeMcXzGFLSaxtW4qC7NMXd49nAjpr4GAZKXToTykMsUUf`](https://explorer.solana.com/tx/5imt1JZEVZWrK7CtdsXBHJ4rdN5NxYEqGkXGwT47vddPeMcXzGFLSaxtW4qC7NMXd49nAjpr4GAZKXToTykMsUUf?cluster=devnet) | Finalized | 196837 |
-| transfer | [`2r6mo2YrDtjJP8bnVqRJXaVDgVLkxaAmtKAHvgkwYvWb8rchvd63QinFqbmuj5Gk2Se8M9g9ajcCkC5R6QNprtyv`](https://explorer.solana.com/tx/2r6mo2YrDtjJP8bnVqRJXaVDgVLkxaAmtKAHvgkwYvWb8rchvd63QinFqbmuj5Gk2Se8M9g9ajcCkC5R6QNprtyv?cluster=devnet) | Finalized | 197616 |
-| unshield | [`54pTgcd2jdR2np3iWE3rHkihmdRhxEUKZbtCnoDLnaw9QC61WhqiySjfNnZohjNTwKhaABz7Bpo3gXuNxUKZFRzN`](https://explorer.solana.com/tx/54pTgcd2jdR2np3iWE3rHkihmdRhxEUKZbtCnoDLnaw9QC61WhqiySjfNnZohjNTwKhaABz7Bpo3gXuNxUKZFRzN?cluster=devnet) | Finalized | 202843 |
-| denom_shield_exact | [`3KchDrW8rYNpQ6wzXBVGFPvv8aRc1YtdLxsPdiDrU99VbqPqYUadS3X7WKBpqkHDUDHZeTafWk9YXrqkeURasKVG`](https://explorer.solana.com/tx/3KchDrW8rYNpQ6wzXBVGFPvv8aRc1YtdLxsPdiDrU99VbqPqYUadS3X7WKBpqkHDUDHZeTafWk9YXrqkeURasKVG?cluster=devnet) | Finalized | 197077 |
+| init_vk_transaction | [`61ysGZNmMYNwNgZSsLGTJuargPezabCYnpAKjU33BhXkcVYWedUkow8GF2b9gQ4eMpa3SJeJLPFzgqRrgNjYbWWe`](https://explorer.solana.com/tx/61ysGZNmMYNwNgZSsLGTJuargPezabCYnpAKjU33BhXkcVYWedUkow8GF2b9gQ4eMpa3SJeJLPFzgqRrgNjYbWWe?cluster=devnet) | Finalized | 4108 |
+| init_value_pool_main | [`hisSrjfhKRofCJjbHqcoqUF75zpnbGAMhuRftAFuX1xWaYKBc7F7XkufKqTf5TQt7fgbjySamVG15Hf7B6MXbb4`](https://explorer.solana.com/tx/hisSrjfhKRofCJjbHqcoqUF75zpnbGAMhuRftAFuX1xWaYKBc7F7XkufKqTf5TQt7fgbjySamVG15Hf7B6MXbb4?cluster=devnet) | Finalized | 24476 |
+| init_value_pool_denom | [`25xq33zvKJVhnFHVvEDRiYpa9A6wvrXUcjcsVSdJk6P7TWXuUh9G16RSH3RXK6sJjt8Ybs3t1SdmE6hQbqP75hp5`](https://explorer.solana.com/tx/25xq33zvKJVhnFHVvEDRiYpa9A6wvrXUcjcsVSdJk6P7TWXuUh9G16RSH3RXK6sJjt8Ybs3t1SdmE6hQbqP75hp5?cluster=devnet) | Finalized | 23015 |
+| shield | [`5UMRL4RwvgDzZVwNdgwiavQ1SKZK14XUVvDQNeTjoV8BfUe4R4TxkvcJgcz1k7WqRFcZzAMwYKBfLqBCDguACZP3`](https://explorer.solana.com/tx/5UMRL4RwvgDzZVwNdgwiavQ1SKZK14XUVvDQNeTjoV8BfUe4R4TxkvcJgcz1k7WqRFcZzAMwYKBfLqBCDguACZP3?cluster=devnet) | Finalized | 198587 |
+| transfer | [`5VBg5XuiQu1D9AxaqpHGf5s5GeYPsZhsJYHW1eyER32UQDgXUqtBc1U9y2m6vejwnSiuHRLxiGDxRb6hEEXwg3fp`](https://explorer.solana.com/tx/5VBg5XuiQu1D9AxaqpHGf5s5GeYPsZhsJYHW1eyER32UQDgXUqtBc1U9y2m6vejwnSiuHRLxiGDxRb6hEEXwg3fp?cluster=devnet) | Finalized | 193946 |
+| unshield | [`4o1csm2xpoyCkpoF1P812Drzax1tEUNsLkQdTQW4L6ecpc23SsSP6Jk3ovkAPVNDnypprfM2y1Wki9hQquytfwB6`](https://explorer.solana.com/tx/4o1csm2xpoyCkpoF1P812Drzax1tEUNsLkQdTQW4L6ecpc23SsSP6Jk3ovkAPVNDnypprfM2y1Wki9hQquytfwB6?cluster=devnet) | Finalized | 195713 |
+| denom_shield_exact | [`2pxRmiFBKSGMAfHDvkMY1zxUGmiig9rd2Bdfix4VRsgZynNcWFb6ZpmAYXsHyGDMHzZUyQBCpZEZ8i3fH9EsV8R4`](https://explorer.solana.com/tx/2pxRmiFBKSGMAfHDvkMY1zxUGmiig9rd2Bdfix4VRsgZynNcWFb6ZpmAYXsHyGDMHzZUyQBCpZEZ8i3fH9EsV8R4?cluster=devnet) | Finalized | 205407 |
 
 ### Reproduce (devnet)
 
@@ -231,7 +254,9 @@ solana program deploy --url https://api.devnet.solana.com \
   programs/mirror-pool/target/deploy/mirror_pool.so
 
 # 4. run both soaks against devnet, funding every key by system-transfer
-#    from the one master payer (no per-key airdrops).
+#    from the one master payer (no per-key airdrops). Each publishes its
+#    circuit's verifying key through `init-vk` first, and proves under the
+#    phase-2 ceremony key in ceremony/<circuit>/ (gitignored; see CEREMONY.md).
 PROG=$(solana address -k .soak/keys/devnet-program.json)
 export MIRROR_FUNDING_KEYPAIR=$PWD/.soak/keys/devnet-funder.json
 MIRROR_PROOF_JSON=$PWD/.soak/behavioral.json cargo run -p mirror-soak -- \
@@ -243,14 +268,25 @@ MIRROR_PROOF_JSON=$PWD/.soak/confidential.json \
   --shield-amount 50000000 --transfer-amount 20000000 --denomination 10000000
 ```
 
+The two `.soak/*.json` reports each carry every assertion and every signature, so
+the tables above are re-derivable from a run rather than hand-maintained. The
+`Finalized` column and the CU figures come from `solana confirm -v` over those
+signatures afterwards.
+
 ---
 
 # Local Surfpool run (mainnet mirror)
 
-The original run below is against a LOCAL Surfpool validator (a local mainnet
-mirror), kept for completeness. Its signatures are local-validator signatures,
+The two runs below are against a LOCAL Surfpool validator (a local mainnet
+mirror), kept for completeness. Their signatures are local-validator signatures,
 reproducible by re-running the soak against a fresh Surfpool, and are NOT
 lookups on a public explorer (unlike the devnet section above).
+
+**These two are HISTORICAL: they were captured against older bytecode and have
+NOT been re-run.** They are left exactly as recorded. The behavioral and
+confidential suites were re-run against the current bytecode on devnet, above;
+the only local suite that was re-run against the current bytecode is the
+funding-round soak at the bottom of this file.
 
 This documents an automated end-to-end run of `mirror-soak` against a LIVE local
 Surfpool validator (a local mainnet mirror at `http://127.0.0.1:8899`), treated as mainnet. It is NOT
@@ -482,16 +518,16 @@ to end**, NOT a production ceremony: every contribution came from one machine, s
 tool reports one independent contributor; the beacon source is a fixed demo string
 rather than a value nobody could predict; and this run's key was never deployed.
 
-> **Superseded for the membership circuit.** A separate, later ceremony - closed by a
-> real public Solana mainnet-beta blockhash rather than a demo string - produced the
-> membership key that is now committed and deployed. It is recorded in
-> "Trusted-setup ceremony - the DEPLOYED membership key" further down, and in
+> **Superseded, for all three circuits.** Separate, later ceremonies - closed by
+> real public Solana mainnet-beta blockhashes rather than a demo string - produced
+> every key that is committed and deployed today. They are recorded in
+> "Trusted-setup ceremony - the DEPLOYED keys" further down, and in
 > `docs/CEREMONY.md` section 10. Everything in *this* section is the earlier
 > demonstration run, kept as captured. Where the text below says "the committed
 > verifying key" it means the dev key that was committed at the time of capture;
-> `circuits/artifacts/verification_key.json` today holds the ceremony key, so the
+> `circuits/artifacts/*verification_key.json` today holds ceremony keys, so the
 > `snarkjs groth16 verify` transcript below would no longer reproduce verbatim
-> against that path. The transaction and association keys ARE still dev-setup keys.
+> against those paths.
 
 **The transcripts of this run are committed**, at
 `docs/ceremony-run/membership-transcript.json` (7 KB) and
@@ -740,44 +776,75 @@ the phase-1 digest, the r1cs digest and the initial-key digest will not.
 
 ---
 
-# Trusted-setup ceremony - the DEPLOYED membership key
+# Trusted-setup ceremony - the DEPLOYED keys
 
-The run above is a demonstration. This one produced the membership verifying key
-that is **actually committed and deployed**: `circuits/artifacts/vk.rs`,
-`programs/mirror-pool/src/vk.rs`, the `MEMBERSHIP_VK_SHA256` pin in
-`programs/mirror-pool/src/vk_digest.rs`, and the devnet program
-`EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`.
+The run above is a demonstration. The three below produced the verifying keys
+that are **actually committed and deployed**: `circuits/artifacts/{vk,transaction_vk,association_vk}.rs`,
+their vendored copies in `programs/mirror-pool/src/`, the three digests in
+`programs/mirror-pool/src/vk_digest.rs`, and the registry accounts of the devnet
+program `EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq`.
 
-It is a **1-independent-contributor** ceremony. It is not a large ceremony and this
-document does not present it as one; `docs/CEREMONY.md` section 10.3 states exactly
-what it does and does not buy. The transaction (JoinSplit) and association keys are
-**still dev-setup keys**.
+Each is a **1-independent-contributor** ceremony. None is a large ceremony and this
+document does not present them as such; `docs/CEREMONY.md` section 10.4 states
+exactly what one independent contributor does and does not buy. No dev-setup key
+is deployed any more.
 
-## What it was
+They differ in one respect that matters, and it is not smoothed over: the
+transaction and association ceremonies closed on a beacon slot that was
+**pre-committed in public before its value existed**, and the membership ceremony
+did not.
 
-| item | value |
-| --- | --- |
-| circuit | `membership`, r1cs sha256 `8ed379951ad0b7371b4ac53fc373b64c36ac26552802ff165dad7af4977bd0a2` |
-| phase 1 | public perpetual powers-of-tau, sha256 `1c401abb57c9ce531370f3015c3e75c0892e0f32b8b1e94ace0f6682d9695922`, 55 contributions, `2^16` slice of a `2^28` ceremony |
-| initial phase-2 key | sha256 `8c6b6c48195a4e116322cace04ec7619a9b158137bb98df37d9f78e651b15697` (deterministic from `snarkjs groth16 setup`) |
-| steps | 2: one secret-entropy contribution (`marcelo@mirror-pool`, OS randomness + user entropy), then the closing beacon |
-| independent contributors | **1** (the beacon is correctly not counted) |
-| beacon | Solana mainnet-beta slot `435825712`, blockhash `9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu`, `2^20` SHA-256 iterations |
-| beacon source string | `solana-mainnet-beta slot 435825712 blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu` |
-| final key digest | `f9d8f7f6423af7795efb379bd9686aaab2a7e5c7614e460247afb080e542c485` |
-| final transcript hash | `884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05` |
-| published transcript | `docs/ceremony-run/membership-deployed-transcript.json`, sha256 `7fcc51a3f2f846f080e134da127261a4215316d9336e5a1625c7ea9cebd381ab` |
-| canonical vk | 769 bytes, sha256 `be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76` |
+## What they were
 
-`ceremony verify` reports `CEREMONY VERIFIED`, closed by beacon, and - when the
-beacon value above is supplied - `beacon pre-commitment: checked against the value
-you supplied`. Run WITHOUT that value it says `NOT supplied`, which is the honest
-default, because the slot was chosen after the contribution rather than announced
-in advance.
+| item | membership | transaction | association |
+| --- | --- | --- | --- |
+| r1cs sha256 | `8ed37995...977bd0a2` | `908988ec...c8990063` | `a6c0e970...645297c6` |
+| phase 1 | public perpetual powers-of-tau, sha256 `1c401abb57c9ce531370f3015c3e75c0892e0f32b8b1e94ace0f6682d9695922`, 55 contributions, `2^16` slice of a `2^28` ceremony | same | same |
+| initial phase-2 key | `8c6b6c48...51b15697` | `3f7eb98b...816e8beb` | `2bbcc8ec...add5bf6e` |
+| steps | 2 (1 secret-entropy contribution, 1 beacon) | 2 | 2 |
+| independent contributors | **1** | **1** | **1** |
+| beacon slot | `435825712` | `435846661` | `435846661` |
+| beacon pre-committed? | **no** - slot chosen after the contribution | **yes** | **yes** |
+| final key digest | `f9d8f7f6423af7795efb379bd9686aaab2a7e5c7614e460247afb080e542c485` | `63f1dc3c424587e40a89670f6d0d481acc311b791155e3e37f353fc89cd0f87d` | `8d76e73f5e191cf577eb8fa971098410f772e19111a00004f52ab6411b9d0fa6` |
+| final transcript hash | `884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05` | `6d0449341db0744509782a2249e3fd8182aa4bc228f3b2774312fefd81bbaa80` | `5ef80404f6136cd2a9f843c57fe928c87200142f1a7d4c0ce181ff26f0808e1d` |
+| published transcript | `docs/ceremony-run/membership-deployed-transcript.json` | `docs/ceremony-run/transaction-deployed-transcript.json` | `docs/ceremony-run/association-deployed-transcript.json` |
+| canonical vk | 769 bytes, sha256 `be5f776d...043e4c76` | 961 bytes, sha256 `4b542099...b38e28c1` | 833 bytes, sha256 `90d13582...062832ee` |
 
-`ceremony prove-check` passes: it proves the membership circuit under the ceremony
-proving key and the real `groth16-solana` verifier accepts the proof against the
-ceremony-exported verifying key.
+The beacons, as published Solana mainnet-beta blocks:
+
+```text
+membership   slot 435825712  blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu
+transaction  slot 435846661  blockhash 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH
+association  slot 435846661  blockhash 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH
+
+source string  "solana-mainnet-beta slot <SLOT> blockhash <BLOCKHASH>"
+iterations     2^20 SHA-256 iterations
+```
+
+## The pre-commitment, and why it is the interesting part
+
+`docs/ceremony-run/BEACON-PRECOMMITMENT.md` was written and pushed while slot
+`435846661` was still roughly 25 minutes in the future, at slot `435842661`. It
+names the slot and fixes the exact source string. Nobody, the operator included,
+could predict that block's hash when the file was written.
+
+Slot `435846661` **was produced** (parent `435846660`, block height `413905124`),
+so no substitution was needed and the commitment was honoured exactly as
+written. Anyone can fetch the block, rebuild the source string, and recompute the
+beacon scalar:
+
+```sh
+solana block 435846661 --url mainnet-beta   # blockhash 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH
+```
+
+`ceremony verify` reports `CEREMONY VERIFIED`, closed by beacon, and - when that
+value is supplied - `beacon pre-commitment: checked against the value you
+supplied`, for all three. For membership that check still only proves the last
+step is the announced beacon rather than a relabelled secret contribution; it
+cannot rule out that the operator shopped for a favourable slot, because the slot
+was named afterwards. For transaction and association it can, because the slot was
+named first. That is the whole difference, and it is why the pre-commitment file
+was written before the ceremonies rather than alongside them.
 
 ## Redeploy to devnet
 
@@ -786,12 +853,12 @@ this document survive:
 
 ```text
 program id         EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq
-upgrade signature  58gKGUdvKowyv4phxNUxKxiPbbnWNps9SKhxVkLWt7V8Q7DQLhrTuH2UWhUPtDzmeSPTEBExzXYeGVeYDuGFWHm
-slot               479600717
+upgrade signature  27Hg4jV8W4UeCY9RX9kpNfwJoMVz5BE4qRMpV9AqwN1Z3Y1bygy9vMwszM4E4vhZs69otSHg3Dwrn61DDTGfVLbF
+slot               479622920
 upgrade authority  B2xLRxRKYTqusezsqhNZBPneJHsSCZn5L5ik8DqJQDGR
 ```
 
-- Upgrade transaction: https://explorer.solana.com/tx/58gKGUdvKowyv4phxNUxKxiPbbnWNps9SKhxVkLWt7V8Q7DQLhrTuH2UWhUPtDzmeSPTEBExzXYeGVeYDuGFWHm?cluster=devnet
+- Upgrade transaction: https://explorer.solana.com/tx/27Hg4jV8W4UeCY9RX9kpNfwJoMVz5BE4qRMpV9AqwN1Z3Y1bygy9vMwszM4E4vhZs69otSHg3Dwrn61DDTGfVLbF?cluster=devnet
 - Program: https://explorer.solana.com/address/EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq?cluster=devnet
 
 The on-chain bytecode was dumped back and compared against the local build:
@@ -800,8 +867,7 @@ The on-chain bytecode was dumped back and compared against the local build:
 on-chain dump      127680 bytes
 local .so          127680 bytes
 identical          yes (byte-for-byte, including the trailing zero padding)
-sha256             6b026cf95e7f76d8a45c248004f98e2f647e7fc806203e1785bdeddcbea4f466
-sha256 (padding stripped)  a5a19b4634e754a88d672604240ce87bc3a391abd07cace65d7c980ea0427566
+sha256             5b8cfdc0112b084ce3a5189333b719388a8b29a3f6300a7fed531ba4c3fa7d93
 ```
 
 ```sh
@@ -811,33 +877,36 @@ cmp /tmp/onchain.so programs/mirror-pool/target/deploy/mirror_pool.so && echo ID
 
 ## Verifying-key registry state on devnet
 
-The registry is write-once per circuit. Had a membership registry account already
-been initialized with the OLD dev key, no instruction could update it and the
-upgraded program would reject it forever. It has not been:
+The registry is write-once per circuit, and all three now hold a ceremony key:
 
 ```text
-membership   6fkK14YXovKkJQ7z2Df7sBeCGPEnRK2XGBrRkMJJbRYg   AccountNotFound
-transaction  BD1cm4jqbDHxgWX7ZfLmFaWWc1wSJFr5h68YesrkuCfW   AccountNotFound
-association  3EyfUQZFSEz1VcTkCK3EsUV5uE8XqyCBmCQHETqjhWVn   AccountNotFound
+membership   6fkK14YXovKkJQ7z2Df7sBeCGPEnRK2XGBrRkMJJbRYg   published, sha256 be5f776d...043e4c76
+transaction  BD1cm4jqbDHxgWX7ZfLmFaWWc1wSJFr5h68YesrkuCfW   published, sha256 4b542099...b38e28c1
+association  3EyfUQZFSEz1VcTkCK3EsUV5uE8XqyCBmCQHETqjhWVn   published, sha256 90d13582...062832ee
 ```
 
-checked both before and after the upgrade. So the FIRST `mirror-cli init-vk
---circuit membership` against this program installs the ceremony key, and the
-pinned digest means that is the only key it can install.
+None of them could have held anything else: `InitVk` hashes the bytes it is given
+and refuses everything but the digest the bytecode pins, and there is no update
+instruction. Their `InitVk` transactions are linked in the deployment table near
+the top of this file.
 
 ## What a third party can check, and what they cannot
 
 Reproducible from this repository and a devnet RPC:
 
 ```sh
-# 1. the transcript, with no key files, beacon value supplied
+# 1. the three deployed transcripts, with no key files, beacon values supplied
 make ceremony-verify-run
 
-# 2. the committed key hashes to the constant the program pins
-mirror-cli init-vk --circuit membership --dry-run \
-  --program-id EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq \
-  --payer <any keypair> --rpc-url https://api.devnet.solana.com
-# -> sha256(vk): be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76
+# 2. each committed key hashes to the constant the program pins
+for c in membership transaction association; do
+  mirror-cli init-vk --circuit $c --dry-run \
+    --program-id EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq \
+    --payer <any keypair> --rpc-url https://api.devnet.solana.com
+done
+# -> be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76
+#    4b542099cea5bd4dfdfd6f9d5d649bc23acd9aab35d8f3ac1a984e13b38e28c1
+#    90d13582aba26708672b3f118dea345c9636534b1b9de3fd7fce4708062832ee
 
 # 3. the deployed bytecode is the bytecode in this tree
 solana program dump EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq /tmp/onchain.so --url devnet
@@ -849,28 +918,34 @@ strip() { grep -v '^//' "$1" | awk 'NF || seen { seen = 1; print }'; }
 for c in vk transaction_vk association_vk; do
   diff <(strip "programs/mirror-pool/src/$c.rs") <(strip "circuits/artifacts/$c.rs")
 done
+
+# 5. the beacon the two pre-committed ceremonies closed on
+solana block 435846661 --url mainnet-beta
 ```
 
 Not reproducible by a third party: the key-level ceremony checks (initial-key
 binding, final-key binding, untouched-part equality, query scaling) and
-`prove-check`, all of which need the 4.7 MB `.mpk` proving keys. Those are
+`prove-check`, all of which need the multi-megabyte `.mpk` proving keys. Those are
 gitignored build artifacts and are not published, exactly as for the demonstration
 run. This document does not claim otherwise.
 
 ---
 
-> **The funding-round evidence below is local-validator only.** The numbers were
-> captured against a local Surfpool, which is where they were always claimed to
-> come from. `mirror-soak-funding` publishes the JoinSplit verifying key through
-> `init-vk` before it releases anything; the devnet program has since been
-> upgraded to bytecode that has that instruction, but the funding soak has not
-> been re-run against devnet, so nothing below is a public-cluster record.
+> **The funding-round evidence below is local-validator only, and CURRENT.** It
+> was re-run after the ceremony-key upgrade, against a fresh local deployment of
+> the identical `mirror_pool.so` (sha256
+> `5b8cfdc0112b084ce3a5189333b719388a8b29a3f6300a7fed531ba4c3fa7d93`), so it
+> describes the same bytecode as the devnet sections above. What it is NOT is a
+> public-cluster record: the signatures are local-validator signatures and resolve
+> on no explorer. `mirror-soak-funding` publishes the JoinSplit verifying key
+> through `init-vk` before it releases anything, and proves under the phase-2
+> ceremony key.
 
 <!-- funding-round-soak:begin -->
 ## Funding-round soak
 
 This section documents an automated end-to-end run of `mirror-soak-funding` against a
-LIVE local Surfpool validator (a local mainnet mirror at `http://127.0.0.1:8999`), treated as mainnet and
+LIVE local Surfpool validator (a local mainnet mirror at `http://127.0.0.1:8899`), treated as mainnet and
 run honestly. It exercises the FUNDING-PROVENANCE path through the shipped components:
 `mirror-cli shield | scan | fund-commit` on the participant side, and
 `mirror_coordinator::FundingService` + `DirectoryIntake` on the coordinator side, which
@@ -879,12 +954,12 @@ and releases each round through the gasless relay. The signatures below are
 local-validator signatures, reproducible by re-running the soak against a fresh Surfpool,
 not lookups on a public explorer.
 
-- generated: unix 1785196047
-- program id (fresh deploy): `5uZEkrQv5EaEn4jsgnWvpW7pWcG7SLnU8HN7RGBLDBKU`
-- funding ValuePool: `4KiYiBzpJ16W1nBcL5hWoFWdg1bQ7zEfsMwqwaUZGsU3` (authority / relay `7GAAPEMHQJb2xNgSEmoZHFdN3aMHBJ3JaYcUKWSjjRL8`), vault `FsSXtmoXAer8mux8UAhoxmqf29TvBeaagv6WKwHM6BS7`
-- behavioral Pool: `JADctbdSkNk9ZoTuwuTH9vfpBu5FuCbLYWG53Zrwnk25`
+- generated: unix 1785288083
+- program id (fresh deploy): `G3BZDddarBdm1rGDE9XBMuSUXYiLBPkjVpgcujjwvSf5`
+- funding ValuePool: `CKzjvGkSZJrKw4fs8F88B8iZP2j4nCj1q96Mz3427deA` (authority / relay `5AFx6bn38pJiv3GWwLG7TSd18DbEfQZ7Yaei8eFAThiZ`), vault `DwY3Bpbw4dFdDvkfkRxCttLvvaTj3iJ37MW1yHxfAtuJ`
+- behavioral Pool: `BHLqreMaQLzBdJgG9pSER5wv1KTEMGU2MsMvjKapKTgq`
 - denomination: 100000000 lamports (every shield and every funding withdrawal moves exactly this)
-- round: 12 slots, `min_round_size` 4, 4 participants; the released round was 408 at slot 4908
+- round: 12 slots, `min_round_size` 4, 4 participants; the released round was 36320433 at slot 435845208
 
 ### What was exercised
 
@@ -914,35 +989,37 @@ edge is not erased, it is turned into a matching problem; the residual is measur
 
 ### On-chain assertions
 
-25/25 assertions passed.
+27/27 assertions passed.
 
 | result | assertion | detail |
 | --- | --- | --- |
-| PASS | program deployed + executable | 5uZEkrQv5EaEn4jsgnWvpW7pWcG7SLnU8HN7RGBLDBKU |
-| PASS | denominated funding ValuePool initialized (uniform amount enforced on-chain) | vpool=4KiYiBzpJ16W1nBcL5hWoFWdg1bQ7zEfsMwqwaUZGsU3 vault=FsSXtmoXAer8mux8UAhoxmqf29TvBeaagv6WKwHM6BS7 denomination=Some(100000000) |
-| PASS | behavioral Pool initialized (the pool a funded commit wallet participates in) | pool=JADctbdSkNk9ZoTuwuTH9vfpBu5FuCbLYWG53Zrwnk25 epoch_slots=60 k_floor=2 |
+| PASS | program deployed + executable | G3BZDddarBdm1rGDE9XBMuSUXYiLBPkjVpgcujjwvSf5 |
+| PASS | JoinSplit verifying key published into its write-once registry PDA | init_vk: 58ZuzJz8jV6CK1JsdFAipJiZ2tVDjaxy4VkDNtv66grQfxjWELwNptBSUzferirt8DMCDwqmdfpygv5DdnFQ6M11 |
+| PASS | denominated funding ValuePool initialized (uniform amount enforced on-chain) | vpool=CKzjvGkSZJrKw4fs8F88B8iZP2j4nCj1q96Mz3427deA vault=DwY3Bpbw4dFdDvkfkRxCttLvvaTj3iJ37MW1yHxfAtuJ denomination=Some(100000000) |
+| PASS | funding-pool ALT created + extended (keeps a release inside one packet) | alt=3VVJ6q4YSB8LiuJcwKogbVKCZdfuxHwuCUQbChBDq5tg (5 shared accounts) |
+| PASS | behavioral Pool initialized (the pool a funded commit wallet participates in) | pool=BHLqreMaQLzBdJgG9pSER5wv1KTEMGU2MsMvjKapKTgq epoch_slots=60 k_floor=2 |
 | PASS | every participant shielded EXACTLY the denomination (uniform deposits) | vault credited 400000000 lamports = 4 x 100000000 |
 | PASS | every participant recovered a SPENDABLE note by scanning | 4 notes recovered from the on-chain enc blobs |
 | PASS | fund-commit minted a FRESH commit wallet per participant (all distinct, none a main wallet) | 4 distinct commit wallets |
 | PASS | every fresh commit wallet is UNFUNDED before the round releases | no commit wallet had any lamports at request time |
-| PASS | the coordinator INGESTED the fund-commit emits (the shipped intake path) | 3 request(s) batched into round 407 at slot 4887 |
-| PASS | a round below min_round_size ROLLS FORWARD instead of releasing | round 407 held 3 < min_round_size 4 and moved to round 408 |
+| PASS | the coordinator INGESTED the fund-commit emits (the shipped intake path) | 3 request(s) batched into round 36320432 at slot 435845187 |
+| PASS | a round below min_round_size ROLLS FORWARD instead of releasing | round 36320432 held 3 < min_round_size 4 and moved to round 36320433 |
 | PASS | a thin round reaches the chain NOT AT ALL (every commit wallet still unfunded) | all 4 commit wallets still at 0 lamports |
-| PASS | the merged round RELEASED every batched withdrawal at its boundary | round 408 released 4 withdrawals at slot 4908 |
+| PASS | the merged round RELEASED every batched withdrawal at its boundary | round 36320433 released 4 withdrawals at slot 435845208 |
 | PASS | every fresh commit wallet is credited EXACTLY the denomination | 4 wallets each credited 100000000 lamports |
 | PASS | the pool vault was debited by exactly the sum released | vault debited 400000000 lamports (= 4 x 100000000) |
 | PASS | every funding transaction carries EXACTLY ONE signature | signature counts: [1, 1, 1, 1] |
-| PASS | that one signature is the RELAY's (fee payer at account key 0) | relay 7GAAPEMHQJb2xNgSEmoZHFdN3aMHBJ3JaYcUKWSjjRL8 |
+| PASS | that one signature is the RELAY's (fee payer at account key 0) | relay 5AFx6bn38pJiv3GWwLG7TSd18DbEfQZ7Yaei8eFAThiZ |
 | PASS | no funding transaction mentions ANY participant main wallet | 4 main wallets checked against 4 funding transactions |
-| PASS | each fresh commit wallet's ONLY inbound transfer is from the pool vault | wallet F6QaK9m2B3K99eNAdkZDRRJjyFYBps4Nyv2uod6ToHhk: 1 transaction(s) in its entire history, 1 inbound, the only credit is 100000000 lamports debited from the vault FsSXtmoXAer8mux8UAhoxmqf29TvBeaagv6WKwHM6BS7 |
-| PASS | the release order within a round is ARRIVAL-INDEPENDENT (same round, reversed arrival, identical release sequence) | arrival-order run ["F6QaK9", "2MXSpY", "HWB4KQ", "CVtJTA"] == reversed-arrival run ["F6QaK9", "2MXSpY", "HWB4KQ", "CVtJTA"] |
-| PASS | the on-chain submission sequence IS the release order, not the arrival order | released ["F6QaK9", "2MXSpY", "HWB4KQ", "CVtJTA"] while participants arrived ["F6QaK9", "CVtJTA", "2MXSpY", "HWB4KQ"] |
-| PASS | the funded commit wallet COMMITS to the behavioral pool, paying its own fee | epoch 81 commit_count=1 and the wallet paid 1118600 lamports out of its pool-funded balance |
+| PASS | each fresh commit wallet's ONLY inbound transfer is from the pool vault | wallet JCgpGJvBCc5n72DGBBfo4fj6LBfXtcqVa3miio2XbdtX: 1 transaction(s) in its entire history, 1 inbound, the only credit is 100000000 lamports debited from the vault DwY3Bpbw4dFdDvkfkRxCttLvvaTj3iJ37MW1yHxfAtuJ |
+| PASS | the release order within a round is ARRIVAL-INDEPENDENT (same round, reversed arrival, identical release sequence) | arrival-order run ["9UB14F", "JCgpGJ", "H9y87L", "NX8yCd"] == reversed-arrival run ["9UB14F", "JCgpGJ", "H9y87L", "NX8yCd"] |
+| PASS | the on-chain submission sequence IS the release order, not the arrival order | released ["9UB14F", "JCgpGJ", "H9y87L", "NX8yCd"] while participants arrived ["JCgpGJ", "H9y87L", "9UB14F", "NX8yCd"] |
+| PASS | the funded commit wallet COMMITS to the behavioral pool, paying its own fee | epoch 7264087 commit_count=1 and the wallet paid 1118600 lamports out of its pool-funded balance |
 | PASS | CLI fail-fast: a wrong-amount funding request is refused client-side | Error: this value pool is denominated at 100000000 lamports; --amount 100000001 would be rejected on-chain (DenominationMismatch) and a distinctive amount re-links the funder to the funded wallet anyway  |
 | PASS | coordinator refuses an off-denomination request at the intake (no relay signature burned) | doctored-request.json: funding withdrawal of 100000001 does not match the pool denomination 100000000; a distinctive amount re-links the funder to the fundee |
 | PASS | the refused request was quarantined, not batched | the doctored emit is in rejected/ and no round holds it |
-| PASS | a mid-round submit failure RE-QUEUES the remainder instead of dropping it | the submit at release position 1 failed (submitting funding withdrawal in round 414 (index 3): send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x3: 7 log messages: Program ComputeBudget11), and 3 of 4 withdrawals moved into round 415 |
-| PASS | the withdrawal released BEFORE the failure still landed (partial release, honestly reported) | release position 0 (AjMP7JwzEgBzZ39CFEhYyVPnorXN22raVBNyoiY9CF1Y) is funded; the poisoned request at position 1 belonged to participant 3 (wallet 4nVyLCJAczDrwwoPH9nBqF1QD7wvyjY7wCtDRs3L8tq4) |
+| PASS | a mid-round submit failure RE-QUEUES the remainder instead of dropping it | the submit at release position 1 failed (submitting funding withdrawal in round 36320437 (index 3): send_and_confirm_transaction: RPC response error -32002: Transaction simulation failed: Error processing Instruction 2: custom program error: 0x3: 7 log messages: Program ComputeBud), and 3 of 4 withdrawals moved into round 36320438 |
+| PASS | the withdrawal released BEFORE the failure still landed (partial release, honestly reported) | release position 0 (ZWha4nbbechNhEdAv6KRDwUcn1r6ZZuuh2DphCu6nnx) is funded; the poisoned request at position 1 belonged to participant 3 (wallet CT2iywfMJgqjUqGdZ8iFuwdEb4aDfDMSuey5EaHXBHpR) |
 
 ### Honest notes from this run
 
@@ -952,31 +1029,32 @@ edge is not erased, it is turned into a matching problem; the residual is measur
 
 | step | signature |
 | --- | --- |
-| init_value_pool_funding | `2ELXwLLYfuz7qT1C9Edy96fEtGUJdMPX12jvAmHmobgZhfSYLihpGjb66CQAbqzioppcSdpA2qEsvFm32sBEfHbD` |
-| init_pool_behavioral | `5smnuF3DXc4FBQaYJzvxPpGyNLc8kLq4w47JgPMdT9t7YqHx6VH51dZVqVgNbEW9eKHxzo7PVXxfnHs21igdXedM` |
-| shield_0 | `5FdQiBfwyetCFhWm8Svu7roCrSyQzLHTzdXjuKWYiQTMwr3JTaptT7Jn8WcnqDKjfagL8MyNKP8w4mkFHbeRRvMj` |
-| shield_1 | `56T1cbVcfESxiCTuj3NUx3omP1tUmA6SSomjTmPcPCfvyxHzwPJWhxXHHzvK3XPRdTzeo6e1E2Ud4PEHAKwubHoG` |
-| shield_2 | `2pk67NzadSPdxJSS8bJY1w4egwJiXWBj3ZCMkhZMXvMxoPxVqR82ch4vtAA3gMYsnNVr2cbxxxtcy17zMf7Vg8ui` |
-| shield_3 | `4Ud3mFkqPAPEE1SYhYBBJpeZeZgQyQVxAt7tAcHPbASge4qDV6eKex6cuJRrDXkyYUGFHyq9sDB3uf4vrhaftzC8` |
-| funding_release_0 | `2X6v3yZfHFE1eUayhUvChKie4rnJVu9zsb4joeGMAPRR4b2bKroj25m6WuXK1i36M2g4zDiK6s57Aj5w9er1Ayyx` |
-| funding_release_1 | `2ZyxJvNYBrSVQHagKWXbujb6x1pA1kw9rXqUXxa2Kj3oUP7hqZKSjtf6C7h5eFE9H3yFct42ujzZ1GkMkZ4TnqQ6` |
-| funding_release_2 | `5yLZo4exvQJYQKkJizgw4Ujj8u1vMkmEexqTyLLWYo6QsriENzLnXRGfq9NJVszfqkTaVfDs5o2kVcj8sxpTzyC3` |
-| funding_release_3 | `57iVKcQwQikTZ5PB7p9zVQGvxhXmoqoaPD2xdWJ5JwoxB1ofyJU2aK5CU7UDMuvPqtGb3rPqhm4xJHjzyneHok2s` |
-| commit_from_funded_wallet | `3YmiBaekvnLdCvRoqdMKfujdZFCfVAzGyUHVmddLDhKnJFAnjDkH5uPaWngam9wT1j6QRpJgMPNjgcPczrLQD5xD` |
-| out_of_band_spend | `64gtFEgAMsg59WT5D3EZ7XjcSC6UFLzGern8B5csPGUWjdvJSbC3eFbjpixqBRcTBBJQ1VRw3LYGdBuxH6waCgbD` |
+| init_vk_transaction | `58ZuzJz8jV6CK1JsdFAipJiZ2tVDjaxy4VkDNtv66grQfxjWELwNptBSUzferirt8DMCDwqmdfpygv5DdnFQ6M11` |
+| init_value_pool_funding | `36Qq5EnTjx8KouV5XBrm2o2NZ5exDjPkJrkubUDRwe4mKmzmawJjwXYBZbL9Eq7QZe5PEpJZYzGamCQPtb5Frg3M` |
+| init_pool_behavioral | `27rgr9Mzy6Z1XMqnTj9vCmmAd7JtP5VH1eFYrz4zDsxDvR11JMdSa4H7vMn4CMX3LUkEoa1H6AZ4dkauXL2MjDvZ` |
+| shield_0 | `5kXyMLoWEiBd7LgeGnyHo71Zu33WtQrbPNjru7vKiC6Eq98FCsciUcgWv4995T72GMFfNp7rM3k15vpCc3GDcGBN` |
+| shield_1 | `3x3UxehonHHj4XCQSofrjCXnYasHRK59MamKtJGFZRzHrEHbH9TXX41LJ4y7p8AowAqTwUwt3DChnrxczkpbJ8WM` |
+| shield_2 | `4m2p6rBnWQbsNh2Qy7HiujcdueBS91haQWpLpGYXmwbeF1h5Q5N8hbwarxRsogBNz3KeDGZv6YR9sUeGg76mPyg2` |
+| shield_3 | `51QDB58RmQYLe22Vb7pwvcMFbibwYFmaWtJo3fhRUKzAAm1L8qnEcrf6zmfSBbV5r3h5jMwhVqPPuf8Uks2DJxQL` |
+| funding_release_0 | `3oacYzSaQtXBtafULok55K8dwQd4ozHYh2xANkYco1PEqj5cwzP6hg8XsW7j5xwic9m4XR2JceKwjVHraiFnsNga` |
+| funding_release_1 | `2oSc77Fy36vLRq8auQsg2hxubhar6gcYwNbP27YWWc3yj69Xvn5EReBCJVW9mfjYxGEm2yHVNjZtefKzDTQcA2G2` |
+| funding_release_2 | `5fCMKCSFrSFdoNa88aGTYsWMUpxRbNBajbQjJcvzs4fHTXp8C4M1h6MLhAKxKJMqDB4qR62nh4uuQW8BH5kHH4rV` |
+| funding_release_3 | `2MePWFUWkFC8Zt3hWWoFufNfqNEEUfVZwrep9VPAkvgaGCKNrGaKXbcCtpCvVMcUgG66RbuU8MsvzFedCnMmH2BR` |
+| commit_from_funded_wallet | `2bY65muzN41DTZYD3mrVogvXuZ6SPWo4DDFqyh3zxeYmpCAspkZPuvV472rpgVJSTfw3iT4uJTgoGAo1ukGZpdir` |
+| out_of_band_spend | `TWZuY3j53sYbEGFR75Mdj7GNkqHeD7qSqy9Y7n5qRhbcNyLiaJ9oEmvy84RnxyERuo6HprJEAEGHen544B8EUFS` |
 
 ### Compute units (the released funding withdrawals)
 
 | signature | compute units |
 | --- | --- |
-| `2X6v3yZfHFE1eUayhUvChKie4rnJVu9zsb4joeGMAPRR4b2bKroj25m6WuXK1i36M2g4zDiK6s57Aj5w9er1Ayyx` | 200588 |
-| `2ZyxJvNYBrSVQHagKWXbujb6x1pA1kw9rXqUXxa2Kj3oUP7hqZKSjtf6C7h5eFE9H3yFct42ujzZ1GkMkZ4TnqQ6` | 193634 |
-| `5yLZo4exvQJYQKkJizgw4Ujj8u1vMkmEexqTyLLWYo6QsriENzLnXRGfq9NJVszfqkTaVfDs5o2kVcj8sxpTzyC3` | 201994 |
-| `57iVKcQwQikTZ5PB7p9zVQGvxhXmoqoaPD2xdWJ5JwoxB1ofyJU2aK5CU7UDMuvPqtGb3rPqhm4xJHjzyneHok2s` | 195070 |
+| `3oacYzSaQtXBtafULok55K8dwQd4ozHYh2xANkYco1PEqj5cwzP6hg8XsW7j5xwic9m4XR2JceKwjVHraiFnsNga` | 200073 |
+| `2oSc77Fy36vLRq8auQsg2hxubhar6gcYwNbP27YWWc3yj69Xvn5EReBCJVW9mfjYxGEm2yHVNjZtefKzDTQcA2G2` | 199379 |
+| `5fCMKCSFrSFdoNa88aGTYsWMUpxRbNBajbQjJcvzs4fHTXp8C4M1h6MLhAKxKJMqDB4qR62nh4uuQW8BH5kHH4rV` | 200929 |
+| `2MePWFUWkFC8Zt3hWWoFufNfqNEEUfVZwrep9VPAkvgaGCKNrGaKXbcCtpCvVMcUgG66RbuU8MsvzFedCnMmH2BR` | 205530 |
 
 ### Reproduce
 
-With a local Surfpool running at `http://127.0.0.1:8999` (treated as mainnet). That endpoint is whatever
+With a local Surfpool running at `http://127.0.0.1:8899` (treated as mainnet). That endpoint is whatever
 `--rpc-url` was given for this run; `surfpool start --no-tui` listens on port 8899 by
 default, and any other port here simply means the run was pointed at one.
 
@@ -988,7 +1066,7 @@ cargo build --workspace
 # 2. deploy the program under a FRESH program id
 solana-keygen new -o .soak/keys/funding-program.json
 solana program deploy \
-  --url http://127.0.0.1:8999 \
+  --url http://127.0.0.1:8899 \
   --program-id .soak/keys/funding-program.json \
   programs/mirror-pool/target/deploy/mirror_pool.so
 
@@ -996,8 +1074,8 @@ solana program deploy \
 
 # 4. run the funding-round soak
 cargo run -p mirror-soak --bin mirror-soak-funding -- \
-  --rpc-url http://127.0.0.1:8999 \
-  --program-id 5uZEkrQv5EaEn4jsgnWvpW7pWcG7SLnU8HN7RGBLDBKU
+  --rpc-url http://127.0.0.1:8899 \
+  --program-id G3BZDddarBdm1rGDE9XBMuSUXYiLBPkjVpgcujjwvSf5
 ```
 
 Every run creates a fresh pool, fresh main wallets, and fresh commit wallets, so the run

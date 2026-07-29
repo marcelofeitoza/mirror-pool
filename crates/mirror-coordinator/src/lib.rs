@@ -59,7 +59,10 @@ pub use funding_service::{
     DirectoryIntake, FundingIntake, FundingService, FundingServiceConfig, FundingTick,
     IncomingRequest,
 };
-pub use value::{build_transact_message, submit_transact, ValueTransactRequest};
+pub use value::{
+    build_transact_message, build_transact_message_with_luts, submit_transact,
+    submit_transact_with_luts, ValueTransactRequest,
+};
 
 /// The RPC boundary (real + mockable) the crowd-path submitter builds on.
 pub mod client;

@@ -671,6 +671,59 @@ impl Chain {
         }
     }
 
+    /// The verifying key a program's write-once registry currently holds, or
+    /// `None` when nothing has been published for that circuit yet.
+    ///
+    /// The layout is `version | circuit_id | bump | reserved | vk` (see
+    /// `state::vk_registry`), and the vk's length is a pure function of the
+    /// circuit, never read from the account, so a resized or truncated account is
+    /// rejected here exactly as the program rejects it.
+    pub fn vk_registry_bytes(
+        &self,
+        registry: &Pubkey,
+        circuit_id: u8,
+        vk_len: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        /// `version | circuit_id | bump | reserved`, then the canonical key.
+        const VK_OFF: usize = 4;
+        const VERSION_UNINITIALIZED: u8 = 0;
+        const VERSION_V1: u8 = 1;
+
+        let account = self
+            .rpc
+            .get_account_with_commitment(registry, self.rpc.commitment())
+            .with_context(|| format!("reading vk registry account {registry}"))?
+            .value;
+        let Some(account) = account else {
+            return Ok(None);
+        };
+        if account.data.is_empty() {
+            return Ok(None);
+        }
+        if account.data[0] == VERSION_UNINITIALIZED {
+            return Ok(None);
+        }
+        if account.data[0] != VERSION_V1 {
+            return Err(anyhow!(
+                "vk registry {registry} has unknown version {}",
+                account.data[0]
+            ));
+        }
+        if account.data.len() < VK_OFF + vk_len {
+            return Err(anyhow!(
+                "vk registry {registry} is {} bytes, too short for a {vk_len}-byte key",
+                account.data.len()
+            ));
+        }
+        if account.data[1] != circuit_id {
+            return Err(anyhow!(
+                "vk registry {registry} serves circuit {}, not {circuit_id}",
+                account.data[1]
+            ));
+        }
+        Ok(Some(account.data[VK_OFF..VK_OFF + vk_len].to_vec()))
+    }
+
     /// Read and decode an AssociationSet account (opt-in compliance layer).
     pub fn association_state(&self, assoc: &Pubkey) -> Result<AssociationState> {
         let account = self

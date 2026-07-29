@@ -534,11 +534,16 @@ extends beyond the behavioral "not for funds" theme.
   a wallet interacted with the pool. Fixed-denomination mode narrows every public
   crossing to one uniform amount (`DenominationMismatch` otherwise), which gives
   amount k-anonymity at the boundary but does not make the magnitude private.
-- **The DEPLOYED trusted setup is development/test.** The JoinSplit verifying key
-  that is committed and deployed came from the dev setup in
-  `circuits/build_transaction.sh`, whose phase-2 entropy is a hard-coded public
-  string, so its toxic waste is public. It MUST NOT secure real value until a real
-  ceremony output is exported and the program is redeployed with it. Note that
+- **The DEPLOYED trusted setup is a ceremony with ONE independent contributor.**
+  The JoinSplit verifying key that is committed and deployed is the output of a
+  Groth16 phase-2 ceremony over the public 55-contribution powers-of-tau, closed
+  on a beacon slot pre-committed before its value existed
+  (`docs/ceremony-run/transaction-deployed-transcript.json`; the association and
+  membership keys are the same shape). Its toxic waste is therefore no longer
+  public, which the dev setup's was. What it is not is a distributed trust
+  assumption: with one contributor, soundness rests entirely on that party having
+  destroyed their scalar. Anyone unwilling to extend that trust should treat the
+  proof system as unsound for their purposes. Note that
   moving the keys into write-once, digest-pinned registry accounts
   (`docs/VK_REGISTRY.md`) does NOT touch this: it makes the key in force publicly
   readable and unswappable, which is orthogonal to whether the setup that

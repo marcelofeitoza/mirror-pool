@@ -1043,6 +1043,85 @@ fn the_committed_demo_transcripts_verify() {
     }
 }
 
+/// The transcripts of the ceremonies that produced the DEPLOYED JoinSplit and
+/// association verifying keys must verify from the committed files alone, with the
+/// PRE-COMMITTED beacon value supplied, and must still hash to the values
+/// docs/CEREMONY.md section 10 publishes.
+///
+/// Unlike the membership one, these two closed on a beacon slot announced in
+/// public before its value existed (docs/ceremony-run/BEACON-PRECOMMITMENT.md), so
+/// the beacon source is pinned here as a literal: if either transcript were ever
+/// re-closed on a different block, this fails.
+#[test]
+fn the_committed_deployed_joinsplit_and_association_transcripts_verify() {
+    const PRE_COMMITTED_BEACON: &[u8] =
+        b"solana-mainnet-beta slot 435846661 blockhash 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH";
+
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+
+    let cases: [(&str, &str, &str, &str, usize); 2] = [
+        (
+            "transaction-deployed-transcript.json",
+            "transaction",
+            "908988ec0ee6626b7d8fd39892e12166b5ec75ef1a3a259b64bdc1a6c8990063",
+            "6d0449341db0744509782a2249e3fd8182aa4bc228f3b2774312fefd81bbaa80",
+            7,
+        ),
+        (
+            "association-deployed-transcript.json",
+            "association",
+            "a6c0e9700b4f95294acc60bca5500b3537700302086e046bb7a89878645297c6",
+            "5ef80404f6136cd2a9f843c57fe928c87200142f1a7d4c0ce181ff26f0808e1d",
+            5,
+        ),
+    ];
+
+    for (file, circuit, r1cs_digest, transcript_hash, _pubinputs) in cases {
+        let path = repo.join("docs/ceremony-run").join(file);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let transcript = Transcript::from_json(&text).expect("parsing the published transcript");
+
+        let opts = verify::VerifyOptions {
+            beacon_precommitment: Some(verify::BeaconPrecommitment {
+                source: PRE_COMMITTED_BEACON,
+                iterations_exp: 20,
+            }),
+        };
+        let report = verify::verify_transcript(&transcript, &opts)
+            .unwrap_or_else(|e| panic!("{file} must verify: {e}"));
+
+        assert_eq!(report.circuit, circuit);
+        assert_eq!(report.steps, 2, "1 entropy contribution + 1 closing beacon");
+        assert_eq!(report.beacon_steps, 1);
+        assert!(report.closed_by_beacon);
+        assert!(
+            report.beacon_precommitment_checked,
+            "{file}: the PRE-COMMITTED beacon value must reproduce the recorded beacon step"
+        );
+        assert_eq!(report.circuit_r1cs_digest, r1cs_digest, "{file}");
+        assert_eq!(
+            report.final_transcript_hash, transcript_hash,
+            "{file} no longer hashes to the published value"
+        );
+        assert!(
+            report.phase1_looks_public,
+            "phase 1 must be the public multi-contribution powers-of-tau"
+        );
+        assert_eq!(report.phase1_contributions, 55);
+        // The honest count. One, exactly as for membership.
+        assert_eq!(
+            report.independence.independent_contributors, 1,
+            "{file}: one independent contributor; safety rests entirely on that party"
+        );
+    }
+}
+
 /// The transcript of the ceremony that produced the DEPLOYED membership verifying
 /// key must verify from the committed file alone, with the announced beacon value
 /// supplied, and must still hash to the value docs/CEREMONY.md section 10

@@ -139,10 +139,17 @@ key exported, vendored, pinned and deployed (`docs/CEREMONY.md` section 10,
 Solana mainnet-beta blockhash - was not pre-announced, so it is a real ceremony with
 a single point of trust, not a distributed one.
 
+The JoinSplit and association keys followed, and those two closed on a beacon slot
+**pre-committed in public before its value existed**
+(`docs/ceremony-run/BEACON-PRECOMMITMENT.md` named mainnet-beta slot `435846661`
+about 25 minutes ahead; the slot was produced and the commitment was honoured
+exactly). All three deployed keys are now ceremony outputs and no dev-setup key is
+deployed.
+
 **What is not yet done:** a ceremony with *external, mutually independent*
-contributors and a pre-announced beacon rule, and any ceremony at all for the
-JoinSplit and association circuits, whose committed and deployed keys still come
-from the insecure dev setup.
+contributors. Each of the three has one independent contributor, so each still
+reduces to trusting that single party. Re-running MEMBERSHIP on a pre-committed
+beacon is also outstanding; it would mean a new key and another program upgrade.
 
 ### The coordinator (`crates/mirror-coordinator`)
 

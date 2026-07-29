@@ -10,22 +10,26 @@ Everything described here is implemented in `crates/mirror-ceremony` and driven 
 
 > **Status of the deployed keys.**
 >
-> - **MEMBERSHIP: ceremony key, 1 independent contributor.** The membership
->   verifying key committed under `circuits/artifacts/vk.rs`, vendored into
->   `programs/mirror-pool/src/vk.rs`, pinned by `vk_digest.rs` and deployed to
->   devnet is the output of a real phase-2 ceremony over a public 55-contribution
->   powers-of-tau, closed by a Solana mainnet-beta blockhash beacon. The transcript
->   is published at [`ceremony-run/membership-deployed-transcript.json`](ceremony-run/membership-deployed-transcript.json).
->   Section 10 records it in full, including what it does *not* buy.
-> - **TRANSACTION (JoinSplit) and ASSOCIATION: still dev-setup keys.** Those two
->   came from `circuits/build_transaction.sh` / `circuits/build_association.sh`,
->   whose phase-2 entropy is a hard-coded public string. Their toxic waste is
->   public by construction, and that remains true until a ceremony is run for each
->   circuit and the program redeployed with its output.
+> **All three deployed verifying keys are phase-2 ceremony outputs.** No
+> dev-setup key is committed or deployed any more. Each ceremony ran over the
+> same public 55-contribution powers-of-tau and closed on a Solana mainnet-beta
+> blockhash beacon, and each has **one** independent contributor.
 >
-> Nothing here claims the membership ceremony was a *large* ceremony. It had one
-> independent contributor and no externally pre-announced beacon; both limits are
-> stated in section 10 and section 9.
+> | circuit | contributors | beacon slot | pre-committed? | transcript |
+> | --- | --- | --- | --- | --- |
+> | membership | 1 | `435825712` | **no** | [`membership-deployed-transcript.json`](ceremony-run/membership-deployed-transcript.json) |
+> | transaction | 1 | `435846661` | **yes** | [`transaction-deployed-transcript.json`](ceremony-run/transaction-deployed-transcript.json) |
+> | association | 1 | `435846661` | **yes** | [`association-deployed-transcript.json`](ceremony-run/association-deployed-transcript.json) |
+>
+> The last column is the one difference worth reading. The transaction and
+> association ceremonies closed on a slot that was named in public, in
+> [`ceremony-run/BEACON-PRECOMMITMENT.md`](ceremony-run/BEACON-PRECOMMITMENT.md),
+> about 25 minutes before that slot existed. The membership ceremony's slot was
+> picked after its contribution, so a verifier cannot rule out that the operator
+> shopped for a favourable block. Section 10 records all three in full, including
+> what one independent contributor does *not* buy.
+>
+> Nothing here claims any of these was a *large* ceremony.
 
 ---
 
@@ -608,11 +612,15 @@ needs is exported in the standard formats.
 
 ## 9. Limitations, stated plainly
 
-- The TRANSACTION (JoinSplit) and ASSOCIATION keys currently committed and deployed
-  are from the insecure dev setup. Nothing in this document changes that until a
-  ceremony output is exported for each and the program is redeployed. The
-  MEMBERSHIP key is a ceremony output (section 10), but with **one** independent
-  contributor and no externally pre-announced beacon.
+- All three deployed keys are ceremony outputs (section 10), but each has **one**
+  independent contributor. One-of-N honest with N=1 is not a distributed trust
+  assumption; it reduces to trusting that single party. The dev setups in
+  `circuits/build*.sh` still exist and are still insecure, but nothing they
+  produce is committed or deployed.
+- The MEMBERSHIP ceremony's beacon slot was chosen after its contribution rather
+  than announced in advance. The transaction and association ceremonies closed on
+  a pre-committed slot; membership did not, and re-running it would mean a new key
+  and another program upgrade.
 - Only the endpoints of the chain are algebraically verified against each other.
   Intermediate keys are committed by digest; a party holding an intermediate file can
   check it, a verifier holding only the endpoints relies on the per-step proofs of
@@ -640,109 +648,145 @@ needs is exported in the standard formats.
 
 ---
 
-## 10. The membership ceremony that produced the deployed key
+## 10. The three ceremonies that produced the deployed keys
 
-This section records the ceremony whose output is the membership verifying key in
-`circuits/artifacts/vk.rs`, `programs/mirror-pool/src/vk.rs`, the digest in
-`programs/mirror-pool/src/vk_digest.rs`, and the deployed devnet program.
+This section records the ceremonies whose outputs are the verifying keys in
+`circuits/artifacts/{vk,transaction_vk,association_vk}.rs`, their vendored copies
+in `programs/mirror-pool/src/`, the three digests in
+`programs/mirror-pool/src/vk_digest.rs`, and the registry accounts of the deployed
+devnet program.
 
-### 10.1 What it was
+### 10.1 What they were
 
 ```text
-circuit                  membership
-r1cs sha256              8ed379951ad0b7371b4ac53fc373b64c36ac26552802ff165dad7af4977bd0a2
+                         membership          transaction         association
+r1cs sha256              8ed37995...977bd0a2 908988ec...c8990063 a6c0e970...645297c6
+phase 1 sha256           1c401abb57c9ce531370f3015c3e75c0892e0f32b8b1e94ace0f6682d9695922 (all three)
 phase 1                  public perpetual powers-of-tau, bn254, 2^16 slice of a 2^28 ceremony
-phase 1 sha256           1c401abb57c9ce531370f3015c3e75c0892e0f32b8b1e94ace0f6682d9695922
 phase 1 contributions    55  (weijie, kobi, poma, ... , closed by its own beacon)
-initial key digest       8c6b6c48195a4e116322cace04ec7619a9b158137bb98df37d9f78e651b15697
-steps                    2   (1 secret-entropy contribution, 1 beacon)
-INDEPENDENT CONTRIBUTORS 1
-final key digest         f9d8f7f6423af7795efb379bd9686aaab2a7e5c7614e460247afb080e542c485
-final transcript hash    884c88601173b1f08bd2e26626b0fe4c553dedffe707b2387db754417a9cdd05
+initial key digest       8c6b6c48...51b15697 3f7eb98b...816e8beb 2bbcc8ec...add5bf6e
+steps                    2                   2                   2
+                         (1 secret-entropy contribution, 1 beacon, each)
+INDEPENDENT CONTRIBUTORS 1                   1                   1
+final key digest         f9d8f7f6...e542c485 63f1dc3c...9cd0f87d 8d76e73f...1b9d0fa6
+final transcript hash    884c8860...7a9cdd05 6d044934...81bbaa80 5ef80404...f0808e1d
+canonical vk             769 bytes           961 bytes           833 bytes
+sha256(canonical vk)     be5f776d...043e4c76 4b542099...b38e28c1 90d13582...062832ee
 ```
 
-The beacon that closed it is a public Solana mainnet-beta block:
+Those three `sha256(canonical vk)` values are exactly `MEMBERSHIP_VK_SHA256`,
+`TRANSACTION_VK_SHA256` and `ASSOCIATION_VK_SHA256` in
+`programs/mirror-pool/src/vk_digest.rs`.
+
+The beacons that closed them are public Solana mainnet-beta blocks:
 
 ```text
-slot        435825712
-blockhash   9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu
-source      "solana-mainnet-beta slot 435825712 blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu"
-iterations  2^20 SHA-256 iterations
+membership   slot 435825712  blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu
+transaction  slot 435846661  blockhash 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH
+association  slot 435846661  blockhash 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH
+
+source       "solana-mainnet-beta slot <SLOT> blockhash <BLOCKHASH>"
+iterations   2^20 SHA-256 iterations
 ```
 
-The resulting on-chain artifacts:
+### 10.2 The pre-commitment, and the one way membership differs
 
-```text
-canonical vk length      769 bytes
-sha256(canonical vk)     be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76
-                         (= MEMBERSHIP_VK_SHA256 in programs/mirror-pool/src/vk_digest.rs)
-```
+A beacon only removes the last contributor's ability to grind the final key if the
+source was fixed *in advance*, where "in advance" means published before the value
+could be known. Otherwise the operator can wait, look at several candidate blocks,
+and close on whichever produces a key they like.
 
-### 10.2 How to check it yourself
+[`ceremony-run/BEACON-PRECOMMITMENT.md`](ceremony-run/BEACON-PRECOMMITMENT.md) was
+written and pushed at slot `435842661`, naming slot `435846661` and fixing the
+exact source string. That is roughly 25 minutes of lead time, over a chain whose
+block hashes nobody can predict.
 
-The transcript is published as
-[`ceremony-run/membership-deployed-transcript.json`](ceremony-run/membership-deployed-transcript.json)
-(sha256 `7fcc51a3f2f846f080e134da127261a4215316d9336e5a1625c7ea9cebd381ab`). It is
-the file the ceremony produced, unedited. Check it with no key files at all, and
-with the beacon value supplied so the beacon step is checked rather than trusted:
+Slot `435846661` **was produced** (parent `435846660`, block height `413905124`),
+so the commitment was honoured exactly as written: no substitution, no "next
+produced slot" fallback. The transaction and association ceremonies both closed on
+it.
+
+The membership ceremony, which was run and deployed earlier, has a real public
+beacon but a slot chosen *after* its contribution. Supplying the value to `verify`
+still proves the last step is that beacon rather than a relabelled secret
+contribution; it cannot prove the slot was not shopped for. Re-running membership
+on a pre-committed beacon would produce a different key and require another
+program upgrade, so it has not been done, and this is said rather than blurred.
+
+### 10.3 How to check it yourself
+
+The three transcripts are published under
+[`ceremony-run/`](ceremony-run/). They are the files the ceremonies produced,
+unedited. Check each with no key files at all, and with the beacon value supplied
+so the beacon step is checked rather than trusted:
 
 ```sh
 mirror-cli ceremony verify-transcript \
-  --file docs/ceremony-run/membership-deployed-transcript.json \
-  --beacon-source-text "solana-mainnet-beta slot 435825712 blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu" \
+  --file docs/ceremony-run/transaction-deployed-transcript.json \
+  --beacon-source-text "solana-mainnet-beta slot 435846661 blockhash 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH" \
   --beacon-iterations-exp 20
 ```
 
-`make ceremony-verify-run` runs exactly that, next to the demo transcripts.
-
-To confirm the deployed key really is this ceremony's output, recompute the pin
-from the committed key and compare it against the program constant:
+`make ceremony-verify-run` runs exactly that for all three, next to the demo
+transcripts. The blockhash is not taken on trust either:
 
 ```sh
-mirror-cli init-vk --circuit membership --dry-run \
-  --program-id EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq \
-  --payer <any keypair> --rpc-url https://api.devnet.solana.com
-# sha256(vk): be5f776d2a4ba83655c50a9ecf47192cd3aa74075cd9e3d8a62bd99e043e4c76
+solana block 435846661 --url mainnet-beta   # 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH
 ```
 
-and check the deployed bytecode carries that constant:
+To confirm the deployed keys really are these ceremonies' outputs, recompute each
+pin from the committed key and compare it against the program constant:
+
+```sh
+for c in membership transaction association; do
+  mirror-cli init-vk --circuit $c --dry-run \
+    --program-id EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq \
+    --payer <any keypair> --rpc-url https://api.devnet.solana.com
+done
+```
+
+and check the deployed bytecode carries those constants:
 
 ```sh
 solana program dump EezWdFrmHtR2PCuucUruvkgyB9HW3w2KskZNeYmXszBq /tmp/onchain.so --url devnet
 cmp /tmp/onchain.so programs/mirror-pool/target/deploy/mirror_pool.so
 ```
 
-The decisive functional check, which needs the key file and therefore only the
-operator can run it as published, is `ceremony prove-check`: it proves the
-membership circuit under the ceremony proving key and hands the proof to the real
-`groth16-solana` verifier with the ceremony-exported verifying key. It passes.
-The same property is asserted by the repo's own live tests
-(`rust_prove_membership_verifies_and_on_chain_verifier_accepts` and
-`rust_prove_fresh_inputs_verifies_under_the_committed_vk`, run with
-`MIRROR_PROVE_LIVE=1 cargo test -p mirror-cli -- --ignored rust_prove`), the
-second of which proves over inputs the committed fixture never saw.
+The decisive functional checks need the key files, so only the operator can run
+them as published:
 
-### 10.3 What it does NOT buy
+- `ceremony prove-check` for membership: proves the circuit under the ceremony
+  proving key and hands the proof to the real `groth16-solana` verifier with the
+  ceremony-exported verifying key. It passes.
+- `ceremony prove-fixture` for the other two: re-proves each committed fixture's
+  witness under the ceremony key, REQUIRES the resulting public signals to equal
+  the ones the previous fixture published, and then runs the same on-chain
+  verifier. That is how `circuits/artifacts/{transaction,association}_proof_fixture.json`
+  and the shield/unshield fixtures were regenerated when these keys were deployed:
+  same witnesses, same public signals, new proofs.
 
-- **One independent contributor.** 1-of-N honest with N=1 is not a distributed
-  trust assumption: it reduces to "the single contributor sampled real randomness
-  and destroyed the scalar". Anyone who does not accept that has no reason to
-  accept the key. This is strictly better than the dev setup, whose entropy is a
-  hard-coded public string anyone can re-derive, and strictly worse than a
-  ceremony with external participants.
-- **The beacon was not pre-committed.** The value is public and was unpredictable
-  before its slot existed, and supplying it to `verify` confirms the last step
-  really is that beacon and not a relabelled secret contribution. But the *slot*
-  was picked after the contribution rather than announced in advance, so a
-  verifier cannot rule out that the operator waited and chose a favourable block.
-  Run without `--beacon-source-*`, `verify` says so explicitly:
-  `beacon pre-commitment: NOT supplied`. A future run should publish the beacon
-  rule (for example "the mainnet-beta blockhash at the first slot after
-  <timestamp>") before contributions open.
-- **The key files are not published.** As with the demo run, the `.mpk` files are
-  multi-megabyte artifacts and are gitignored, so a third party cannot re-run the
-  key-level checks (initial-key binding, final-key binding, untouched-part
-  equality, query scaling) for this run. Transcript-level checks are fully
-  reproducible; key-level ones are not.
-- **It says nothing about the other two circuits.** The JoinSplit and association
-  keys are still dev-setup keys.
+Everything downstream of those fixtures IS third-party reproducible: `cargo test
+--workspace` and the mollusk suite verify the committed proofs against the
+committed keys with no ceremony directory present, and they fail loudly if a key
+and a fixture ever drift apart.
+
+### 10.4 What they do NOT buy
+
+- **One independent contributor each.** 1-of-N honest with N=1 is not a
+  distributed trust assumption: it reduces to "the single contributor sampled real
+  randomness and destroyed the scalar". Anyone who does not accept that has no
+  reason to accept the keys. This is strictly better than the dev setup, whose
+  entropy is a hard-coded public string anyone can re-derive, and strictly worse
+  than a ceremony with external participants. The count comes from `verify`, which
+  merges steps sharing a contributor id or a machine fingerprint, so it refuses to
+  inflate a solo run into three.
+- **The membership beacon was not pre-committed.** Section 10.2. The other two
+  were.
+- **The key files are not published.** The `.mpk` files are multi-megabyte
+  artifacts and are gitignored, so a third party cannot re-run the key-level checks
+  (initial-key binding, final-key binding, untouched-part equality, query scaling)
+  for any of these runs. Transcript-level checks are fully reproducible; key-level
+  ones are not.
+- **No protocol can verify a contributor destroyed their scalar.** That is true of
+  every ceremony, and it is the reason the contributor count is the number that
+  matters.

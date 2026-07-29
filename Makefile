@@ -45,13 +45,23 @@ ceremony-test:
 # beacon value supplied so the beacon step is checked rather than trusted. Needs a
 # built mirror-cli.
 #
-# The FIRST one is the ceremony that produced the DEPLOYED membership verifying key
-# (docs/CEREMONY.md section 10). The other two are the recorded demonstration run
-# with fictional contributors (section 6.1); they prove the machinery, not a key.
+# The FIRST THREE are the ceremonies that produced the DEPLOYED verifying keys
+# (docs/CEREMONY.md section 10); the transaction and association ones closed on a
+# beacon slot pre-committed before its value existed. The last two are the
+# recorded demonstration run with fictional contributors (section 6.1); they prove
+# the machinery, not a key.
 ceremony-verify-run:
 	cargo run -p mirror-cli -- ceremony verify-transcript \
 	  --file docs/ceremony-run/membership-deployed-transcript.json \
 	  --beacon-source-text "solana-mainnet-beta slot 435825712 blockhash 9Gth2wVt86WhS1fh5FS7FihGvxyaesunW28M3zjD46Eu" \
+	  --beacon-iterations-exp 20
+	cargo run -p mirror-cli -- ceremony verify-transcript \
+	  --file docs/ceremony-run/transaction-deployed-transcript.json \
+	  --beacon-source-text "solana-mainnet-beta slot 435846661 blockhash 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH" \
+	  --beacon-iterations-exp 20
+	cargo run -p mirror-cli -- ceremony verify-transcript \
+	  --file docs/ceremony-run/association-deployed-transcript.json \
+	  --beacon-source-text "solana-mainnet-beta slot 435846661 blockhash 67Y5hxUdXtxczqCcFnQkcqmPXJUDbSq7yKFGqhUzWLgH" \
 	  --beacon-iterations-exp 20
 	cargo run -p mirror-cli -- ceremony verify-transcript \
 	  --file docs/ceremony-run/membership-transcript.json \

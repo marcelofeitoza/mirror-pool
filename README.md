@@ -145,7 +145,7 @@ honest against the tree.
 | Confidential notes + client ops | `crates/mirror-core` + `mirror-cli` + `mirror-coordinator` | **Implemented** - ECIES encrypted notes + `scan` discovery; `value-keygen`/`shield`/`transfer`/`unshield` (pure-Rust ark-groth16 prove + emit, no Node); gasless `submit_transact` (transfer/unshield relay-only signed = the unlinkability). |
 | Confidential soak | `crates/mirror-soak` | **Implemented** - live shield -> hidden-amount transfer -> unshield + fixed-denom + adversarial, 25/25 on-chain assertions ([`docs/PROOF.md`](docs/PROOF.md)). |
 | Funding-round soak | `crates/mirror-soak` | **Implemented** - live `fund-commit` -> coordinator ingestion -> thin-round roll-forward -> batched gasless release -> commit from the funded wallet, plus the adversarial cases, 25/25 on-chain assertions on local Surfpool ([`docs/PROOF.md`](docs/PROOF.md)). |
-| Trusted-setup ceremony | `crates/mirror-ceremony` + `mirror-cli ceremony` | **Implemented** - distributable multi-party Groth16 phase-2 ceremony for both circuits: public phase-1 import + provenance reader, delta re-randomization, Schnorr proof of knowledge bound to the contributor id, the position in the chain and the step's kind and provenance, SHA-256 transcript chain, an enforced beacon-is-final rule, reproducible verification (rejects tampered deltas, forged/replayed proofs, reordered and truncated chains, post-beacon steps and relabelled beacons - each tested), and an independent-contributor count that refuses to count self-runs. `ceremony prove-check` proves the membership circuit under a ceremony key and the on-chain `groth16-solana` verifier accepts it; `ceremony verify-transcript` checks a published transcript with no key files. The demonstration run's transcripts are committed under `docs/ceremony-run/`. **Run for the MEMBERSHIP circuit: the deployed membership key is a ceremony output with 1 independent contributor, closed by a public Solana mainnet-beta blockhash beacon (transcript: [`docs/ceremony-run/membership-deployed-transcript.json`](docs/ceremony-run/membership-deployed-transcript.json)). The JoinSplit and association keys are still dev-setup keys.** See [`docs/CEREMONY.md`](docs/CEREMONY.md). |
+| Trusted-setup ceremony | `crates/mirror-ceremony` + `mirror-cli ceremony` | **Implemented** - distributable multi-party Groth16 phase-2 ceremony for both circuits: public phase-1 import + provenance reader, delta re-randomization, Schnorr proof of knowledge bound to the contributor id, the position in the chain and the step's kind and provenance, SHA-256 transcript chain, an enforced beacon-is-final rule, reproducible verification (rejects tampered deltas, forged/replayed proofs, reordered and truncated chains, post-beacon steps and relabelled beacons - each tested), and an independent-contributor count that refuses to count self-runs. `ceremony prove-check` proves the membership circuit under a ceremony key and the on-chain `groth16-solana` verifier accepts it; `ceremony verify-transcript` checks a published transcript with no key files, and `ceremony prove-fixture` re-proves a committed fixture under a ceremony key while REQUIRING its public signals to be unchanged. The demonstration run's transcripts are committed under `docs/ceremony-run/`. **Run for ALL THREE circuits: every deployed key is a ceremony output with 1 independent contributor, closed by a public Solana mainnet-beta blockhash beacon; the JoinSplit and association ceremonies closed on a PRE-COMMITTED slot (`docs/ceremony-run/BEACON-PRECOMMITMENT.md`), the membership one did not.** See [`docs/CEREMONY.md`](docs/CEREMONY.md). |
 
 "Implemented" means the component's core logic is complete and tested. It does
 not mean "deployed": the ceremony row above is the one place where that
@@ -155,12 +155,13 @@ distinction bites, and it is labelled. The 301 host workspace tests
 25/25 on-chain assertions) are all green. See the roadmap for future work
 (swap/stake-from-pool via CPI, confidential deposits, wiring and soaking the
 funding leg, and the ZK-path anonymity-mining incentive). The multi-party phase-2
-trusted-setup ceremony is built, tested, and has now been RUN for the membership
-circuit: the committed and deployed membership verifying key is that ceremony's
-output (1 independent contributor, closed by a public Solana mainnet-beta
-blockhash beacon). What remains there is running one with *external* contributors,
-and running one at all for the JoinSplit and association circuits, whose keys are
-still dev-setup keys. Where those keys
+trusted-setup ceremony is built, tested, and has now been RUN for ALL THREE
+circuits: every committed and deployed verifying key is a ceremony output, each
+with 1 independent contributor, each closed by a public Solana mainnet-beta
+blockhash beacon. The JoinSplit and association ceremonies closed on a beacon slot
+that was pre-committed in public before its value existed; the membership one,
+which was deployed earlier, did not. What remains there is running one with
+*external* contributors. Where those keys
 live changed too: each one is now published into a write-once, program-owned
 account whose contents the program pins to a compile-time SHA-256, so the key in
 force is publicly readable and still cannot be swapped
@@ -328,21 +329,20 @@ reasoning, and the set the ZK path actually gives, are in
   anonymity to anyone who clusters the operator; they are excluded from
   `real_k`. A pool with real `k=1` provides no anonymity regardless of nominal
   size.
-- **One of the three deployed trusted setups is a real ceremony; the other two
-  are still dev/test.** The MEMBERSHIP key committed and deployed here is the
-  output of a real Groth16 phase-2 ceremony over a public 55-contribution
-  powers-of-tau, closed by a Solana mainnet-beta blockhash beacon
-  (`docs/ceremony-run/membership-deployed-transcript.json`, final transcript hash
-  `884c8860...`). It had **1 independent contributor**, so the 1-of-N honest
-  assumption collapses to "that single party destroyed their scalar" - stronger
-  than a published hard-coded seed, but still a single point of trust, and the
-  beacon slot was chosen after the fact rather than announced in advance. The
-  confidential-value **JoinSplit** key and the **association** key came from a
-  single-contributor dev setup whose phase-2 entropy is a hard-coded public
-  string, so their toxic waste is public and they must not secure real value.
-  Running the same ceremony for those two circuits, and running the membership
-  one again with external contributors and a pre-announced beacon, is what closes
-  this ([`docs/CEREMONY.md`](docs/CEREMONY.md)). A `k`-contributor ceremony is
+- **All three deployed trusted setups are real ceremonies, each with ONE
+  independent contributor.** Every committed and deployed verifying key here is
+  the output of a Groth16 phase-2 ceremony over the same public 55-contribution
+  powers-of-tau, closed by a Solana mainnet-beta blockhash beacon; the transcripts
+  are published under `docs/ceremony-run/`. No dev-setup key is deployed. But each
+  ceremony had **1 independent contributor**, so the 1-of-N honest assumption
+  collapses to "that single party destroyed their scalar" - much stronger than a
+  published hard-coded seed, and still a single point of trust. The JoinSplit and
+  association ceremonies closed on a beacon slot pre-committed in public before
+  its value existed (`docs/ceremony-run/BEACON-PRECOMMITMENT.md`); the membership
+  ceremony's slot was chosen after its contribution, so for that one a verifier
+  cannot rule out that the operator shopped for a favourable block. Running these
+  again with external, mutually independent contributors is what closes the
+  remaining gap ([`docs/CEREMONY.md`](docs/CEREMONY.md)). A `k`-contributor ceremony is
   1-of-N honest: safe if *at least one* contributor destroyed their scalar, not
   if `k` did.
 - **It is not a Sybil oracle.** Real k-anonymity assumes participants are

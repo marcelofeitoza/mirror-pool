@@ -133,16 +133,15 @@ entropy string so the build is reproducible, which by definition makes the toxic
 waste public. It is NOT a secure ceremony and MUST NOT be used to secure real
 value.
 
-**The MEMBERSHIP key is no longer one of them.** `artifacts/verification_key.json`
-and `artifacts/vk.rs` now hold the output of a real phase-2 ceremony (1 independent
-contributor, closed by a public Solana mainnet-beta blockhash beacon), and the
-deployed program pins its digest. `build.sh` will overwrite those two files with a
-fresh DEV key if you re-run it - see the note below.
+**None of the three committed keys is one of them any more.** All three
+`artifacts/*_verification_key.json` + `artifacts/*_vk.rs` pairs hold the output of a
+real phase-2 ceremony (1 independent contributor each, each closed by a public
+Solana mainnet-beta blockhash beacon; the JoinSplit and association ones on a
+PRE-COMMITTED slot), and the deployed program pins their digests.
 
-**The TRANSACTION (JoinSplit) and ASSOCIATION keys committed in `artifacts/` and
-pinned by the deployed program still came from the dev setup. That remains true for
-those two until a ceremony output is exported for each and the program is
-redeployed with it.**
+**Re-running any `build*.sh` will overwrite the committed artifacts with a fresh
+DEV key**, which is then rejected by `vk_digest::digests_match_the_vendored_keys`
+and by every on-chain fixture test. See the note below.
 
 > **Re-running `build.sh` clobbers the ceremony key.** Step 3 runs its own
 > `snarkjs zkey contribute` with the hard-coded dev entropy and writes
@@ -192,7 +191,7 @@ scalar (1-of-N honest), not if `k` of them did. See the guide for what that does
 and does not buy you.
 
 `pot16_final.ptau`, the phase-1 file every committed artifact was built from - the
-dev setups and the membership ceremony alike -
+dev setups and all three ceremonies alike -
 records **55 contributions from named contributors at ceremony power 2^28** - the
 signature of a public perpetual-powers-of-tau file rather than a self-generated one.
 Its SHA-256 is

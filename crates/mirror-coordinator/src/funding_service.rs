@@ -210,7 +210,9 @@ impl FundingIntake for DirectoryIntake {
 }
 
 /// Static configuration for the funding service.
-#[derive(Clone, Copy, Debug)]
+///
+/// No longer `Copy`: `rounds` carries owned lookup-table addresses.
+#[derive(Clone, Debug)]
 pub struct FundingServiceConfig {
     /// Round length, minimum round size, and the pool denomination.
     pub rounds: FundingRoundConfig,
@@ -268,7 +270,7 @@ impl FundingService {
             "the funding service needs at least one relay key"
         );
         Ok(Self {
-            rounds: FundingRounds::new(config.rounds)?,
+            rounds: FundingRounds::new(config.rounds.clone())?,
             config,
             relays,
             intake,
@@ -481,6 +483,7 @@ mod tests {
                     round_slots: 100,
                     min_round_size,
                     denomination,
+                    lookup_tables: Vec::new(),
                 },
                 poll_interval: Duration::from_millis(1),
             },

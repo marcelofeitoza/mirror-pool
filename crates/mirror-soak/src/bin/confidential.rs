@@ -48,7 +48,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 
 use mirror_coordinator::client::{RpcSolanaClient, SolanaClient};
-use mirror_coordinator::{submit_transact, TxProfile, ValueTransactRequest};
+use mirror_coordinator::{
+    setup_pool_alt, submit_transact_with_luts, TxProfile, ValueTransactRequest,
+};
 use mirror_soak::{
     begin_proof_section, ceremony_head_key, checks_table, cli_bin, first_line, fund, hex_decode,
     install_vk, is_custom, lamports, new_keypair, note_is_spendable, parse_kv, read_vpool,
@@ -59,6 +61,7 @@ use mirror_soak::{
 
 use solana_instruction::AccountMeta;
 use solana_keypair::Keypair;
+use solana_message::AddressLookupTableAccount;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 
@@ -188,13 +191,22 @@ impl Emit {
 
 /// Submit a request through the gasless coordinator, returning the signature
 /// string on success or the rendered error string on failure.
+/// Submit one Transact through the gasless relay, compressing the pool's static
+/// accounts through `luts`.
+///
+/// The lookup table is not an optimization here, it is what makes the shield case
+/// fit: a Transact carries a 256-byte proof, seven public inputs and two
+/// encrypted-note blobs, and since the verifying key moved into a registry
+/// account the instruction takes one more account than it used to, which pushes
+/// the inline form past the 1232-byte packet limit.
 async fn submit(
     client: &dyn SolanaClient,
     relay: &Keypair,
     req: &ValueTransactRequest,
     extra: &[&Keypair],
+    luts: &[AddressLookupTableAccount],
 ) -> std::result::Result<String, String> {
-    submit_transact(client, relay, req, extra)
+    submit_transact_with_luts(client, relay, req, extra, luts)
         .await
         .map(|s| s.to_string())
         .map_err(|e| format!("{e:#}"))
@@ -300,9 +312,13 @@ async fn main() -> Result<()> {
     report.check(
         "JoinSplit verifying key published into its write-once registry PDA",
         !vk_sig.is_empty(),
-        format!("init_vk signature={vk_sig}"),
+        format!("init_vk: {vk_sig}"),
     );
-    report.sig("init_vk_transaction", &vk_sig);
+    // Only a real publication has a signature to record; an idempotent
+    // "already published" run has nothing to link to.
+    if !vk_sig.starts_with("already published") {
+        report.sig("init_vk_transaction", &vk_sig);
+    }
 
     let vpool = value_pool_pda(&program_id, &relay.pubkey());
     let vault = value_vault_pda(&program_id, &vpool);
@@ -379,6 +395,39 @@ async fn main() -> Result<()> {
     println!("  main vpool: {vpool}");
     println!("  main vault: {vault} (baseline rent {vault_baseline} lamports)");
     println!("  denom vpool: {vpool2}");
+
+    // One Address Lookup Table for the accounts that are identical in every
+    // Transact against these two pools. Without it the shield case does not fit
+    // in a 1232-byte packet: the instruction carries a 256-byte proof, seven
+    // 32-byte public inputs and two encrypted-note blobs, and since the verifying
+    // key moved into a registry account it takes one more account than it used
+    // to. The two nullifier PDAs change every settlement and the signers cannot
+    // be looked up, so those stay inline.
+    let vk_registry = Pubkey::find_program_address(
+        &[VK_REGISTRY_SEED, &[mirror_core::wire::CIRCUIT_TRANSACTION]],
+        &program_id,
+    )
+    .0;
+    let shared = vec![
+        program_id,
+        SYSTEM_PROGRAM_ID,
+        vk_registry,
+        vpool,
+        vault,
+        vpool2,
+        vault2,
+    ];
+    let alt = setup_pool_alt(client.as_ref(), &relay, &payer, shared)
+        .await
+        .context("setup_pool_alt for the value pools")?;
+    report.check(
+        "value-pool ALT created + extended (keeps a Transact inside one packet)",
+        alt.addresses.len() == 7,
+        format!("alt={} ({} shared accounts)", alt.key, alt.addresses.len()),
+    );
+    // A freshly extended table is only usable from the NEXT slot onward.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let luts = vec![alt];
     println!();
 
     // Alice + Bob confidential wallets (value spend key + X25519 viewing key).
@@ -460,7 +509,7 @@ async fn main() -> Result<()> {
 
     let before = read_vpool(client.as_ref(), &vpool).await?;
     let shield_req = shield.request(&program_id)?;
-    let shield_sig = submit(client.as_ref(), &relay, &shield_req, &[&depositor])
+    let shield_sig = submit(client.as_ref(), &relay, &shield_req, &[&depositor], &luts)
         .await
         .map_err(|e| anyhow!("shield submit failed: {e}"))?;
     report.sig("shield", &shield_sig);
@@ -502,7 +551,7 @@ async fn main() -> Result<()> {
     );
 
     // Adversarial: replay the shield -> its dummy nullifiers are already spent.
-    let replay = submit(client.as_ref(), &relay, &shield_req, &[&depositor]).await;
+    let replay = submit(client.as_ref(), &relay, &shield_req, &[&depositor], &luts).await;
     report.check(
         "shield replay rejected (NullifierSpent)",
         replay
@@ -628,7 +677,7 @@ async fn main() -> Result<()> {
     } else {
         bail!("transfer transact_data too short to mutate");
     }
-    let mutated = submit(client.as_ref(), &relay, &mutated_req, &[]).await;
+    let mutated = submit(client.as_ref(), &relay, &mutated_req, &[], &luts).await;
     report.check(
         "mutated public input rejected (ProofVerificationFailed)",
         mutated
@@ -645,7 +694,7 @@ async fn main() -> Result<()> {
     // The clean transfer, submitted gasless (relay-only signer: unlinkability).
     let before = read_vpool(client.as_ref(), &vpool).await?;
     let vault_before_transfer = lamports(client.as_ref(), &vault).await?;
-    let transfer_sig = submit(client.as_ref(), &relay, &transfer_req, &[])
+    let transfer_sig = submit(client.as_ref(), &relay, &transfer_req, &[], &luts)
         .await
         .map_err(|e| anyhow!("transfer submit failed: {e}"))?;
     report.sig("transfer", &transfer_sig);
@@ -758,7 +807,7 @@ async fn main() -> Result<()> {
     let before = read_vpool(client.as_ref(), &vpool).await?;
     let vault_before_unshield = lamports(client.as_ref(), &vault).await?;
     let unshield_req = unshield.request(&program_id)?;
-    let unshield_sig = submit(client.as_ref(), &relay, &unshield_req, &[])
+    let unshield_sig = submit(client.as_ref(), &relay, &unshield_req, &[], &luts)
         .await
         .map_err(|e| anyhow!("unshield submit failed: {e}"))?;
     report.sig("unshield", &unshield_sig);
@@ -841,7 +890,7 @@ async fn main() -> Result<()> {
     let before = read_vpool(client.as_ref(), &vpool2).await?;
     let vault2_before = lamports(client.as_ref(), &vault2).await?;
     let denom_req = denom_shield.request(&program_id)?;
-    let denom_sig = submit(client.as_ref(), &relay2, &denom_req, &[&depositor])
+    let denom_sig = submit(client.as_ref(), &relay2, &denom_req, &[&depositor], &luts)
         .await
         .map_err(|e| anyhow!("denom shield submit failed: {e}"))?;
     report.sig("denom_shield_exact", &denom_sig);
@@ -873,7 +922,7 @@ async fn main() -> Result<()> {
         &dpool.current_root,
         wrong_amount,
     );
-    let mismatch = submit(client.as_ref(), &relay2, &mismatch_req, &[]).await;
+    let mismatch = submit(client.as_ref(), &relay2, &mismatch_req, &[], &luts).await;
     report.check(
         "on-chain: wrong-denomination deposit rejected (DenominationMismatch)",
         mismatch
